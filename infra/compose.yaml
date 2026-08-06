@@ -1,0 +1,321 @@
+name: ${COMPOSE_PROJECT_NAME:-projet-m2}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-backend-build: &backend-build
+  context: ../backend
+  dockerfile: Dockerfile
+
+x-backend-environment: &backend-environment
+  APP_ENV: ${APP_ENV:-development}
+  PKA_ENVIRONMENT: ${APP_ENV:-development}
+  PKA_REPOSITORY_BACKEND: memory
+  PKA_AUTH_MODE: dev_headers
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  TZ: ${TZ:-UTC}
+  DATABASE_HOST: postgres
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: ${POSTGRES_DB:-projet_m2}
+  DATABASE_USER: ${POSTGRES_USER:-projet_m2}
+  DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+  POSTGRES_POOL_SIZE: ${POSTGRES_POOL_SIZE:-10}
+  POSTGRES_MAX_OVERFLOW: ${POSTGRES_MAX_OVERFLOW:-20}
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_DB: ${REDIS_DB:-0}
+  REDIS_PASSWORD_FILE: /run/secrets/redis_password
+  GROQ_API_BASE_URL: ${GROQ_API_BASE_URL:-https://api.groq.com/openai/v1}
+  GROQ_API_KEY_FILE: /run/secrets/groq_api_key
+  GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+  TOKEN_ENCRYPTION_KEY_FILE: /run/secrets/token_encryption_key
+  SESSION_SIGNING_KEY_FILE: /run/secrets/session_signing_key
+  OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-https://identity.example.invalid}
+  OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-projet-m2-web}
+  JIRA_MCP_URL: ${JIRA_MCP_URL:-https://jira-mcp.example.invalid/mcp}
+  CONFLUENCE_MCP_URL: ${CONFLUENCE_MCP_URL:-https://confluence-mcp.example.invalid/mcp}
+  FIGMA_MCP_URL: ${FIGMA_MCP_URL:-https://figma-mcp.example.invalid/mcp}
+  MCP_READ_ENABLED: ${MCP_READ_ENABLED:-false}
+  MCP_MUTATIONS_ENABLED: ${MCP_MUTATIONS_ENABLED:-false}
+  JIRA_MCP_ENABLED: ${JIRA_MCP_ENABLED:-false}
+  CONFLUENCE_MCP_ENABLED: ${CONFLUENCE_MCP_ENABLED:-false}
+  FIGMA_MCP_ENABLED: ${FIGMA_MCP_ENABLED:-false}
+  FIGMA_WRITE_ENABLED: ${FIGMA_WRITE_ENABLED:-false}
+  MAX_AGENT_STEPS: ${MAX_AGENT_STEPS:-12}
+  MAX_MCP_CALLS_PER_TURN: ${MAX_MCP_CALLS_PER_TURN:-8}
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+  OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
+  METRICS_ENABLED: ${METRICS_ENABLED:-true}
+
+x-backend-secrets: &backend-secrets
+  - postgres_password
+  - redis_password
+  - groq_api_key
+  - token_encryption_key
+  - session_signing_key
+
+services:
+  frontend:
+    image: ${FRONTEND_IMAGE:-projet-m2-frontend:local}
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      APP_ENV: ${APP_ENV:-development}
+      API_INTERNAL_URL: ${API_INTERNAL_URL:-http://api:8000}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-https://identity.example.invalid}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-projet-m2-web}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-http://localhost:3000/auth/callback}
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      SESSION_SIGNING_KEY_FILE: /run/secrets/session_signing_key
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+    secrets:
+      - oidc_client_secret
+      - session_signing_key
+    ports:
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - edge
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  api:
+    image: ${BACKEND_IMAGE:-projet-m2-backend:local}
+    build: *backend-build
+    init: true
+    restart: unless-stopped
+    environment:
+      <<: *backend-environment
+      OTEL_SERVICE_NAME: projet-m2-api
+      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3000}
+    secrets: *backend-secrets
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - edge
+      - data
+      - egress
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  worker:
+    image: ${BACKEND_IMAGE:-projet-m2-backend:local}
+    build: *backend-build
+    init: true
+    restart: unless-stopped
+    command:
+      - celery
+      - -A
+      - ${CELERY_APP:-app.worker.celery_app}
+      - worker
+      - --loglevel=${LOG_LEVEL:-INFO}
+      - --concurrency=${CELERY_CONCURRENCY:-2}
+    environment:
+      <<: *backend-environment
+      OTEL_SERVICE_NAME: projet-m2-worker
+      CELERY_APP: ${CELERY_APP:-app.worker.celery_app}
+    secrets: *backend-secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          celery -A "$${CELERY_APP}" inspect ping
+          --destination "celery@$${HOSTNAME}" --timeout 5
+          | grep -q pong
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    networks:
+      - data
+      - egress
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 60s
+    logging: *default-logging
+
+  postgres:
+    image: ${PGVECTOR_IMAGE:-pgvector/pgvector:pg16}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-projet_m2}
+      POSTGRES_USER: ${POSTGRES_USER:-projet_m2}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: ${TZ:-UTC}
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -h 127.0.0.1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - data
+    stop_grace_period: 60s
+    logging: *default-logging
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - |
+        exec redis-server \
+          --appendonly yes \
+          --appendfsync everysec \
+          --save 60 1000 \
+          --requirepass "$$(cat /run/secrets/redis_password)"
+    secrets:
+      - redis_password
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          REDISCLI_AUTH="$$(cat /run/secrets/redis_password)"
+          redis-cli -h 127.0.0.1 ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - data
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  migrate:
+    profiles: [ops]
+    image: ${BACKEND_IMAGE:-projet-m2-backend:local}
+    build: *backend-build
+    restart: "no"
+    command: [alembic, upgrade, head]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: ${POSTGRES_DB:-projet_m2}
+      DATABASE_USER: ${POSTGRES_USER:-projet_m2}
+      DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  postgres-backup:
+    profiles: [ops]
+    image: ${PGVECTOR_IMAGE:-pgvector/pgvector:pg16}
+    restart: "no"
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        backup_file="/backups/$${POSTGRES_DB}_$$(date -u +%Y%m%dT%H%M%SZ).dump"
+        export PGPASSWORD="$$(cat /run/secrets/postgres_password)"
+        pg_dump --host=postgres --username="$${POSTGRES_USER}" \
+          --dbname="$${POSTGRES_DB}" --format=custom --file="$$backup_file"
+        sha256sum "$$backup_file" > "$$backup_file.sha256"
+        echo "Backup written to $$backup_file"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-projet_m2}
+      POSTGRES_USER: ${POSTGRES_USER:-projet_m2}
+    secrets:
+      - postgres_password
+    volumes:
+      - ./backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  edge:
+    driver: bridge
+  data:
+    driver: bridge
+    internal: true
+  egress:
+    driver: bridge
+
+secrets:
+  postgres_password:
+    file: ${SECRETS_DIR:-./secrets/dev}/postgres_password
+  redis_password:
+    file: ${SECRETS_DIR:-./secrets/dev}/redis_password
+  groq_api_key:
+    file: ${SECRETS_DIR:-./secrets/dev}/groq_api_key
+  token_encryption_key:
+    file: ${SECRETS_DIR:-./secrets/dev}/token_encryption_key
+  session_signing_key:
+    file: ${SECRETS_DIR:-./secrets/dev}/session_signing_key
+  oidc_client_secret:
+    file: ${SECRETS_DIR:-./secrets/dev}/oidc_client_secret

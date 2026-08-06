@@ -1,0 +1,2 @@
+"""Project knowledge assistant backend."""
+

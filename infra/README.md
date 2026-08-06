@@ -1,0 +1,221 @@
+# Infrastructure du MVP
+
+Ce dossier decrit le premier deploiement de la plateforme : frontend Next.js, API FastAPI, worker Celery, PostgreSQL avec pgvector et Redis. Jira, Confluence et Figma restent accessibles par des serveurs MCP distants ; Groq reste un service externe. Neo4j, MinIO et une pile d'observabilite locale ne font pas partie du premier increment.
+
+Le fichier `compose.yaml` est un contrat d'integration. Les images applicatives ne pourront etre construites qu'une fois les Dockerfiles et points d'entree frontend/backend presents.
+
+## Topologie
+
+```text
+Navigateur -> frontend/BFF -> api -> PostgreSQL/pgvector
+                              |  -> Redis <- worker
+                              |
+                              +  -> Groq et MCP via reseau egress
+```
+
+- `edge` relie le frontend et l'API. Seuls leurs ports sont publies, sur `127.0.0.1` par defaut.
+- `data` est un reseau interne sans sortie Internet pour PostgreSQL et Redis.
+- `egress` donne a l'API et au worker un chemin sortant. Compose ne filtre pas les domaines : en preproduction/production, un pare-feu ou proxy doit limiter la sortie aux endpoints Groq, OIDC et MCP approuves.
+- PostgreSQL et Redis ne publient aucun port hote.
+- Les mutations MCP et les trois connecteurs sont desactives par defaut (`default deny`).
+
+## Pre-requis des scaffolds
+
+Le Compose attend les fichiers et conventions suivants :
+
+```text
+frontend/Dockerfile
+  - image de production Next.js
+  - ecoute sur 0.0.0.0:3000
+  - route GET /api/health
+  - lecture serveur de API_INTERNAL_URL et des variables *_FILE
+
+backend/Dockerfile
+  - image Python commune a api, worker et migrate
+  - CMD par defaut lancant FastAPI sur 0.0.0.0:8000
+  - executable celery et module app.worker.celery_app
+  - executable alembic et fichier alembic.ini
+  - route GET /health/ready qui verifie au minimum DB et Redis
+  - lecture des secrets *_FILE avant construction des clients
+```
+
+Le backend doit construire ses DSN depuis `DATABASE_*` et `REDIS_*` sans ecrire les mots de passe dans les logs. Les noms de module Celery et les chemins de healthcheck pourront etre ajustes dans Compose si le scaffold adopte d'autres conventions.
+
+## Demarrage local
+
+1. Copier `infra/.env.example` vers `infra/.env` et conserver ce dernier hors Git.
+2. Creer `infra/secrets/dev/` et `infra/backups/`.
+3. Creer un fichier d'une seule ligne pour chacun des secrets suivants :
+
+   - `postgres_password` ;
+   - `redis_password` ;
+   - `groq_api_key` ;
+   - `token_encryption_key` ;
+   - `session_signing_key` ;
+   - `oidc_client_secret`.
+
+   Utiliser des valeurs aleatoires distinctes. Ne jamais copier leur contenu dans `.env`, les logs, une image ou un prompt. Les fichiers sont ignores par `infra/.gitignore`.
+
+4. Valider la configuration :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml config
+```
+
+5. Construire les images, puis lancer les dependances :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml build
+docker compose --env-file infra/.env -f infra/compose.yaml up -d postgres redis
+```
+
+6. Appliquer les migrations avant de demarrer une nouvelle version applicative :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml --profile ops run --rm migrate
+```
+
+7. Lancer l'application et verifier son etat :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml up -d api worker frontend
+docker compose --env-file infra/.env -f infra/compose.yaml ps
+docker compose --env-file infra/.env -f infra/compose.yaml logs --tail 100 api worker frontend
+```
+
+L'interface est disponible sur `http://localhost:3000`. Le port API `http://localhost:8000` est publie uniquement pour le diagnostic local ; le navigateur doit normalement passer par le BFF et une origine unique.
+
+Pour arreter sans supprimer les donnees :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml down
+```
+
+Ne pas utiliser `down --volumes` en dehors d'une remise a zero explicitement autorisee : cela detruit les volumes PostgreSQL et Redis.
+
+## Migrations
+
+- Alembic est le proprietaire du schema PostgreSQL, y compris l'activation versionnee de l'extension `vector`.
+- Une migration s'execute une seule fois par deploiement au moyen du service `migrate` du profil `ops`.
+- En production, le pipeline lance la migration comme job distinct avant la bascule du trafic.
+- Utiliser des migrations compatibles avec l'ancienne et la nouvelle version (`expand/contract`) pour permettre un rollback applicatif.
+- Toute migration destructive exige une sauvegarde verifiee, une fenetre approuvee et un plan de restauration. Une descente Alembic automatique n'est pas consideree comme un rollback fiable des donnees.
+
+## Sauvegarde et restauration
+
+PostgreSQL contient les conversations, approbations, audits applicatifs, liaisons et index RAG. Redis est un broker/cache reprenable et ne doit jamais etre l'unique stockage d'un workflow ou d'une intention de mutation.
+
+Pour produire un dump logique manuel horodate et son SHA-256 :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml --profile ops run --rm postgres-backup
+```
+
+Le dump est ecrit dans `infra/backups/`. Il doit ensuite etre chiffre et copie hors de l'hote. Ne pas conserver une cle de chiffrement avec la sauvegarde.
+
+Baseline provisoire a faire valider avant production :
+
+- sauvegarde PostgreSQL chiffree quotidienne et avant migration a risque ;
+- conservation de 7 sauvegardes quotidiennes et 4 hebdomadaires ;
+- test de restauration mensuel dans un environnement isole ;
+- PostgreSQL manage avec sauvegardes continues/PITR pour la production ;
+- export regulier du journal d'audit vers un stockage append-only/WORM ;
+- RPO/RTO definitifs fixes apres connaissance des volumes et obligations metier.
+
+Procedure minimale de restauration : isoler l'environnement cible, verifier le checksum et dechiffrer le dump hors du depot, provisionner une base vide compatible, executer `pg_restore`, verifier les migrations et les invariants d'audit, puis effectuer les smoke tests. Les connexions MCP et mutations restent coupees jusqu'a revalidation des grants et permissions. La restauration est une operation destructive sur la base cible et doit etre approuvee ; aucun service de restauration automatique n'est fourni dans Compose.
+
+## Secrets
+
+Les fichiers locaux sous `infra/secrets/` servent uniquement au developpement. Les applications recoivent leurs chemins `/run/secrets/...`, jamais les valeurs dans des variables versionnees.
+
+En preproduction et production :
+
+- utiliser un coffre de secrets et une identite de workload ;
+- monter ou injecter les secrets a l'execution avec separation par environnement ;
+- chiffrer les refresh tokens par enveloppe avec une cle KMS/HSM ;
+- faire tourner les cles et grants, avec revocation documentee ;
+- ne mettre dans les variables d'environnement que des references au coffre ;
+- scanner images, logs, traces et sauvegardes pour les secrets.
+
+Les secrets OAuth propres aux MCP seront ajoutes une fois les serveurs, audiences et flux de delegation choisis. Aucun jeton utilisateur ne doit devenir une variable Compose statique.
+
+## Observabilite
+
+Les conteneurs ecrivent des logs structures sur stdout/stderr avec rotation locale. Les champs minimum attendus sont `timestamp`, `level`, `service`, `environment`, `trace_id`, `correlation_id`, `tenant_id` pseudonymise, `workflow_id`, `action_id`, `tool_id` et un code d'erreur normalise. Les tokens, cookies, en-tetes d'autorisation, prompts bruts et contenus sensibles sont expurges avant emission.
+
+L'API et le worker doivent etre instrumentes avec OpenTelemetry. `OTEL_SDK_DISABLED=true` garde l'export coupe tant qu'un collecteur n'est pas provisionne. Pour la production, exporter vers une plateforme geree ou un collecteur separe et surveiller au minimum :
+
+- latence, debit et taux d'erreur HTTP/SSE ;
+- saturation du pool PostgreSQL, taille de base et echecs de migration ;
+- profondeur, age et taux d'echec/retry des files Celery ;
+- disponibilite et latence Redis ;
+- latence, erreurs, timeouts et circuit breakers par MCP ;
+- appels/tokens/latence Groq et budgets par tenant, sans contenu de prompt ;
+- refus de permission, outils inconnus, injections detectees et activation des kill switches ;
+- propositions en attente, expirees, partielles ou en reconciliation ;
+- continuite de la chaine d'audit et age de la derniere sauvegarde restauree.
+
+Alertes minimales : mutations sans evenement d'audit complet, erreurs inter-tenant, outil/schema inconnu, file bloquee, taux d'erreur MCP eleve, base presque pleine, sauvegarde absente et tentative repetee de contournement d'approbation.
+
+## Environnements et promotion
+
+| Environnement | Donnees | Execution | Secrets |
+|---|---|---|---|
+| Local | fixtures et comptes sandbox | Docker Compose | fichiers ignores par Git |
+| CI | donnees ephemeres synthetiques | Compose avec projet unique par job | secrets temporaires/canary |
+| Integration | tenants Jira/Confluence/Figma sandbox | images du registre | coffre non-production |
+| Preproduction | donnees anonymisees ou sandbox realiste | meme topologie logique que production | coffre et identites dedies |
+| Production | donnees autorisees | images immuables, DB/Redis manages, ingress TLS | coffre/KMS/HSM |
+
+Une image est construite une fois, scannee, signee et promue par digest. La configuration et les comptes sont distincts par environnement. Les mutations restent desactivees jusqu'a validation des exigences `SEC-*`, des MCP exacts et de la matrice de permissions reelle.
+
+Plan de deploiement :
+
+1. valider configuration, versions d'images, schemas MCP allowlistes et kill switches ;
+2. verifier sauvegarde/restauration et capacite disponible ;
+3. appliquer les migrations compatibles ;
+4. deployer API et worker avec mutations coupees ;
+5. executer healthchecks et smoke tests de lecture/RAG ;
+6. deployer le frontend et verifier session, SSE, citations et approbations sans execution ;
+7. activer progressivement les MCP de lecture par tenant pilote ;
+8. activer une mutation seulement apres tests d'approbation, revalidation, idempotence, audit et procedure de coupure ;
+9. observer les indicateurs et conserver une fenetre de rollback.
+
+## Runbook minimal
+
+### Service indisponible
+
+1. Consulter `docker compose ... ps` puis les logs du service, par `correlation_id`.
+2. Verifier l'etat PostgreSQL/Redis, l'espace disque, la file Celery et la derniere migration.
+3. Si une source externe est indisponible, ouvrir le circuit correspondant et ne jamais presenter une mutation comme reussie.
+4. Redemarrer uniquement le service concerne apres capture des diagnostics.
+
+### Suspicion de fuite, token ou MCP compromis
+
+1. Passer `MCP_MUTATIONS_ENABLED=false` et desactiver le MCP concerne, puis recreer `api` et `worker`.
+2. Revoquer les grants/sessions concernes et effectuer la rotation des secrets.
+3. Isoler les chunks RAG suspects et conserver les preuves/audits.
+4. Identifier les actions par `trace_id`, `action_id` et cle d'idempotence.
+5. Ne reactiver qu'apres correction, rotation, reindexation necessaire et tests de securite.
+
+### Execution au resultat ambigu
+
+1. Placer l'action en `UNKNOWN_RECONCILIATION_REQUIRED`.
+2. Suspendre tout retry automatique.
+3. Rechercher l'objet cote source avec la correlation/idempotence approuvee.
+4. Renseigner le resultat reel et reprendre uniquement les sous-actions non executees.
+
+### Rollback
+
+- Revenir au digest applicatif precedent si les migrations restent compatibles.
+- Ne pas lancer automatiquement une migration descendante.
+- Si les donnees sont alterees, isoler le trafic, obtenir l'approbation de restauration, restaurer dans une base controlee et reconcilier les actions externes ; un rollback local ne peut pas annuler automatiquement une mutation deja reussie dans Jira, Confluence ou Figma.
+
+## Limites connues du squelette
+
+- Les Dockerfiles frontend/backend, le worker Celery et les migrations Alembic ne sont pas encore disponibles. Les routes de santé FastAPI existent mais la readiness devra vérifier PostgreSQL et Redis lorsque ces adaptateurs seront branchés.
+- Les versions/digests d'images devront etre pinnees et verifiees avant un deploiement partage.
+- Le fournisseur OIDC, les serveurs MCP, leurs audiences, leurs outils et leur modele de delegation restent a choisir.
+- Compose ne fournit ni TLS, ni filtrage egress par domaine, ni haute disponibilite, ni stockage WORM.
+- Les SLO, RPO/RTO, volumetries, retention et residence des donnees restent a valider.
+- Le chargement local de `BAAI/bge-m3` suppose que l'image worker embarque le modele ou qu'un service d'embeddings soit defini ulterieurement ; aucun telechargement implicite n'est declenche ici.
