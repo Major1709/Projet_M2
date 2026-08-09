@@ -175,7 +175,7 @@ Le projet est organisé autour de huit rôles :
 7. QA / Test Automation.
 8. DevOps / SRE.
 
-L'environnement autorise quatre exécutions simultanées, agent principal inclus. Les rôles travaillent donc par vagues de trois spécialistes, avec l'architecte en continu. Les règles détaillées figurent dans `docs/architecture/agent-operating-model.md`.
+L'environnement autorise quatre exécutions simultanées, agent principal inclus. L'architecte active dynamiquement jusqu'à trois spécialistes lorsque leurs périmètres sont indépendants. Le contrat opérationnel réutilisable de l'équipe figure dans `AGENTS.md` ; le modèle initial du Sprint 0 reste archivé dans `docs/architecture/agent-operating-model.md`.
 
 ## État du projet après le Sprint 0
 

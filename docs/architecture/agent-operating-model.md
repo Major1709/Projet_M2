@@ -1,5 +1,10 @@
 # Mode de collaboration des 8 agents
 
+> Le contrat opérationnel courant et réutilisable de l'équipe de développement est
+> désormais [`AGENTS.md`](../../AGENTS.md). En cas de divergence, `AGENTS.md` fait
+> autorité. Le contenu ci-dessous conserve la description du modèle initial du
+> Sprint 0 à titre historique.
+
 ## Équipe
 
 1. Architecte / Tech Lead — agent principal et intégrateur.
