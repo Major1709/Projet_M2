@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from app.approvals.domain import (
     ActionDecision,
     ActionProposalCreate,
+    ActionProposalCreatedView,
     ActionProposalView,
     ActionRevision,
     ActionRevisionView,
@@ -14,6 +15,7 @@ from app.approvals.errors import (
     ApprovalError,
     InvalidDecisionToken,
     InvalidTransition,
+    ProposalConversationNotFound,
     ProposalNotFound,
     VersionConflict,
 )
@@ -28,7 +30,7 @@ def get_workflow(request: Request) -> ApprovalWorkflow:
 
 
 def translate_domain_error(error: ApprovalError) -> HTTPException:
-    if isinstance(error, ProposalNotFound):
+    if isinstance(error, (ProposalNotFound, ProposalConversationNotFound)):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
     if isinstance(error, InvalidDecisionToken):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
@@ -37,13 +39,20 @@ def translate_domain_error(error: ApprovalError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error))
 
 
-@router.post("", response_model=ActionProposalView, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ActionProposalCreatedView, status_code=status.HTTP_201_CREATED)
 def create_action_proposal(
     command: ActionProposalCreate,
     context: Annotated[SecurityContext, Depends(get_development_security_context)],
     workflow: Annotated[ApprovalWorkflow, Depends(get_workflow)],
-) -> ActionProposalView:
-    return ActionProposalView.from_domain(workflow.propose(command, context))
+) -> ActionProposalCreatedView:
+    try:
+        issued = workflow.propose(command, context)
+        return ActionProposalCreatedView(
+            **ActionProposalView.from_domain(issued.proposal).model_dump(),
+            decision_token=issued.decision_token,
+        )
+    except ApprovalError as error:
+        raise translate_domain_error(error) from error
 
 
 @router.get("/{proposal_id}", response_model=ActionProposalView)
@@ -92,10 +101,11 @@ def revise_action_proposal(
     workflow: Annotated[ApprovalWorkflow, Depends(get_workflow)],
 ) -> ActionRevisionView:
     try:
-        superseded, replacement = workflow.revise(proposal_id, revision, context)
+        issued = workflow.revise(proposal_id, revision, context)
         return ActionRevisionView(
-            superseded=ActionProposalView.from_domain(superseded),
-            replacement=ActionProposalView.from_domain(replacement),
+            superseded=ActionProposalView.from_domain(issued.superseded),
+            replacement=ActionProposalView.from_domain(issued.replacement),
+            decision_token=issued.decision_token,
         )
     except ApprovalError as error:
         raise translate_domain_error(error) from error

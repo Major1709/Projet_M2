@@ -1,6 +1,5 @@
 import hashlib
 import json
-import secrets
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Self
@@ -105,7 +104,7 @@ class ActionProposal(BaseModel):
     execution_context_hash: str
     state: ActionProposalState = ActionProposalState.PENDING_APPROVAL
     version: int = 1
-    decision_token: str | None = None
+    decision_token_hash: str | None = Field(default=None, min_length=64, max_length=64)
     supersedes_id: UUID | None = None
     approved_by_user_id: str | None = None
     decision_reason: str | None = None
@@ -120,6 +119,7 @@ class ActionProposal(BaseModel):
         tenant_id: str,
         proposed_by_user_id: str,
         execution_context_hash: str,
+        decision_token_hash: str,
         supersedes_id: UUID | None = None,
     ) -> "ActionProposal":
         payload_json = canonical_json(command.payload)
@@ -147,7 +147,7 @@ class ActionProposal(BaseModel):
             diff_json=diff_json,
             correlation_id=command.correlation_id,
             execution_context_hash=execution_context_hash,
-            decision_token=secrets.token_urlsafe(32),
+            decision_token_hash=decision_token_hash,
             supersedes_id=supersedes_id,
         )
 
@@ -177,7 +177,6 @@ class ActionProposalView(BaseModel):
     execution_context_hash: str
     state: ActionProposalState
     version: int
-    decision_token: str | None
     supersedes_id: UUID | None
     approved_by_user_id: str | None
     decision_reason: str | None
@@ -187,15 +186,22 @@ class ActionProposalView(BaseModel):
     @classmethod
     def from_domain(cls, proposal: ActionProposal) -> "ActionProposalView":
         return cls(
-            **proposal.model_dump(exclude={"payload_json", "diff_json"}),
+            **proposal.model_dump(
+                exclude={"payload_json", "diff_json", "decision_token_hash"}
+            ),
             payload=proposal.payload,
             diff=proposal.diff,
         )
 
 
+class ActionProposalCreatedView(ActionProposalView):
+    decision_token: str
+
+
 class ActionRevisionView(BaseModel):
     superseded: ActionProposalView
     replacement: ActionProposalView
+    decision_token: str
 
 
 def canonical_json(value: Any) -> str:

@@ -2,7 +2,10 @@
 
 Ce dossier decrit le premier deploiement de la plateforme : frontend Next.js, API FastAPI, worker Celery, PostgreSQL avec pgvector et Redis. Jira, Confluence et Figma restent accessibles par des serveurs MCP distants ; Groq reste un service externe. Neo4j, MinIO et une pile d'observabilite locale ne font pas partie du premier increment.
 
-Le fichier `compose.yaml` est un contrat d'integration. Les images applicatives ne pourront etre construites qu'une fois les Dockerfiles et points d'entree frontend/backend presents.
+Le fichier `compose.yaml` est un contrat d'integration. Le parcours backend pris en
+charge dans cet increment est `postgres -> migrate -> api`. Le service `worker`
+reste un contrat reserve a l'increment asynchrone : Celery et son point d'entree ne
+sont pas encore livres et ce service ne doit pas etre demarre.
 
 ## Topologie
 
@@ -33,13 +36,18 @@ frontend/Dockerfile
 backend/Dockerfile
   - image Python commune a api, worker et migrate
   - CMD par defaut lancant FastAPI sur 0.0.0.0:8000
-  - executable celery et module app.worker.celery_app
   - executable alembic et fichier alembic.ini
-  - route GET /health/ready qui verifie au minimum DB et Redis
+  - route GET /health/ready qui verifie PostgreSQL
   - lecture des secrets *_FILE avant construction des clients
 ```
 
-Le backend doit construire ses DSN depuis `DATABASE_*` et `REDIS_*` sans ecrire les mots de passe dans les logs. Les noms de module Celery et les chemins de healthcheck pourront etre ajustes dans Compose si le scaffold adopte d'autres conventions.
+L'API et Alembic construisent la meme URL SQLAlchemy depuis
+`PKA_DATABASE_HOST`, `PKA_DATABASE_PORT`, `PKA_DATABASE_NAME`,
+`PKA_DATABASE_USER` et `PKA_DATABASE_PASSWORD_FILE`. Les reglages de pool sont
+`PKA_DATABASE_POOL_SIZE` et `PKA_DATABASE_MAX_OVERFLOW`. Le mot de passe reste
+dans le fichier monte sous `/run/secrets` ; l'URL complete ne doit jamais etre
+ecrite dans les logs. PostgreSQL reste accessible uniquement depuis le reseau
+Compose `data` et ne publie pas de port sur l'hote.
 
 ## Demarrage local
 
@@ -56,17 +64,18 @@ Le backend doit construire ses DSN depuis `DATABASE_*` et `REDIS_*` sans ecrire 
 
    Utiliser des valeurs aleatoires distinctes. Ne jamais copier leur contenu dans `.env`, les logs, une image ou un prompt. Les fichiers sont ignores par `infra/.gitignore`.
 
-4. Valider la configuration :
+4. Valider la configuration sans afficher l'environnement resolu :
 
 ```powershell
-docker compose --env-file infra/.env -f infra/compose.yaml config
+docker compose --env-file infra/.env -f infra/compose.yaml config --quiet
 ```
 
-5. Construire les images, puis lancer les dependances :
+5. Construire l'image backend, puis lancer PostgreSQL et attendre son healthcheck :
 
 ```powershell
-docker compose --env-file infra/.env -f infra/compose.yaml build
-docker compose --env-file infra/.env -f infra/compose.yaml up -d postgres redis
+docker compose --env-file infra/.env -f infra/compose.yaml build api migrate
+docker compose --env-file infra/.env -f infra/compose.yaml up -d --wait postgres
+docker compose --env-file infra/.env -f infra/compose.yaml ps postgres
 ```
 
 6. Appliquer les migrations avant de demarrer une nouvelle version applicative :
@@ -75,15 +84,41 @@ docker compose --env-file infra/.env -f infra/compose.yaml up -d postgres redis
 docker compose --env-file infra/.env -f infra/compose.yaml --profile ops run --rm migrate
 ```
 
-7. Lancer l'application et verifier son etat :
+7. Verifier la revision Alembic et l'extension `vector` sans afficher de secret :
 
 ```powershell
-docker compose --env-file infra/.env -f infra/compose.yaml up -d api worker frontend
-docker compose --env-file infra/.env -f infra/compose.yaml ps
-docker compose --env-file infra/.env -f infra/compose.yaml logs --tail 100 api worker frontend
+docker compose --env-file infra/.env -f infra/compose.yaml --profile ops run --rm migrate python -m alembic current
+docker compose --env-file infra/.env -f infra/compose.yaml exec -T postgres sh -lc 'psql --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --tuples-only --no-align --command="SELECT version_num FROM alembic_version;"'
+docker compose --env-file infra/.env -f infra/compose.yaml exec -T postgres sh -lc 'psql --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --tuples-only --no-align --command="SELECT extname, extversion FROM pg_extension ORDER BY extname;"'
 ```
 
-L'interface est disponible sur `http://localhost:3000`. Le port API `http://localhost:8000` est publie uniquement pour le diagnostic local ; le navigateur doit normalement passer par le BFF et une origine unique.
+8. Lancer l'API. Redis est demarre automatiquement comme dependance Compose,
+   mais le worker reste hors tranche :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml up -d --wait api
+docker compose --env-file infra/.env -f infra/compose.yaml ps api postgres redis
+Invoke-RestMethod http://localhost:8000/health/ready
+docker compose --env-file infra/.env -f infra/compose.yaml logs --tail 100 api
+```
+
+Le port API `http://localhost:8000` est publie uniquement pour le diagnostic local.
+Le navigateur devra normalement passer par le BFF et une origine unique lorsque
+le parcours frontend sera lance.
+
+Pour verifier la persistance, creer une conversation synthetique, conserver son
+identifiant, recreer uniquement l'API, puis relire la conversation :
+
+```powershell
+$headers = @{ "X-Tenant-ID" = "qa-local"; "X-User-ID" = "qa-user" }
+$body = @{ title = "Persistence smoke test" } | ConvertTo-Json
+$created = Invoke-RestMethod -Method Post -Uri http://localhost:8000/api/conversations -Headers $headers -ContentType "application/json" -Body $body
+docker compose --env-file infra/.env -f infra/compose.yaml up -d --force-recreate --wait api
+Invoke-RestMethod -Method Get -Uri "http://localhost:8000/api/conversations/$($created.id)" -Headers $headers
+```
+
+Ce test utilise exclusivement des identifiants synthetiques locaux. Il ne doit
+jamais etre execute avec des donnees ou comptes de production.
 
 Pour arreter sans supprimer les donnees :
 
@@ -97,9 +132,23 @@ Ne pas utiliser `down --volumes` en dehors d'une remise a zero explicitement aut
 
 - Alembic est le proprietaire du schema PostgreSQL, y compris l'activation versionnee de l'extension `vector`.
 - Une migration s'execute une seule fois par deploiement au moyen du service `migrate` du profil `ops`.
+- Le service `migrate` reutilise le meme constructeur d'URL et la meme metadata SQLAlchemy que l'API ; `alembic.ini` ne contient aucune URL ni aucun secret.
 - En production, le pipeline lance la migration comme job distinct avant la bascule du trafic.
 - Utiliser des migrations compatibles avec l'ancienne et la nouvelle version (`expand/contract`) pour permettre un rollback applicatif.
 - Toute migration destructive exige une sauvegarde verifiee, une fenetre approuvee et un plan de restauration. Une descente Alembic automatique n'est pas consideree comme un rollback fiable des donnees.
+
+Avant une migration sur une base non ephemere :
+
+1. verifier `docker compose ... config --quiet`, les versions d'images et l'espace disque ;
+2. verifier que PostgreSQL est sain et qu'aucun autre job de migration n'est actif ;
+3. consulter `python -m alembic current`, `heads` et `history` depuis le service `migrate` ;
+4. produire et verifier une sauvegarde si la base contient deja des donnees ;
+5. appliquer `upgrade head`, puis verifier la revision, l'extension `vector`, la readiness et le smoke test de persistance.
+
+La migration initiale est additive : elle active `vector` si necessaire puis cree
+les tables de conversations, propositions d'action et audit. Elle ne cree ni
+outbox, ni stockage d'idempotence, ni utilisateurs, ni tables RAG. Elle ne stocke
+jamais le `decision_token` brut, uniquement son empreinte nullable.
 
 ## Sauvegarde et restauration
 
@@ -207,13 +256,16 @@ Plan de deploiement :
 
 ### Rollback
 
-- Revenir au digest applicatif precedent si les migrations restent compatibles.
-- Ne pas lancer automatiquement une migration descendante.
+- Arreter le deploiement de la nouvelle API et conserver PostgreSQL ainsi que ses volumes en place.
+- Revenir au digest applicatif precedent si les migrations additives restent compatibles.
+- Ne pas lancer de migration descendante : la revision initiale refuse explicitement le downgrade destructif.
+- Une extension ou une table additive inutilisee peut rester en place pendant l'analyse ; ne pas la supprimer en urgence.
 - Si les donnees sont alterees, isoler le trafic, obtenir l'approbation de restauration, restaurer dans une base controlee et reconcilier les actions externes ; un rollback local ne peut pas annuler automatiquement une mutation deja reussie dans Jira, Confluence ou Figma.
 
 ## Limites connues du squelette
 
-- Les Dockerfiles frontend/backend, le worker Celery et les migrations Alembic ne sont pas encore disponibles. Les routes de santé FastAPI existent mais la readiness devra vérifier PostgreSQL et Redis lorsque ces adaptateurs seront branchés.
+- Le worker Celery et son point d'entree ne sont pas disponibles dans cette tranche ; ne pas demarrer le service `worker`.
+- Le parcours frontend complet et les connecteurs externes ne font pas partie de cette validation PostgreSQL.
 - Les versions/digests d'images devront etre pinnees et verifiees avant un deploiement partage.
 - Le fournisseur OIDC, les serveurs MCP, leurs audiences, leurs outils et leur modele de delegation restent a choisir.
 - Compose ne fournit ni TLS, ni filtrage egress par domaine, ni haute disponibilite, ni stockage WORM.

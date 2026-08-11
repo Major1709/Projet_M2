@@ -10,20 +10,23 @@ x-backend-build: &backend-build
   context: ../backend
   dockerfile: Dockerfile
 
+x-database-environment: &database-environment
+  PKA_DATABASE_HOST: postgres
+  PKA_DATABASE_PORT: "5432"
+  PKA_DATABASE_NAME: ${POSTGRES_DB:-projet_m2}
+  PKA_DATABASE_USER: ${POSTGRES_USER:-projet_m2}
+  PKA_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+  PKA_DATABASE_POOL_SIZE: "${DATABASE_POOL_SIZE:-10}"
+  PKA_DATABASE_MAX_OVERFLOW: "${DATABASE_MAX_OVERFLOW:-20}"
+
 x-backend-environment: &backend-environment
+  <<: *database-environment
   APP_ENV: ${APP_ENV:-development}
   PKA_ENVIRONMENT: ${APP_ENV:-development}
-  PKA_REPOSITORY_BACKEND: memory
+  PKA_REPOSITORY_BACKEND: postgres
   PKA_AUTH_MODE: dev_headers
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   TZ: ${TZ:-UTC}
-  DATABASE_HOST: postgres
-  DATABASE_PORT: "5432"
-  DATABASE_NAME: ${POSTGRES_DB:-projet_m2}
-  DATABASE_USER: ${POSTGRES_USER:-projet_m2}
-  DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
-  POSTGRES_POOL_SIZE: ${POSTGRES_POOL_SIZE:-10}
-  POSTGRES_MAX_OVERFLOW: ${POSTGRES_MAX_OVERFLOW:-20}
   REDIS_HOST: redis
   REDIS_PORT: "6379"
   REDIS_DB: ${REDIS_DB:-0}
@@ -244,15 +247,12 @@ services:
     image: ${BACKEND_IMAGE:-projet-m2-backend:local}
     build: *backend-build
     restart: "no"
-    command: [alembic, upgrade, head]
+    command: [python, -m, alembic, upgrade, head]
     environment:
-      APP_ENV: ${APP_ENV:-development}
+      <<: *database-environment
+      PKA_ENVIRONMENT: ${APP_ENV:-development}
+      PKA_REPOSITORY_BACKEND: postgres
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_HOST: postgres
-      DATABASE_PORT: "5432"
-      DATABASE_NAME: ${POSTGRES_DB:-projet_m2}
-      DATABASE_USER: ${POSTGRES_USER:-projet_m2}
-      DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
     secrets:
       - postgres_password
     depends_on:
