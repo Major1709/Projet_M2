@@ -20,7 +20,9 @@ Navigateur -> frontend/BFF -> api -> PostgreSQL/pgvector
 - `data` est un reseau interne sans sortie Internet pour PostgreSQL et Redis.
 - `egress` donne a l'API et au worker un chemin sortant. Compose ne filtre pas les domaines : en preproduction/production, un pare-feu ou proxy doit limiter la sortie aux endpoints Groq, OIDC et MCP approuves.
 - PostgreSQL et Redis ne publient aucun port hote.
-- Les mutations MCP et les trois connecteurs sont desactives par defaut (`default deny`).
+- La lecture MCP globale, les fournisseurs et chaque binding sont desactives par
+  defaut (`default deny`). Les mutations MCP sont forcees a `false` dans Compose
+  et une valeur `true` est aussi refusee par le backend.
 
 ## Pre-requis des scaffolds
 
@@ -186,7 +188,142 @@ En preproduction et production :
 - ne mettre dans les variables d'environnement que des references au coffre ;
 - scanner images, logs, traces et sauvegardes pour les secrets.
 
-Les secrets OAuth propres aux MCP seront ajoutes une fois les serveurs, audiences et flux de delegation choisis. Aucun jeton utilisateur ne doit devenir une variable Compose statique.
+Les grants OAuth MCP sont des jetons utilisateur et ne doivent jamais devenir une
+valeur d'environnement, un argument de CLI, une ligne de log ou un exemple. Le
+Compose de base ne declare ni leur secret ni leur chemin : il reste donc valide
+et demarrable quand les fichiers de grants n'existent pas. L'activation locale
+ajoute les montages et les variables `*_BEARER_TOKEN_FILE` avec un override prive,
+uniquement apres les controles ci-dessous.
+
+## MCP en lecture seule
+
+Les destinations sont des constantes du backend et ne sont pas surchargeables par
+l'environnement :
+
+| Binding | Endpoint MCP | Source ou cible admise |
+|---|---|---|
+| Jira | `https://mcp.atlassian.com/v1/mcp` | `https://andrianalyfanny-1786296714755.atlassian.net` et son `cloudId` |
+| Confluence | `https://mcp.atlassian.com/v1/mcp` | `https://andrianalyfanny.atlassian.net` et son `cloudId` distinct |
+| Figma | `https://mcp.figma.com/mcp` | fichier `Ie3SsqL1KetjinTDHcNm2D`, noeud `36:114` |
+
+Jira et Confluence partagent le serveur Atlassian, mais leurs bindings, `cloudId`
+et kill switches restent distincts. Aucun endpoint, domaine source, file key ou
+node ID fourni par une requete, un contenu recupere ou une variable d'environnement
+ne doit les remplacer.
+
+Le demarrage par defaut injecte les gardes suivantes :
+
+```text
+PKA_MCP_READS_ENABLED=false
+PKA_MCP_ATLASSIAN_ENABLED=false
+PKA_MCP_JIRA_ENABLED=false
+PKA_MCP_CONFLUENCE_ENABLED=false
+PKA_MCP_FIGMA_ENABLED=false
+PKA_MCP_GRANT_BACKEND=disabled
+PKA_MCP_MUTATIONS_ENABLED=false  # valeur imposee par Compose
+```
+
+Une lecture Jira ou Confluence exige simultanement la garde globale, la garde
+Atlassian et la garde du binding concerne. Une lecture Figma exige la garde globale
+et la garde Figma. Une garde manquante refuse l'appel.
+
+### Conditions bloquantes avant activation
+
+L'activation reste **NO-GO** tant que toutes les preuves applicables ne sont pas
+jointes au compte rendu d'admission :
+
+1. grant OAuth d'un compte sandbox a privileges minimaux, lie au tenant et a
+   l'utilisateur attendus, stocke dans un fichier secret monte et revocable ;
+2. `cloudId` Jira et/ou Confluence verifie pour la source fixe, avec deux bindings
+   distincts et sans jamais afficher le token utilise pour la verification ;
+3. contract pack approuve pour l'endpoint exact : transport, outils de lecture,
+   schemas et empreintes, allowlist `default deny`, timeouts, quotas, erreurs et
+   tests prouvant que toute mutation ou tout outil inconnu est refuse ;
+4. pour Figma, admission explicite du fichier et du noeud fixes, validation des
+   droits reels de lecture et du schema des outils exposes ;
+5. filtrage egress, redaction des journaux, alertes et procedure de revocation
+   testes dans l'environnement autorise.
+
+`development_files` est le seul backend de grants utilisable avec Compose local ;
+il est interdit hors `development` et `test`. Aucun compte ou donnees de production
+ne doit etre utilise.
+
+### Montage local apres admission
+
+Creer les deux fichiers d'une seule ligne sous `infra/secrets/dev/` seulement pour
+les fournisseurs admis, sans jamais en afficher le contenu :
+`mcp_atlassian_bearer_token` et `mcp_figma_bearer_token`. Ils sont ignores par Git
+et ne doivent pas etre copies dans une image. Ne pas les creer avant l'admission.
+
+Conserver ensuite l'override suivant hors du depot, en supprimant le fournisseur
+qui n'est pas admis et le `cloudId` de tout binding Atlassian laisse desactive. Les
+bindings non secrets sont lus depuis `infra/.env`, jamais depuis une requete
+utilisateur :
+
+```yaml
+services:
+  api:
+    environment:
+      PKA_MCP_GRANT_BACKEND: development_files
+      PKA_MCP_ATLASSIAN_BEARER_TOKEN_FILE: /run/secrets/mcp_atlassian_bearer_token
+      PKA_MCP_ATLASSIAN_GRANT_TENANT_ID: ${PKA_MCP_ATLASSIAN_GRANT_TENANT_ID:?required}
+      PKA_MCP_ATLASSIAN_GRANT_USER_ID: ${PKA_MCP_ATLASSIAN_GRANT_USER_ID:?required}
+      PKA_MCP_ATLASSIAN_JIRA_CLOUD_ID: ${PKA_MCP_ATLASSIAN_JIRA_CLOUD_ID:?required}
+      PKA_MCP_ATLASSIAN_CONFLUENCE_CLOUD_ID: ${PKA_MCP_ATLASSIAN_CONFLUENCE_CLOUD_ID:?required}
+      PKA_MCP_FIGMA_BEARER_TOKEN_FILE: /run/secrets/mcp_figma_bearer_token
+      PKA_MCP_FIGMA_GRANT_TENANT_ID: ${PKA_MCP_FIGMA_GRANT_TENANT_ID:?required}
+      PKA_MCP_FIGMA_GRANT_USER_ID: ${PKA_MCP_FIGMA_GRANT_USER_ID:?required}
+    secrets:
+      - mcp_atlassian_bearer_token
+      - mcp_figma_bearer_token
+
+secrets:
+  mcp_atlassian_bearer_token:
+    file: ${SECRETS_DIR:-./secrets/dev}/mcp_atlassian_bearer_token
+  mcp_figma_bearer_token:
+    file: ${SECRETS_DIR:-./secrets/dev}/mcp_figma_bearer_token
+```
+
+Valider l'assemblage avec `config --quiet` seulement :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml -f C:\pka-private\compose.mcp-grants.yaml config --quiet
+```
+
+Ne jamais utiliser `docker compose config` sans `--quiet`,
+`docker compose exec env`, `set`, `Get-ChildItem Env:` ou une commande contenant
+un token. Apres validation et autorisation de l'environnement de test, activer dans
+`infra/.env` uniquement les gardes du fournisseur admis, puis recreer l'API sans
+construction implicite :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml -f C:\pka-private\compose.mcp-grants.yaml up -d --no-build --no-deps --force-recreate api
+```
+
+Le worker reste hors tranche ; lorsqu'il sera admis, il devra recevoir exactement
+les memes montages et bindings.
+
+### Coupure et retour arriere MCP
+
+En incident, arreter d'abord `api` (et `worker` s'il existe) pour couper l'egress
+immediatement :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml stop api worker
+```
+
+Passer ensuite toutes les variables `PKA_MCP_*_ENABLED` a `false`, remettre
+`PKA_MCP_GRANT_BACKEND=disabled`, retirer l'override de grants et recreer uniquement
+l'API sur la configuration de base :
+
+```powershell
+docker compose --env-file infra/.env -f infra/compose.yaml up -d --no-build --no-deps --force-recreate api
+```
+
+Revoquer les grants cote fournisseur par le canal d'administration autorise,
+conserver les preuves redactees, puis verifier la readiness et l'absence d'appels
+MCP. Cette procedure ne modifie ni PostgreSQL ni ses volumes et ne requiert aucune
+migration.
 
 ## Observabilite
 
@@ -226,8 +363,10 @@ Plan de deploiement :
 4. deployer API et worker avec mutations coupees ;
 5. executer healthchecks et smoke tests de lecture/RAG ;
 6. deployer le frontend et verifier session, SSE, citations et approbations sans execution ;
-7. activer progressivement les MCP de lecture par tenant pilote ;
-8. activer une mutation seulement apres tests d'approbation, revalidation, idempotence, audit et procedure de coupure ;
+7. activer progressivement les MCP de lecture par tenant pilote apres les preuves
+   OAuth, `cloudId`, contract pack et admission Figma applicables ;
+8. conserver `PKA_MCP_MUTATIONS_ENABLED=false` : les mutations sont hors de ce lot
+   et ne disposent d'aucune procedure d'activation ;
 9. observer les indicateurs et conserver une fenetre de rollback.
 
 ## Runbook minimal
@@ -241,11 +380,14 @@ Plan de deploiement :
 
 ### Suspicion de fuite, token ou MCP compromis
 
-1. Passer `MCP_MUTATIONS_ENABLED=false` et desactiver le MCP concerne, puis recreer `api` et `worker`.
-2. Revoquer les grants/sessions concernes et effectuer la rotation des secrets.
-3. Isoler les chunks RAG suspects et conserver les preuves/audits.
-4. Identifier les actions par `trace_id`, `action_id` et cle d'idempotence.
-5. Ne reactiver qu'apres correction, rotation, reindexation necessaire et tests de securite.
+1. Arreter `api` et `worker` s'il est actif pour couper immediatement l'egress MCP.
+2. Passer toutes les gardes `PKA_MCP_*_ENABLED=false`, remettre
+   `PKA_MCP_GRANT_BACKEND=disabled`, retirer l'override de grants, puis recreer
+   uniquement les services autorises.
+3. Revoquer les grants/sessions concernes et effectuer la rotation des secrets.
+4. Isoler les chunks RAG suspects et conserver les preuves/audits redactes.
+5. Identifier les actions par `trace_id`, `action_id` et cle d'idempotence.
+6. Ne reactiver qu'apres correction, rotation, reindexation necessaire et tests de securite.
 
 ### Execution au resultat ambigu
 
@@ -267,7 +409,9 @@ Plan de deploiement :
 - Le worker Celery et son point d'entree ne sont pas disponibles dans cette tranche ; ne pas demarrer le service `worker`.
 - Le parcours frontend complet et les connecteurs externes ne font pas partie de cette validation PostgreSQL.
 - Les versions/digests d'images devront etre pinnees et verifiees avant un deploiement partage.
-- Le fournisseur OIDC, les serveurs MCP, leurs audiences, leurs outils et leur modele de delegation restent a choisir.
+- Les endpoints MCP et les cibles de ce lot sont fixes. Les audiences OAuth,
+  contract packs, `cloudId`, grants utilisateur et preuves d'admission restent a
+  qualifier avant toute activation.
 - Compose ne fournit ni TLS, ni filtrage egress par domaine, ni haute disponibilite, ni stockage WORM.
 - Les SLO, RPO/RTO, volumetries, retention et residence des donnees restent a valider.
 - Le chargement local de `BAAI/bge-m3` suppose que l'image worker embarque le modele ou qu'un service d'embeddings soit defini ulterieurement ; aucun telechargement implicite n'est declenche ici.

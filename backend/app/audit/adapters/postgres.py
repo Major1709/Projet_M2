@@ -1,5 +1,5 @@
 from sqlalchemy import insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.audit.domain import AuditEvent
 from app.persistence.schema import audit_events
@@ -24,3 +24,14 @@ class PostgresAuditSink:
                 occurred_at=event.occurred_at,
             )
         )
+
+
+class PostgresAppendOnlyAuditWriter:
+    """Persists one event per short autonomous transaction, never around I/O."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._session_factory = session_factory
+
+    def append(self, event: AuditEvent) -> None:
+        with self._session_factory.begin() as session:
+            PostgresAuditSink(session).append(event)

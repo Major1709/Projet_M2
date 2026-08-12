@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,14 +30,89 @@ class Settings(BaseSettings):
     database_connect_timeout_seconds: int = Field(default=2, ge=1, le=10)
     database_pool_timeout_seconds: int = Field(default=2, ge=1, le=10)
     database_statement_timeout_ms: int = Field(default=2_000, ge=100, le=30_000)
+    mcp_reads_enabled: bool = False
+    mcp_mutations_enabled: bool = False
+    mcp_atlassian_enabled: bool = False
+    mcp_jira_enabled: bool = False
+    mcp_confluence_enabled: bool = False
+    mcp_figma_enabled: bool = False
+    mcp_grant_backend: Literal["disabled", "development_files"] = "disabled"
+    mcp_atlassian_bearer_token_file: Path | None = None
+    mcp_atlassian_grant_tenant_id: str | None = Field(default=None, min_length=1, max_length=200)
+    mcp_atlassian_grant_user_id: str | None = Field(default=None, min_length=1, max_length=200)
+    mcp_figma_bearer_token_file: Path | None = None
+    mcp_figma_grant_tenant_id: str | None = Field(default=None, min_length=1, max_length=200)
+    mcp_figma_grant_user_id: str | None = Field(default=None, min_length=1, max_length=200)
+    mcp_atlassian_jira_cloud_id: UUID | None = None
+    mcp_atlassian_confluence_cloud_id: UUID | None = None
 
     @model_validator(mode="after")
     def validate_runtime_adapters(self) -> "Settings":
+        if self.mcp_mutations_enabled:
+            raise ValueError("MCP mutations cannot be enabled by this release")
+        if self.mcp_reads_enabled and self.repository_backend != "postgres":
+            raise ValueError("Enabled MCP reads require the PostgreSQL audit repository")
+
         if self.environment == "production":
             if self.repository_backend == "memory":
                 raise ValueError("The in-memory repository is forbidden in production")
             if self.auth_mode == "dev_headers":
                 raise ValueError("Development header identity is forbidden in production")
+
+        if self.mcp_jira_enabled and not self.mcp_atlassian_enabled:
+            raise ValueError("The Jira MCP binding requires the Atlassian provider")
+        if self.mcp_confluence_enabled and not self.mcp_atlassian_enabled:
+            raise ValueError("The Confluence MCP binding requires the Atlassian provider")
+        if self.mcp_jira_enabled and self.mcp_atlassian_jira_cloud_id is None:
+            raise ValueError("The Jira MCP binding requires its server-side cloud ID")
+        if self.mcp_confluence_enabled and self.mcp_atlassian_confluence_cloud_id is None:
+            raise ValueError("The Confluence MCP binding requires its server-side cloud ID")
+        if (
+            self.mcp_jira_enabled
+            and self.mcp_confluence_enabled
+            and self.mcp_atlassian_jira_cloud_id
+            == self.mcp_atlassian_confluence_cloud_id
+        ):
+            raise ValueError("Jira and Confluence MCP bindings require distinct cloud IDs")
+
+        development_grant_values = (
+            self.mcp_atlassian_bearer_token_file,
+            self.mcp_atlassian_grant_tenant_id,
+            self.mcp_atlassian_grant_user_id,
+            self.mcp_figma_bearer_token_file,
+            self.mcp_figma_grant_tenant_id,
+            self.mcp_figma_grant_user_id,
+        )
+        if self.environment == "production" and (
+            self.mcp_grant_backend == "development_files"
+            or any(value is not None for value in development_grant_values)
+        ):
+            raise ValueError("Development file grants are forbidden in production")
+
+        if self.mcp_grant_backend == "disabled" and any(
+            value is not None for value in development_grant_values
+        ):
+            raise ValueError(
+                "Development grant bindings require PKA_MCP_GRANT_BACKEND=development_files"
+            )
+
+        if self.mcp_grant_backend == "development_files":
+            if self.environment not in {"development", "test"}:
+                raise ValueError("Development file grants require development or test")
+            if self.mcp_atlassian_enabled:
+                self._require_complete_grant_binding(
+                    "Atlassian",
+                    self.mcp_atlassian_bearer_token_file,
+                    self.mcp_atlassian_grant_tenant_id,
+                    self.mcp_atlassian_grant_user_id,
+                )
+            if self.mcp_figma_enabled:
+                self._require_complete_grant_binding(
+                    "Figma",
+                    self.mcp_figma_bearer_token_file,
+                    self.mcp_figma_grant_tenant_id,
+                    self.mcp_figma_grant_user_id,
+                )
 
         if self.repository_backend == "postgres":
             required_settings = {
@@ -53,6 +129,18 @@ class Settings(BaseSettings):
                     + ", ".join(missing)
                 )
         return self
+
+    @staticmethod
+    def _require_complete_grant_binding(
+        provider_name: str,
+        token_file: Path | None,
+        tenant_id: str | None,
+        user_id: str | None,
+    ) -> None:
+        if token_file is None or tenant_id is None or user_id is None:
+            raise ValueError(
+                f"The {provider_name} development grant requires file, tenant, and user bindings"
+            )
 
 
 @lru_cache

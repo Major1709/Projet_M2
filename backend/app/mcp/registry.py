@@ -1,0 +1,586 @@
+import hashlib
+import json
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
+
+from app.mcp.domain import MCPProvider, ToolActionClass
+from app.mcp.domain import MCPReadSourceSystem as SourceSystem
+
+ATLASSIAN_ENDPOINT = "https://mcp.atlassian.com/v1/mcp"
+FIGMA_ENDPOINT = "https://mcp.figma.com/mcp"
+JIRA_SOURCE_ORIGIN = "https://andrianalyfanny-1786296714755.atlassian.net"
+CONFLUENCE_SOURCE_ORIGIN = "https://andrianalyfanny.atlassian.net"
+FIGMA_SOURCE_ORIGIN = "https://www.figma.com"
+FIGMA_FILE_KEY = "Ie3SsqL1KetjinTDHcNm2D"
+FIGMA_NODE_ID = "36:114"
+MCP_POLICY_VERSION = "SPEC-MCP-RO-001-r1"
+APPROVED_PROTOCOL_VERSIONS = frozenset({"2026-07-28"})
+
+_NON_VALIDATION_SCHEMA_KEYS = frozenset(
+    {"$schema", "$id", "default", "description", "examples", "title"}
+)
+
+
+class MCPBindingKind(StrEnum):
+    NONE = "none"
+    JIRA = "jira"
+    CONFLUENCE = "confluence"
+    FIGMA = "figma"
+
+
+def _semantic_schema(value: Any, *, parent_key: str | None = None) -> Any:
+    """Canonicalize validation semantics while excluding documentation-only drift."""
+
+    if isinstance(value, dict):
+        if set(value) == {"json"} and isinstance(value["json"], dict):
+            return _semantic_schema(value["json"])
+        return {
+            key: _semantic_schema(child, parent_key=key)
+            for key, child in sorted(value.items())
+            if key not in _NON_VALIDATION_SCHEMA_KEYS
+        }
+    if isinstance(value, list):
+        normalized = [_semantic_schema(item, parent_key=parent_key) for item in value]
+        if parent_key in {"enum", "required"} and all(
+            isinstance(item, (str, int, float, bool, type(None))) for item in normalized
+        ):
+            return sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True))
+        return normalized
+    return value
+
+
+def canonical_schema_json(schema: dict[str, Any]) -> str:
+    return json.dumps(
+        _semantic_schema(schema),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def schema_sha256(schema: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_schema_json(schema).encode("utf-8")).hexdigest()
+
+
+def canonical_json_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class ToolContract:
+    server_id: str
+    provider: MCPProvider
+    source_system: SourceSystem
+    source_origin: str
+    tool_name: str
+    binding_kind: MCPBindingKind
+    public_input_schema: dict[str, Any]
+    provider_input_schema: dict[str, Any]
+    provider_output_schema: dict[str, Any] | None = None
+    action_class: ToolActionClass = ToolActionClass.READ
+    policy_version: str = MCP_POLICY_VERSION
+    provider_input_schema_sha256: str = field(init=False)
+    provider_output_schema_sha256: str | None = field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.action_class != ToolActionClass.READ:
+            raise ValueError("The read-only MCP registry cannot contain mutations")
+        object.__setattr__(
+            self,
+            "provider_input_schema_sha256",
+            schema_sha256(self.provider_input_schema),
+        )
+        object.__setattr__(
+            self,
+            "provider_output_schema_sha256",
+            (
+                schema_sha256(self.provider_output_schema)
+                if self.provider_output_schema is not None
+                else None
+            ),
+        )
+
+
+def _object_schema(
+    properties: dict[str, Any] | None = None,
+    required: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties or {},
+        "additionalProperties": False,
+    }
+    if required:
+        schema["required"] = list(required)
+    return schema
+
+
+def _string(*, maximum: int | None = None, pattern: str | None = None) -> dict[str, Any]:
+    schema: dict[str, Any] = {"type": "string", "minLength": 1}
+    if maximum is not None:
+        schema["maxLength"] = maximum
+    if pattern is not None:
+        schema["pattern"] = pattern
+    return schema
+
+
+def _array(item: dict[str, Any], *, maximum: int) -> dict[str, Any]:
+    return {"type": "array", "items": item, "maxItems": maximum, "uniqueItems": True}
+
+
+_REMOTE_STRING = {"type": "string"}
+_CLOUD_ID = {"type": "string"}
+_EMPTY = _object_schema()
+
+_ATLASSIAN_COMMON = (
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.ATLASSIAN,
+        source_origin=ATLASSIAN_ENDPOINT,
+        tool_name="atlassianUserInfo",
+        binding_kind=MCPBindingKind.NONE,
+        public_input_schema=_EMPTY,
+        provider_input_schema=_EMPTY,
+    ),
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.ATLASSIAN,
+        source_origin=ATLASSIAN_ENDPOINT,
+        tool_name="getAccessibleAtlassianResources",
+        binding_kind=MCPBindingKind.NONE,
+        public_input_schema=_EMPTY,
+        provider_input_schema=_EMPTY,
+    ),
+)
+
+_JIRA_CONTRACTS = (
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.JIRA,
+        source_origin=JIRA_SOURCE_ORIGIN,
+        tool_name="getVisibleJiraProjects",
+        binding_kind=MCPBindingKind.JIRA,
+        public_input_schema=_object_schema(
+            {
+                "searchString": _string(maximum=200),
+                "action": {"type": "string", "enum": ["view", "browse"]},
+                "startAt": {"type": "integer", "minimum": 0, "maximum": 10_000},
+                "maxResults": {"type": "integer", "minimum": 1, "maximum": 50},
+                "expandIssueTypes": {"type": "boolean"},
+            }
+        ),
+        provider_input_schema=_object_schema(
+            {
+                "cloudId": _CLOUD_ID,
+                "searchString": _REMOTE_STRING,
+                "action": {"type": "string", "enum": ["view", "browse", "edit", "create"]},
+                "startAt": {"type": "number"},
+                "maxResults": {"type": "number", "maximum": 50},
+                "expandIssueTypes": {"type": "boolean"},
+            },
+            ("cloudId",),
+        ),
+    ),
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.JIRA,
+        source_origin=JIRA_SOURCE_ORIGIN,
+        tool_name="searchJiraIssuesUsingJql",
+        binding_kind=MCPBindingKind.JIRA,
+        public_input_schema=_object_schema(
+            {
+                "jql": _string(maximum=4_000),
+                "maxResults": {"type": "integer", "minimum": 1, "maximum": 50},
+                "fields": _array(_string(maximum=100), maximum=50),
+                "nextPageToken": _string(maximum=4_096),
+            },
+            ("jql",),
+        ),
+        provider_input_schema=_object_schema(
+            {
+                "cloudId": _CLOUD_ID,
+                "jql": _REMOTE_STRING,
+                "maxResults": {"type": "number", "maximum": 100},
+                "fields": {"type": "array", "items": _REMOTE_STRING},
+                "nextPageToken": _REMOTE_STRING,
+            },
+            ("cloudId", "jql"),
+        ),
+    ),
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.JIRA,
+        source_origin=JIRA_SOURCE_ORIGIN,
+        tool_name="getJiraIssue",
+        binding_kind=MCPBindingKind.JIRA,
+        public_input_schema=_object_schema(
+            {
+                "issueIdOrKey": _string(maximum=255),
+                "fields": _array(_string(maximum=100), maximum=50),
+                "fieldsByKeys": {"type": "boolean"},
+                "expand": _string(maximum=255),
+                "properties": _array(_string(maximum=100), maximum=50),
+                "failFast": {"type": "boolean"},
+            },
+            ("issueIdOrKey",),
+        ),
+        provider_input_schema=_object_schema(
+            {
+                "cloudId": _CLOUD_ID,
+                "issueIdOrKey": _REMOTE_STRING,
+                "fields": {"type": "array", "items": _REMOTE_STRING},
+                "fieldsByKeys": {"type": "boolean"},
+                "expand": _REMOTE_STRING,
+                "properties": {"type": "array", "items": _REMOTE_STRING},
+                "updateHistory": {"type": "boolean"},
+                "failFast": {"type": "boolean"},
+            },
+            ("cloudId", "issueIdOrKey"),
+        ),
+    ),
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.JIRA,
+        source_origin=JIRA_SOURCE_ORIGIN,
+        tool_name="getJiraIssueRemoteIssueLinks",
+        binding_kind=MCPBindingKind.JIRA,
+        public_input_schema=_object_schema(
+            {
+                "issueIdOrKey": _string(maximum=255),
+                "globalId": _string(maximum=1_000),
+            },
+            ("issueIdOrKey",),
+        ),
+        provider_input_schema=_object_schema(
+            {
+                "cloudId": _CLOUD_ID,
+                "issueIdOrKey": _REMOTE_STRING,
+                "globalId": _REMOTE_STRING,
+            },
+            ("cloudId", "issueIdOrKey"),
+        ),
+    ),
+)
+
+_CONFLUENCE_CONTRACTS = (
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.CONFLUENCE,
+        source_origin=CONFLUENCE_SOURCE_ORIGIN,
+        tool_name="getConfluenceSpaces",
+        binding_kind=MCPBindingKind.CONFLUENCE,
+        public_input_schema=_object_schema(
+            {
+                "keys": _array(_string(maximum=255), maximum=50),
+                "type": {
+                    "type": "string",
+                    "enum": ["global", "collaboration", "knowledge_base", "personal"],
+                },
+                "status": {"type": "string", "enum": ["current", "archived"]},
+                "labels": _array(_string(maximum=255), maximum=50),
+                "sort": _string(maximum=100),
+                "descriptionFormat": {"type": "string", "enum": ["plain", "view"]},
+                "includeIcon": {"type": "boolean"},
+                "cursor": _string(maximum=4_096),
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            }
+        ),
+        provider_input_schema=_object_schema(
+            {
+                "cloudId": _CLOUD_ID,
+                "ids": {
+                    "anyOf": [
+                        _REMOTE_STRING,
+                        {"type": "array", "items": {"type": "number"}},
+                    ]
+                },
+                "keys": {
+                    "anyOf": [
+                        _REMOTE_STRING,
+                        {"type": "array", "items": _REMOTE_STRING},
+                    ]
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["global", "collaboration", "knowledge_base", "personal"],
+                },
+                "status": {"type": "string", "enum": ["current", "archived"]},
+                "labels": {
+                    "anyOf": [
+                        _REMOTE_STRING,
+                        {"type": "array", "items": _REMOTE_STRING},
+                    ]
+                },
+                "favoritedBy": _REMOTE_STRING,
+                "notFavoritedBy": _REMOTE_STRING,
+                "sort": _REMOTE_STRING,
+                "descriptionFormat": {"type": "string", "enum": ["plain", "view"]},
+                "includeIcon": {"type": "boolean"},
+                "cursor": _REMOTE_STRING,
+                "limit": {"type": "number"},
+            },
+            ("cloudId",),
+        ),
+    ),
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.CONFLUENCE,
+        source_origin=CONFLUENCE_SOURCE_ORIGIN,
+        tool_name="getPagesInConfluenceSpace",
+        binding_kind=MCPBindingKind.CONFLUENCE,
+        public_input_schema=_object_schema(
+            {
+                "spaceId": _string(maximum=255),
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                "cursor": _string(maximum=4_096),
+                "status": {
+                    "type": "string",
+                    "enum": ["current", "archived", "deleted", "trashed"],
+                },
+                "title": _string(maximum=500),
+                "sort": {
+                    "type": "string",
+                    "enum": [
+                        "id",
+                        "-id",
+                        "created-date",
+                        "-created-date",
+                        "modified-date",
+                        "-modified-date",
+                        "title",
+                        "-title",
+                    ],
+                },
+                "depth": {"type": "string", "enum": ["all", "root"]},
+            },
+            ("spaceId",),
+        ),
+        provider_input_schema=_object_schema(
+            {
+                "cloudId": _CLOUD_ID,
+                "spaceId": _REMOTE_STRING,
+                "limit": {"type": "number"},
+                "cursor": _REMOTE_STRING,
+                "status": {
+                    "type": "string",
+                    "enum": ["current", "archived", "deleted", "trashed"],
+                },
+                "title": _REMOTE_STRING,
+                "sort": {
+                    "type": "string",
+                    "enum": [
+                        "id",
+                        "-id",
+                        "created-date",
+                        "-created-date",
+                        "modified-date",
+                        "-modified-date",
+                        "title",
+                        "-title",
+                    ],
+                },
+                "depth": {"type": "string", "enum": ["all", "root"]},
+            },
+            ("cloudId", "spaceId"),
+        ),
+    ),
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.CONFLUENCE,
+        source_origin=CONFLUENCE_SOURCE_ORIGIN,
+        tool_name="getConfluencePage",
+        binding_kind=MCPBindingKind.CONFLUENCE,
+        public_input_schema=_object_schema(
+            {
+                "pageId": _string(maximum=255),
+                "contentFormat": {"type": "string", "enum": ["markdown", "adf"]},
+            },
+            ("pageId",),
+        ),
+        provider_input_schema=_object_schema(
+            {
+                "cloudId": _CLOUD_ID,
+                "pageId": _REMOTE_STRING,
+                "contentFormat": {"type": "string", "enum": ["markdown", "adf"]},
+            },
+            ("cloudId", "pageId"),
+        ),
+    ),
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.CONFLUENCE,
+        source_origin=CONFLUENCE_SOURCE_ORIGIN,
+        tool_name="getConfluencePageDescendants",
+        binding_kind=MCPBindingKind.CONFLUENCE,
+        public_input_schema=_object_schema(
+            {
+                "pageId": _string(maximum=255),
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                "depth": {"type": "integer", "minimum": 1, "maximum": 10},
+                "cursor": _string(maximum=4_096),
+            },
+            ("pageId",),
+        ),
+        provider_input_schema=_object_schema(
+            {
+                "cloudId": _CLOUD_ID,
+                "pageId": _REMOTE_STRING,
+                "limit": {"type": "number"},
+                "depth": {"type": "number"},
+                "cursor": _REMOTE_STRING,
+            },
+            ("cloudId", "pageId"),
+        ),
+    ),
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.CONFLUENCE,
+        source_origin=CONFLUENCE_SOURCE_ORIGIN,
+        tool_name="searchConfluenceUsingCql",
+        binding_kind=MCPBindingKind.CONFLUENCE,
+        public_input_schema=_object_schema(
+            {
+                "cql": _string(maximum=4_000),
+                "cqlcontext": _string(maximum=1_000),
+                "cursor": _string(maximum=4_096),
+                "expand": _string(maximum=500),
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            ("cql",),
+        ),
+        provider_input_schema=_object_schema(
+            {
+                "cloudId": _CLOUD_ID,
+                "cql": _REMOTE_STRING,
+                "cqlcontext": _REMOTE_STRING,
+                "cursor": _REMOTE_STRING,
+                "expand": _REMOTE_STRING,
+                "limit": {"type": "number"},
+                "prev": {"type": "boolean"},
+                "next": {"type": "boolean"},
+            },
+            ("cloudId", "cql"),
+        ),
+    ),
+)
+
+_FIGMA_CONTEXT_PROPERTIES = {
+    "fileKey": _REMOTE_STRING,
+    "nodeId": _REMOTE_STRING,
+    "clientLanguages": _REMOTE_STRING,
+    "clientFrameworks": _REMOTE_STRING,
+}
+
+_FIGMA_CONTRACTS = (
+    ToolContract(
+        server_id="figma-remote",
+        provider=MCPProvider.FIGMA,
+        source_system=SourceSystem.FIGMA,
+        source_origin=FIGMA_SOURCE_ORIGIN,
+        tool_name="whoami",
+        binding_kind=MCPBindingKind.NONE,
+        public_input_schema=_EMPTY,
+        provider_input_schema=_EMPTY,
+    ),
+    ToolContract(
+        server_id="figma-remote",
+        provider=MCPProvider.FIGMA,
+        source_system=SourceSystem.FIGMA,
+        source_origin=FIGMA_SOURCE_ORIGIN,
+        tool_name="get_metadata",
+        binding_kind=MCPBindingKind.FIGMA,
+        public_input_schema=_EMPTY,
+        provider_input_schema=_object_schema(
+            dict(_FIGMA_CONTEXT_PROPERTIES),
+            ("fileKey", "nodeId"),
+        ),
+    ),
+    ToolContract(
+        server_id="figma-remote",
+        provider=MCPProvider.FIGMA,
+        source_system=SourceSystem.FIGMA,
+        source_origin=FIGMA_SOURCE_ORIGIN,
+        tool_name="get_design_context",
+        binding_kind=MCPBindingKind.FIGMA,
+        public_input_schema=_EMPTY,
+        provider_input_schema=_object_schema(
+            {
+                **_FIGMA_CONTEXT_PROPERTIES,
+                "excludeScreenshot": {"type": "boolean"},
+                "forceCode": {"type": "boolean"},
+                "disableCodeConnect": {"type": "boolean"},
+            },
+            ("fileKey", "nodeId"),
+        ),
+    ),
+    ToolContract(
+        server_id="figma-remote",
+        provider=MCPProvider.FIGMA,
+        source_system=SourceSystem.FIGMA,
+        source_origin=FIGMA_SOURCE_ORIGIN,
+        tool_name="get_screenshot",
+        binding_kind=MCPBindingKind.FIGMA,
+        public_input_schema=_EMPTY,
+        provider_input_schema=_object_schema(
+            dict(_FIGMA_CONTEXT_PROPERTIES),
+            ("fileKey", "nodeId"),
+        ),
+    ),
+    ToolContract(
+        server_id="figma-remote",
+        provider=MCPProvider.FIGMA,
+        source_system=SourceSystem.FIGMA,
+        source_origin=FIGMA_SOURCE_ORIGIN,
+        tool_name="get_variable_defs",
+        binding_kind=MCPBindingKind.FIGMA,
+        public_input_schema=_EMPTY,
+        provider_input_schema=_object_schema(
+            dict(_FIGMA_CONTEXT_PROPERTIES),
+            ("fileKey", "nodeId"),
+        ),
+    ),
+)
+
+
+class MCPToolRegistry:
+    def __init__(self, contracts: tuple[ToolContract, ...] | None = None) -> None:
+        selected = contracts or (
+            *_ATLASSIAN_COMMON,
+            *_JIRA_CONTRACTS,
+            *_CONFLUENCE_CONTRACTS,
+            *_FIGMA_CONTRACTS,
+        )
+        indexed: dict[tuple[SourceSystem, str], ToolContract] = {}
+        for contract in selected:
+            key = (contract.source_system, contract.tool_name)
+            if key in indexed:
+                raise ValueError("Duplicate MCP tool contract")
+            indexed[key] = contract
+        self._contracts = indexed
+
+    @property
+    def contracts(self) -> tuple[ToolContract, ...]:
+        return tuple(self._contracts.values())
+
+    def get(self, source_system: SourceSystem, tool_name: str) -> ToolContract | None:
+        return self._contracts.get((source_system, tool_name))

@@ -1,0 +1,16 @@
+{
+  "task_id": "CHAT-BE-PG-001",
+  "status": "QA Approved",
+  "size": "M",
+  "revision": 1,
+  "run_key": "CHAT-BE-PG-001-r1",
+  "run_id": "4a0a9e93-390a-4e5a-aa78-4b3142602272",
+  "claimed_by": "Architecte / Tech Lead",
+  "trigger": "Chat",
+  "started_at": "2026-08-11T21:00:00+03:00",
+  "last_heartbeat": "2026-08-11T23:20:00+03:00",
+  "branch": "feature/backend-postgres",
+  "commits": ["77e78f8", "248f425"],
+  "objective": "Connecter le backend FastAPI au PostgreSQL pgvector fourni par Docker Compose avec migrations et tests.",
+  "notion_sync": "Unavailable in this session"
+}

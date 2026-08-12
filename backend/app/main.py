@@ -8,6 +8,7 @@ from app.bootstrap import ApplicationContainer, build_container
 from app.conversations.api import router as conversations_router
 from app.core.config import Settings, get_settings
 from app.health.api import router as health_router
+from app.mcp.api import router as mcp_router
 
 
 @asynccontextmanager
@@ -36,6 +37,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(conversations_router)
     app.include_router(approvals_router)
+    app.include_router(mcp_router)
     return app
 
 

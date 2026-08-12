@@ -127,16 +127,136 @@ l'isolation tenant/utilisateur, la persistance après reconstruction, le CAS et 
 rollback transactionnel. Elle écrit uniquement des données synthétiques avec des
 identifiants uniques et ne supprime aucune donnée ni aucun volume.
 
-## Limites MCP actuelles
+## Lectures MCP distantes
 
-Aucune mutation MCP n'est câblée dans la racine de composition. Les endpoints
-d'approbation ne déclenchent donc aucune écriture Jira, Confluence ou Figma.
-L'activation future reste bloquée tant que l'identité déléguée, la revalidation des
-permissions, l'idempotence persistante, l'outbox/réconciliation, le kill switch et
-l'audit durable complet ne sont pas intégrés et validés.
+Le backend expose `POST /api/mcp/reads`, avec un maximum de trois appels par requête.
+Tous les appels d'un même batch doivent viser le même `source_system` ; les batches
+multi-sources sont refusés par validation avant tout workflow ou accès réseau.
+Le workflow est strictement en lecture seule et refuse avant tout accès réseau :
 
-Le mode `dev_headers`, les comptes de service non démontrés et tout contournement du
-workflow d'approbation restent interdits en production.
+- un fournisseur ou binding désactivé ;
+- un outil absent du registre local ;
+- toute classe d'action autre que `READ` ;
+- tout argument hors schéma, dont endpoint, tenant, utilisateur, `cloudId`,
+  `fileKey` ou `nodeId` injecté par l'appelant ;
+- un outil annoncé par `tools/list` dont le schéma d'entrée ou de sortie ne
+  correspond pas à l'empreinte SHA-256 approuvée.
+
+Aucun output schema fournisseur n'est encore approuvé dans ce contract pack. En
+conséquence, chaque outil exige actuellement que `tools/list.outputSchema` et
+`structuredContent` soient tous deux absents. Leur présence place la réponse en
+quarantaine ; aucun schéma générique permissif n'est utilisé.
+
+Les endpoints MCP, les origines source et la cible Figma sont des constantes de
+code non configurables :
+
+```text
+Atlassian MCP  https://mcp.atlassian.com/v1/mcp
+Figma MCP      https://mcp.figma.com/mcp
+Jira           https://andrianalyfanny-1786296714755.atlassian.net
+Confluence     https://andrianalyfanny.atlassian.net
+Figma file     Ie3SsqL1KetjinTDHcNm2D
+Figma node     36:114
+```
+
+Le transport utilise le SDK Python MCP `2.0.0` épinglé et Streamable HTTP. Les redirections,
+le proxy issu de l'environnement, les retries et le cache de découverte sont
+désactivés. Le délai de connexion est de trois secondes et le budget global de
+trente secondes couvre connexion, `tools/list` et `tools/call`. Le client envoie
+`Accept-Encoding: identity` et refuse toute réponse compressée. Une réponse est
+limitée à 2 Mio de texte/JSON et 8 Mio d'image.
+Les liens de ressource, ressources embarquées, contenus audio et MIME image non
+approuvés sont refusés ; aucune URL retournée n'est téléchargée. Ce contract pack
+n'accepte que le protocole MCP `2026-07-28` ; toute autre version négociée est
+refusée avant la découverte des outils.
+
+### Configuration MCP
+
+Tous les kill switches sont désactivés par défaut :
+
+- `PKA_MCP_READS_ENABLED=false` ;
+- `PKA_MCP_MUTATIONS_ENABLED=false`, seule valeur acceptée par cette version ;
+- `PKA_MCP_ATLASSIAN_ENABLED=false` ;
+- `PKA_MCP_JIRA_ENABLED=false` ;
+- `PKA_MCP_CONFLUENCE_ENABLED=false` ;
+- `PKA_MCP_FIGMA_ENABLED=false` ;
+- `PKA_MCP_GRANT_BACKEND=disabled`.
+
+Jira et Confluence sont deux bindings distincts. Leur activation exige un UUID
+stocké côté serveur dans `PKA_MCP_ATLASSIAN_JIRA_CLOUD_ID` ou
+`PKA_MCP_ATLASSIAN_CONFLUENCE_CLOUD_ID`. Le LLM et l'API ne peuvent pas fournir ces
+identifiants. Lorsque les deux bindings sont activés, leurs UUID doivent être
+distincts puisque les origines Jira et Confluence sont différentes.
+
+`PKA_MCP_READS_ENABLED=true` exige `PKA_REPOSITORY_BACKEND=postgres`. Avant chaque
+ouverture de transport, le backend persiste de façon autonome et append-only un
+événement `MCP_READ_AUTHORIZED` dans une transaction courte. Il persiste ensuite
+`MCP_READ_COMPLETED` ou `MCP_READ_FAILED`, sans conserver le contenu, les arguments,
+JQL/CQL ni bearer. Seuls les identifiants de contexte, métadonnées de contrat,
+empreintes d'arguments/binding, version protocolaire et code d'erreur sûr sont
+écrits. Un échec d'audit pré-appel interdit le réseau ; un échec d'audit final
+retient le résultat et renvoie une erreur expurgée. Aucune transaction SQL ne reste
+ouverte pendant l'appel réseau.
+
+Le port de grant délégué reste opaque au workflow. Aucun flux OAuth web n'est
+improvisé dans ce lot. Pour le développement et les tests uniquement,
+`PKA_MCP_GRANT_BACKEND=development_files` autorise un bearer monté dans un fichier.
+Le fichier est relu à chaque connexion et doit être lié à l'identité exacte :
+
+```text
+PKA_MCP_ATLASSIAN_BEARER_TOKEN_FILE
+PKA_MCP_ATLASSIAN_GRANT_TENANT_ID
+PKA_MCP_ATLASSIAN_GRANT_USER_ID
+
+PKA_MCP_FIGMA_BEARER_TOKEN_FILE
+PKA_MCP_FIGMA_GRANT_TENANT_ID
+PKA_MCP_FIGMA_GRANT_USER_ID
+```
+
+Ces variables doivent être absentes du Compose de base. Un override privé monte le
+fichier secret et ajoute les bindings lors d'une activation locale. Une chaîne vide
+n'est pas équivalente à une valeur absente. Le backend refuse ce mode et tout chemin
+de bearer en production. Il ne persiste, ne retourne et ne journalise aucun token.
+
+Le résultat API normalisé attribue chaque lecture au fournisseur, système source,
+origine, outil, version protocolaire, empreinte de schéma, hash des arguments,
+empreinte du binding, politique et corrélation. Les payloads et contenus source ne
+sont pas journalisés. Tant qu'un output schema authentifié ne permet pas d'extraire
+et valider un identifiant de ressource stable, la provenance retourne
+`resource_reference=null` et `source_complete=false` : le résultat ne doit pas être
+présenté comme une citation source complète.
+
+### Limites MCP actuelles
+
+Le registre bloque volontairement tout appel si un fournisseur modifie le schéma
+annoncé. Une nouvelle empreinte doit être capturée avec un grant de sandbox, revue,
+puis mise à jour dans le contract pack avant réactivation. La compatibilité réelle
+du client backend personnalisé avec le catalogue Figma et les deux `cloudId`
+Atlassian restent à valider dans l'environnement pilote.
+
+Le transport réalise, avant acquisition du grant, une résolution DNS des hostnames
+fixes et refuse l'ensemble de la réponse si une adresse est privée, loopback,
+link-local, multicast, non spécifiée, non globale ou assimilable à un endpoint de
+métadonnées. Ce préflight ne lie toutefois pas l'adresse vérifiée à la connexion
+TLS ultérieure et ne suffit donc pas contre un DNS rebinding entre les deux étapes.
+L'activation réelle reste **NO-GO** sans pare-feu/proxy egress imposant la même
+allowlist d'hôtes et bloquant les plages non publiques au niveau réseau.
+
+Le grant de développement Atlassian reste, conformément au contrat pilote, lié au
+provider, tenant et utilisateur et non cryptographiquement à un seul site. Les
+`cloudId` injectés limitent la cible applicative, mais une activation pilote doit
+également vérifier côté broker OAuth que la délégation utilisateur couvre seulement
+les sites attendus.
+
+Aucune mutation MCP n'est câblée dans la racine de composition.
+`ApprovedMutationRunner` reste inactif. Les endpoints d'approbation ne déclenchent
+donc aucune écriture Jira, Confluence ou Figma. L'activation future reste bloquée
+tant que l'identité déléguée de production, la revalidation des permissions,
+l'idempotence persistante, l'outbox/réconciliation, les kill switches et l'audit
+durable complet ne sont pas intégrés et validés.
+
+Le mode `dev_headers`, les comptes de service et tout contournement du workflow
+d'approbation restent interdits en production.
 
 ## Organisation
 
