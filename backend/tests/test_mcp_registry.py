@@ -86,7 +86,9 @@ def test_schema_fingerprint_ignores_only_documentation_and_order() -> None:
 def test_endpoints_origins_and_figma_target_are_fixed_not_configurable() -> None:
     assert ATLASSIAN_ENDPOINT == "https://mcp.atlassian.com/v1/mcp"
     assert FIGMA_ENDPOINT == "https://mcp.figma.com/mcp"
-    assert JIRA_SOURCE_ORIGIN == "https://andrianalyfanny-1786296714755.atlassian.net"
+    # One Atlassian site serves both products, confirmed against
+    # getAccessibleAtlassianResources, so both origins are the same host.
+    assert JIRA_SOURCE_ORIGIN == "https://andrianalyfanny.atlassian.net"
     assert CONFLUENCE_SOURCE_ORIGIN == "https://andrianalyfanny.atlassian.net"
     assert FIGMA_FILE_KEY == "Ie3SsqL1KetjinTDHcNm2D"
     assert FIGMA_NODE_ID == "36:114"

@@ -136,10 +136,27 @@ Cinq constats ont forcé des correctifs, chacun masquant le suivant :
 1. Faire rendre un verdict QA indépendant sur la campagne Atlassian avant de passer les tâches
    `MCP-RO-*` en `Done`.
 2. Corriger la classification des deux erreurs de transport et relever le budget de connexion.
-3. Décider du renseignement de `resource_reference` : la provenance le laisse aujourd'hui à
-   `null` par conception (cf. `backend/README.md`), ce qui empêche toute citation cliquable et
-   conditionne donc l'indexation RAG.
-4. Obtenir l'admission du client Figma, puis rejouer la campagne pour ce fournisseur.
+3. Obtenir l'admission du client Figma, puis rejouer la campagne pour ce fournisseur.
+4. Indexer Confluence dans pgvector en s'appuyant sur `resource_reference` pour les citations.
+
+## Citations — 2026-08-13
+
+`resource_reference` est désormais renseigné, par dérivation et non par observation : le
+contrat déclare un chemin portant un seul placeholder nommant un argument public **requis**,
+rempli après validation JSON-Schema puis percent-encodé sans caractère sûr. Aucune donnée
+issue de la réponse fournisseur n'y entre, donc la surface d'injection reste nulle et un
+serveur compromis ne peut pas rediriger une citation. `__post_init__` refuse un chemin citant
+un argument optionnel, qui produirait des citations nulles au hasard des appels.
+
+Quatre contrats en portent un : `getJiraIssue` et `getJiraIssueRemoteIssueLinks` vers
+`/browse/{issueIdOrKey}`, `getConfluencePage` et `getConfluencePageDescendants` vers
+`/wiki/pages/{pageId}`. Les outils de recherche et de liste n'adressent pas une ressource
+unique et retournent `null`. `source_complete` reste `false` partout.
+
+Corrigé au passage : `JIRA_SOURCE_ORIGIN` pointait vers
+`https://andrianalyfanny-1786296714755.atlassian.net`, un hôte inexistant. Le site réel,
+confirmé par `getAccessibleAtlassianResources`, est `https://andrianalyfanny.atlassian.net`
+pour les deux produits. Toute citation Jira aurait été morte.
 
 ## Outillage
 

@@ -16,6 +16,7 @@ from app.audit.domain import AuditEventType
 from app.core.config import Settings
 from app.core.identity import SecurityContext
 from app.mcp.domain import (
+    MCPProvider,
     MCPReadBatch,
     MCPReadCommand,
     MCPReadToolCall,
@@ -43,7 +44,10 @@ from app.mcp.read_workflow import MAX_IMAGE_BYTES, MAX_TEXT_BYTES, MCPReadWorkfl
 from app.mcp.registry import (
     FIGMA_FILE_KEY,
     FIGMA_NODE_ID,
+    JIRA_SOURCE_ORIGIN,
+    MCPBindingKind,
     MCPToolRegistry,
+    ToolContract,
     schema_sha256,
 )
 
@@ -368,6 +372,72 @@ def test_atlassian_cloud_id_is_injected_from_distinct_binding() -> None:
         "issueIdOrKey": "PKA-1",
         "cloudId": str(JIRA_CLOUD_ID),
     }
+
+
+def test_resource_reference_is_derived_from_validated_arguments() -> None:
+    workflow, _, _ = workflow_for(SourceSystem.JIRA, "getJiraIssue")
+
+    result = run_call(
+        workflow,
+        source_system=SourceSystem.JIRA,
+        tool_name="getJiraIssue",
+        arguments={"issueIdOrKey": "PKA-1"},
+    )
+
+    assert result.provenance.resource_reference == f"{JIRA_SOURCE_ORIGIN}/browse/PKA-1"
+    # No authenticated output schema attests the body is whole, so the citation
+    # identifies the resource without claiming the read was exhaustive.
+    assert result.provenance.source_complete is False
+
+
+def test_resource_reference_cannot_escape_its_path_segment() -> None:
+    """The value is ours, but percent-encoding keeps a hostile key inside its segment."""
+    workflow, _, _ = workflow_for(SourceSystem.JIRA, "getJiraIssue")
+
+    result = run_call(
+        workflow,
+        source_system=SourceSystem.JIRA,
+        tool_name="getJiraIssue",
+        arguments={"issueIdOrKey": "../../evil?x=1#y"},
+    )
+
+    reference = result.provenance.resource_reference
+    assert reference == f"{JIRA_SOURCE_ORIGIN}/browse/..%2F..%2Fevil%3Fx%3D1%23y"
+    assert reference is not None and reference.startswith(f"{JIRA_SOURCE_ORIGIN}/browse/")
+
+
+def test_tools_without_a_citable_identifier_have_no_resource_reference() -> None:
+    workflow, _, _ = workflow_for(SourceSystem.CONFLUENCE, "getConfluenceSpaces")
+
+    result = run_call(
+        workflow,
+        source_system=SourceSystem.CONFLUENCE,
+        tool_name="getConfluenceSpaces",
+    )
+
+    assert result.provenance.resource_reference is None
+
+
+def test_citation_path_must_name_a_required_public_argument() -> None:
+    """An optional argument would silently yield a null citation at runtime."""
+    schema = {
+        "type": "object",
+        "properties": {"pageId": {"type": "string"}},
+        "additionalProperties": False,
+    }
+
+    with pytest.raises(ValueError, match="not a required public argument"):
+        ToolContract(
+            server_id="atlassian-rovo",
+            provider=MCPProvider.ATLASSIAN,
+            source_system=SourceSystem.CONFLUENCE,
+            source_origin="https://example.invalid",
+            tool_name="probe",
+            binding_kind=MCPBindingKind.CONFLUENCE,
+            public_input_schema=schema,
+            provider_input_schema=schema,
+            resource_reference_path="/wiki/pages/{pageId}",
+        )
 
 
 def test_text_and_structured_size_limit_is_enforced() -> None:

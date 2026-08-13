@@ -221,10 +221,18 @@ de bearer en production. Il ne persiste, ne retourne et ne journalise aucun toke
 Le résultat API normalisé attribue chaque lecture au fournisseur, système source,
 origine, outil, version protocolaire, empreinte de schéma, hash des arguments,
 empreinte du binding, politique et corrélation. Les payloads et contenus source ne
-sont pas journalisés. Tant qu'un output schema authentifié ne permet pas d'extraire
-et valider un identifiant de ressource stable, la provenance retourne
-`resource_reference=null` et `source_complete=false` : le résultat ne doit pas être
-présenté comme une citation source complète.
+sont pas journalisés.
+
+`resource_reference` est **dérivé, jamais observé** : il est construit côté serveur à
+partir de l'origine constante du contrat et d'un argument public déjà validé par
+JSON-Schema, percent-encodé sans caractère sûr afin qu'une valeur ne puisse pas sortir
+de son segment de chemin. Aucune donnée de la réponse fournisseur n'y entre, donc un
+serveur compromis ne peut pas rediriger une citation. Seuls les contrats portant un
+identifiant de ressource requis en fournissent un ; les autres retournent `null`.
+
+`source_complete` reste `false` en toutes circonstances : tant qu'un output schema
+authentifié n'atteste pas l'intégralité du corps, le résultat identifie sa ressource
+mais ne doit pas être présenté comme une citation source complète.
 
 ### Limites MCP actuelles
 

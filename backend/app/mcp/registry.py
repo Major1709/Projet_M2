@@ -1,15 +1,21 @@
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from string import Formatter
 from typing import Any
+from urllib.parse import quote
 
 from app.mcp.domain import MCPProvider, ToolActionClass
 from app.mcp.domain import MCPReadSourceSystem as SourceSystem
 
 ATLASSIAN_ENDPOINT = "https://mcp.atlassian.com/v1/mcp"
 FIGMA_ENDPOINT = "https://mcp.figma.com/mcp"
-JIRA_SOURCE_ORIGIN = "https://andrianalyfanny-1786296714755.atlassian.net"
+# One Atlassian site serves both products, so both origins are the same host,
+# confirmed against getAccessibleAtlassianResources. They stay separate constants
+# so a future multi-site deployment can diverge without touching the contracts.
+JIRA_SOURCE_ORIGIN = "https://andrianalyfanny.atlassian.net"
 CONFLUENCE_SOURCE_ORIGIN = "https://andrianalyfanny.atlassian.net"
 FIGMA_SOURCE_ORIGIN = "https://www.figma.com"
 FIGMA_FILE_KEY = "Ie3SsqL1KetjinTDHcNm2D"
@@ -91,12 +97,24 @@ class ToolContract:
     provider_output_schema: dict[str, Any] | None = None
     action_class: ToolActionClass = ToolActionClass.READ
     policy_version: str = MCP_POLICY_VERSION
+    # Citation path appended to ``source_origin``, holding exactly one ``{name}``
+    # placeholder naming a required public argument. The value is therefore ours:
+    # it is JSON-Schema validated before the call and never read back from the
+    # provider response, so a compromised server cannot redirect a citation.
+    resource_reference_path: str | None = None
     provider_input_schema_sha256: str = field(init=False)
     provider_output_schema_sha256: str | None = field(init=False)
 
     def __post_init__(self) -> None:
         if self.action_class != ToolActionClass.READ:
             raise ValueError("The read-only MCP registry cannot contain mutations")
+        if self.resource_reference_path is not None:
+            argument = self._resource_reference_argument()
+            required = set(self.public_input_schema.get("required", ()))
+            if argument not in required:
+                raise ValueError(
+                    f"{self.tool_name} cites {argument}, which is not a required public argument"
+                )
         object.__setattr__(
             self,
             "provider_input_schema_sha256",
@@ -111,6 +129,36 @@ class ToolContract:
                 else None
             ),
         )
+
+    def _resource_reference_argument(self) -> str:
+        assert self.resource_reference_path is not None
+        names = [
+            name
+            for _, name, _, _ in Formatter().parse(self.resource_reference_path)
+            if name is not None
+        ]
+        if len(names) != 1 or not names[0]:
+            raise ValueError(
+                f"{self.tool_name} needs exactly one named placeholder in its citation path"
+            )
+        return names[0]
+
+    def resource_reference(self, arguments: Mapping[str, Any]) -> str | None:
+        """Build the citation URL from our own validated arguments, or None.
+
+        The reference is derived, never observed: the placeholder is filled from
+        the caller's argument after JSON-Schema validation, then percent-encoded
+        with no safe characters so a value cannot escape its path segment.
+        """
+
+        if self.resource_reference_path is None:
+            return None
+        argument = self._resource_reference_argument()
+        value = arguments.get(argument)
+        if not isinstance(value, str) or not value:
+            return None
+        path = self.resource_reference_path.format(**{argument: quote(value, safe="")})
+        return f"{self.source_origin}{path}"
 
 
 def _object_schema(
@@ -262,6 +310,7 @@ _JIRA_CONTRACTS = (
             },
             ("cloudId", "issueIdOrKey"),
         ),
+        resource_reference_path="/browse/{issueIdOrKey}",
     ),
     ToolContract(
         server_id="atlassian-rovo",
@@ -285,6 +334,7 @@ _JIRA_CONTRACTS = (
             },
             ("cloudId", "issueIdOrKey"),
         ),
+        resource_reference_path="/browse/{issueIdOrKey}",
     ),
 )
 
@@ -428,6 +478,7 @@ _CONFLUENCE_CONTRACTS = (
             },
             ("cloudId", "pageId"),
         ),
+        resource_reference_path="/wiki/pages/{pageId}",
     ),
     ToolContract(
         server_id="atlassian-rovo",
@@ -455,6 +506,7 @@ _CONFLUENCE_CONTRACTS = (
             },
             ("cloudId", "pageId"),
         ),
+        resource_reference_path="/wiki/pages/{pageId}",
     ),
     ToolContract(
         server_id="atlassian-rovo",

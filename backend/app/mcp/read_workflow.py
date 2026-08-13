@@ -428,6 +428,10 @@ class MCPReadWorkflow:
             policy_version=contract.policy_version,
             correlation_id=correlation_id,
             retrieved_at=datetime.now(UTC),
+            # Derived from our own validated arguments, so it identifies the resource
+            # asked for, not one the provider claims to have returned. source_complete
+            # stays false: no authenticated output schema attests the body is whole.
+            resource_reference=contract.resource_reference(bound_arguments),
         )
         return MCPReadResult(
             content=tuple(content),
