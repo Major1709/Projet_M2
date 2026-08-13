@@ -67,13 +67,9 @@ class Settings(BaseSettings):
             raise ValueError("The Jira MCP binding requires its server-side cloud ID")
         if self.mcp_confluence_enabled and self.mcp_atlassian_confluence_cloud_id is None:
             raise ValueError("The Confluence MCP binding requires its server-side cloud ID")
-        if (
-            self.mcp_jira_enabled
-            and self.mcp_confluence_enabled
-            and self.mcp_atlassian_jira_cloud_id
-            == self.mcp_atlassian_confluence_cloud_id
-        ):
-            raise ValueError("Jira and Confluence MCP bindings require distinct cloud IDs")
+        # Jira and Confluence keep separate settings so each binding is declared and
+        # injected on its own, but Atlassian issues one cloud ID per site covering
+        # both products, so the two values are expected to coincide on a single site.
 
         development_grant_values = (
             self.mcp_atlassian_bearer_token_file,

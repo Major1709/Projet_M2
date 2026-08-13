@@ -38,6 +38,7 @@ from app.mcp.errors import (
     MCPResponseTooLarge,
     MCPSchemaRejected,
     MCPToolDenied,
+    MCPTransportFailure,
 )
 from app.mcp.ports import MCPReadTransport, RemoteContentBlock, RemoteToolResult
 from app.mcp.registry import (
@@ -179,6 +180,19 @@ class MCPReadWorkflow:
                 },
             )
             raise
+        except Exception as error:
+            failure = MCPTransportFailure()
+            await self._append_failed_audit(failure, contract, context, call.correlation_id)
+            logger.exception(
+                "MCP read failed unexpectedly",
+                extra={
+                    "mcp_error_code": failure.code,
+                    "mcp_provider": contract.provider,
+                    "mcp_tool": contract.tool_name,
+                    "correlation_id": call.correlation_id,
+                },
+            )
+            raise failure from error
 
         await self._append_audit(
             event_type=AuditEventType.MCP_READ_COMPLETED,

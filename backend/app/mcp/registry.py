@@ -14,8 +14,11 @@ CONFLUENCE_SOURCE_ORIGIN = "https://andrianalyfanny.atlassian.net"
 FIGMA_SOURCE_ORIGIN = "https://www.figma.com"
 FIGMA_FILE_KEY = "Ie3SsqL1KetjinTDHcNm2D"
 FIGMA_NODE_ID = "36:114"
-MCP_POLICY_VERSION = "SPEC-MCP-RO-001-r1"
-APPROVED_PROTOCOL_VERSIONS = frozenset({"2026-07-28"})
+MCP_POLICY_VERSION = "SPEC-MCP-RO-001-r2"
+# Pinned deliberately: a remote server negotiates down to whatever the client
+# accepts, so every entry added here widens what a provider can force on us.
+# 2025-11-25 is the highest version the Atlassian MCP server currently speaks.
+APPROVED_PROTOCOL_VERSIONS = frozenset({"2026-07-28", "2025-11-25"})
 
 _NON_VALIDATION_SCHEMA_KEYS = frozenset(
     {"$schema", "$id", "default", "description", "examples", "title"}
@@ -140,6 +143,11 @@ def _array(item: dict[str, Any], *, maximum: int) -> dict[str, Any]:
 _REMOTE_STRING = {"type": "string"}
 _CLOUD_ID = {"type": "string"}
 _EMPTY = _object_schema()
+# Mirrors what the Atlassian server actually publishes for its argument-free
+# tools: an open object, without the additionalProperties guard we impose on our
+# own public contract. Provider schemas must reproduce the provider byte for
+# byte, otherwise the drift check fires on a difference we invented ourselves.
+_PROVIDER_EMPTY = {"type": "object", "properties": {}}
 
 _ATLASSIAN_COMMON = (
     ToolContract(
@@ -150,7 +158,7 @@ _ATLASSIAN_COMMON = (
         tool_name="atlassianUserInfo",
         binding_kind=MCPBindingKind.NONE,
         public_input_schema=_EMPTY,
-        provider_input_schema=_EMPTY,
+        provider_input_schema=_PROVIDER_EMPTY,
     ),
     ToolContract(
         server_id="atlassian-rovo",
@@ -160,7 +168,7 @@ _ATLASSIAN_COMMON = (
         tool_name="getAccessibleAtlassianResources",
         binding_kind=MCPBindingKind.NONE,
         public_input_schema=_EMPTY,
-        provider_input_schema=_EMPTY,
+        provider_input_schema=_PROVIDER_EMPTY,
     ),
 )
 
@@ -216,6 +224,8 @@ _JIRA_CONTRACTS = (
                 "maxResults": {"type": "number", "maximum": 100},
                 "fields": {"type": "array", "items": _REMOTE_STRING},
                 "nextPageToken": _REMOTE_STRING,
+                "responseContentFormat": {"type": "string", "enum": ["adf", "markdown"]},
+                "searchResultMode": {"type": "string", "enum": ["all", "count", "issues"]},
             },
             ("cloudId", "jql"),
         ),
@@ -248,6 +258,7 @@ _JIRA_CONTRACTS = (
                 "properties": {"type": "array", "items": _REMOTE_STRING},
                 "updateHistory": {"type": "boolean"},
                 "failFast": {"type": "boolean"},
+                "responseContentFormat": {"type": "string", "enum": ["adf", "markdown"]},
             },
             ("cloudId", "issueIdOrKey"),
         ),
@@ -288,16 +299,9 @@ _CONFLUENCE_CONTRACTS = (
         public_input_schema=_object_schema(
             {
                 "keys": _array(_string(maximum=255), maximum=50),
-                "type": {
-                    "type": "string",
-                    "enum": ["global", "collaboration", "knowledge_base", "personal"],
-                },
+                "type": {"type": "string", "enum": ["global", "personal"]},
                 "status": {"type": "string", "enum": ["current", "archived"]},
                 "labels": _array(_string(maximum=255), maximum=50),
-                "sort": _string(maximum=100),
-                "descriptionFormat": {"type": "string", "enum": ["plain", "view"]},
-                "includeIcon": {"type": "boolean"},
-                "cursor": _string(maximum=4_096),
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
             }
         ),
@@ -316,10 +320,7 @@ _CONFLUENCE_CONTRACTS = (
                         {"type": "array", "items": _REMOTE_STRING},
                     ]
                 },
-                "type": {
-                    "type": "string",
-                    "enum": ["global", "collaboration", "knowledge_base", "personal"],
-                },
+                "type": {"type": "string", "enum": ["global", "personal"]},
                 "status": {"type": "string", "enum": ["current", "archived"]},
                 "labels": {
                     "anyOf": [
@@ -327,12 +328,15 @@ _CONFLUENCE_CONTRACTS = (
                         {"type": "array", "items": _REMOTE_STRING},
                     ]
                 },
+                "expand": {
+                    "anyOf": [
+                        _REMOTE_STRING,
+                        {"type": "array", "items": _REMOTE_STRING},
+                    ]
+                },
                 "favoritedBy": _REMOTE_STRING,
-                "notFavoritedBy": _REMOTE_STRING,
-                "sort": _REMOTE_STRING,
-                "descriptionFormat": {"type": "string", "enum": ["plain", "view"]},
-                "includeIcon": {"type": "boolean"},
-                "cursor": _REMOTE_STRING,
+                "favourite": {"type": "boolean"},
+                "start": {"type": "number"},
                 "limit": {"type": "number"},
             },
             ("cloudId",),
@@ -368,7 +372,6 @@ _CONFLUENCE_CONTRACTS = (
                         "-title",
                     ],
                 },
-                "depth": {"type": "string", "enum": ["all", "root"]},
             },
             ("spaceId",),
         ),
@@ -376,7 +379,7 @@ _CONFLUENCE_CONTRACTS = (
             {
                 "cloudId": _CLOUD_ID,
                 "spaceId": _REMOTE_STRING,
-                "limit": {"type": "number"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 250},
                 "cursor": _REMOTE_STRING,
                 "status": {
                     "type": "string",
@@ -396,7 +399,8 @@ _CONFLUENCE_CONTRACTS = (
                         "-title",
                     ],
                 },
-                "depth": {"type": "string", "enum": ["all", "root"]},
+                "contentFormat": {"type": "string", "enum": ["adf", "markdown"]},
+                "contentType": {"type": "string", "enum": ["blog", "page"]},
             },
             ("cloudId", "spaceId"),
         ),
@@ -419,7 +423,8 @@ _CONFLUENCE_CONTRACTS = (
             {
                 "cloudId": _CLOUD_ID,
                 "pageId": _REMOTE_STRING,
-                "contentFormat": {"type": "string", "enum": ["markdown", "adf"]},
+                "contentFormat": {"type": "string", "enum": ["adf", "html", "markdown"]},
+                "contentType": {"type": "string", "enum": ["blog", "page"]},
             },
             ("cloudId", "pageId"),
         ),

@@ -216,12 +216,11 @@ class SDKMCPReadSession:
                     if cursor in seen_cursors:
                         raise MCPInvalidResponse()
                     seen_cursors.add(cursor)
-        except TimeoutError as error:
-            raise MCPCallTimeout() from error
-        except MCPReadError:
-            raise
-        except Exception as error:
-            raise MCPTransportFailure() from error
+        except BaseException as error:
+            mapped = _map_transport_exception(error)
+            if mapped is error:
+                raise
+            raise mapped from error
         raise MCPInvalidResponse()
 
     async def call_tool(
@@ -237,12 +236,11 @@ class SDKMCPReadSession:
                     arguments,
                     read_timeout_seconds=CALL_TIMEOUT_SECONDS,
                 )
-        except TimeoutError as error:
-            raise MCPCallTimeout() from error
-        except MCPReadError:
-            raise
-        except Exception as error:
-            raise MCPTransportFailure() from error
+        except BaseException as error:
+            mapped = _map_transport_exception(error)
+            if mapped is error:
+                raise
+            raise mapped from error
 
         if result.is_error:
             raise MCPRemoteToolFailure()
@@ -318,6 +316,36 @@ class SDKMCPReadSession:
         return self._forbidden_secret in serialized
 
 
+def _iter_leaf_exceptions(error: BaseException) -> Iterable[BaseException]:
+    if isinstance(error, BaseExceptionGroup):
+        for child in error.exceptions:
+            yield from _iter_leaf_exceptions(child)
+    else:
+        yield error
+
+
+def _map_transport_exception(error: BaseException) -> BaseException:
+    """Map an SDK failure onto the MCP error taxonomy, flattening exception groups.
+
+    The SDK client runs its session on an internal task group, so any failure can
+    reach us wrapped in a ``BaseExceptionGroup``. Cancellation is returned intact
+    so the surrounding cancel scopes keep their own unwinding semantics.
+    """
+    leaves = tuple(_iter_leaf_exceptions(error))
+    cancelled_exc = anyio.get_cancelled_exc_class()
+    if any(
+        isinstance(leaf, cancelled_exc | GeneratorExit | KeyboardInterrupt | SystemExit)
+        for leaf in leaves
+    ):
+        return error
+    for leaf in leaves:
+        if isinstance(leaf, MCPReadError):
+            return leaf
+    if any(isinstance(leaf, TimeoutError) for leaf in leaves):
+        return MCPCallTimeout()
+    return MCPTransportFailure()
+
+
 class SDKRemoteMCPTransport:
     """MCP Python SDK v2 Streamable HTTP adapter with no retries or redirects."""
 
@@ -382,26 +410,16 @@ class SDKRemoteMCPTransport:
             cache=None,
             input_required_max_rounds=0,
         )
-        entered = False
         try:
-            async with http_client:
-                try:
-                    with anyio.fail_after(CALL_TIMEOUT_SECONDS):
-                        await client.__aenter__()
-                        entered = True
-                    if client.protocol_version not in APPROVED_PROTOCOL_VERSIONS:
-                        raise MCPProtocolRejected()
-                    yield SDKMCPReadSession(
-                        client=client,
-                        forbidden_secret=grant.access_token,
-                    )
-                finally:
-                    if entered:
-                        with anyio.move_on_after(CONNECT_TIMEOUT_SECONDS):
-                            await client.__aexit__(None, None, None)
-        except TimeoutError as error:
-            raise MCPCallTimeout() from error
-        except MCPReadError:
-            raise
-        except Exception as error:
-            raise MCPTransportFailure() from error
+            async with http_client, client:
+                if client.protocol_version not in APPROVED_PROTOCOL_VERSIONS:
+                    raise MCPProtocolRejected()
+                yield SDKMCPReadSession(
+                    client=client,
+                    forbidden_secret=grant.access_token,
+                )
+        except BaseException as error:
+            mapped = _map_transport_exception(error)
+            if mapped is error:
+                raise
+            raise mapped from error

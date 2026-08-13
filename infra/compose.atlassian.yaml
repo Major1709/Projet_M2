@@ -1,0 +1,43 @@
+# Surcouche d'activation Atlassian, developpement uniquement.
+#
+# Etape d'amorcage (Phase 2) : elle ouvre les outils de decouverte Atlassian
+# `atlassianUserInfo` et `getAccessibleAtlassianResources`, qui sont declares
+# binding_kind=NONE dans le registre et ne demandent donc aucun cloudId. C'est
+# par eux qu'on obtient les cloudId, avant d'activer Jira et Confluence via
+# compose.atlassian-bindings.yaml.
+#
+# Usage :
+#   docker compose -f compose.yaml -f compose.atlassian.yaml up
+#
+# Pourquoi une surcouche et non le socle : le backend refuse de demarrer si une
+# liaison de grant est presente alors que PKA_MCP_GRANT_BACKEND vaut disabled
+# (backend/app/core/config.py). Le socle reste donc ferme par defaut, et ce
+# fichier est le seul endroit ou le jeton et les liaisons entrent.
+#
+# Prerequis avant le premier `up` :
+#   1. deposer le jeton porteur dans ${SECRETS_DIR}/atlassian_bearer_token
+#      (ASCII imprimable, 16 octets a 16 Kio, sans espace)
+#   2. renseigner dans infra/.env :
+#      PKA_MCP_ATLASSIAN_GRANT_TENANT_ID et PKA_MCP_ATLASSIAN_GRANT_USER_ID
+#      Ces deux valeurs doivent correspondre exactement aux en-tetes d'identite
+#      envoyes sur POST /api/mcp/reads, sinon toute lecture repond 503 sans
+#      indiquer la cause (comparaison a temps constant, volontairement muette).
+
+services:
+  api:
+    environment:
+      PKA_MCP_READS_ENABLED: "true"
+      PKA_MCP_ATLASSIAN_ENABLED: "true"
+      PKA_MCP_GRANT_BACKEND: development_files
+      PKA_MCP_ATLASSIAN_BEARER_TOKEN_FILE: /run/secrets/atlassian_bearer_token
+      PKA_MCP_ATLASSIAN_GRANT_TENANT_ID: ${PKA_MCP_ATLASSIAN_GRANT_TENANT_ID:?definir PKA_MCP_ATLASSIAN_GRANT_TENANT_ID dans infra/.env}
+      PKA_MCP_ATLASSIAN_GRANT_USER_ID: ${PKA_MCP_ATLASSIAN_GRANT_USER_ID:?definir PKA_MCP_ATLASSIAN_GRANT_USER_ID dans infra/.env}
+    secrets:
+      - atlassian_bearer_token
+
+# Le worker ne recoit deliberement ni le jeton ni les liaisons : les lectures MCP
+# sont servies par l'API. Moindre privilege.
+
+secrets:
+  atlassian_bearer_token:
+    file: ${SECRETS_DIR:-./secrets/dev}/atlassian_bearer_token

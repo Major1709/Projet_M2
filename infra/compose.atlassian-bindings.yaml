@@ -1,0 +1,29 @@
+# Liaisons Jira et Confluence, developpement uniquement.
+#
+# A appliquer en Phase 3, une fois les cloudId obtenus par l'appel de decouverte
+# `getAccessibleAtlassianResources` de la Phase 2. Ce fichier ne se suffit pas a
+# lui-meme : il complete compose.atlassian.yaml.
+#
+# Usage :
+#   docker compose -f compose.yaml \
+#                  -f compose.atlassian.yaml \
+#                  -f compose.atlassian-bindings.yaml up
+#
+# Les cloudId ne sont pas des secrets, mais ils identifient des sites reels :
+# ils vivent dans infra/.env, qui est ignore par Git, et non ici.
+#
+# Contraintes verifiees au demarrage par backend/app/core/config.py :
+#   - les deux cloudId doivent etre des UUID valides ;
+#   - activer Jira ou Confluence exige que le cloudId correspondant soit fourni.
+#
+# Les deux variables restent separees pour que chaque liaison soit declaree et
+# injectee pour elle-meme, mais Atlassian emet un seul cloudId par site couvrant
+# les deux produits : sur un site unique, les deux valeurs sont identiques.
+
+services:
+  api:
+    environment:
+      PKA_MCP_JIRA_ENABLED: "true"
+      PKA_MCP_CONFLUENCE_ENABLED: "true"
+      PKA_MCP_ATLASSIAN_JIRA_CLOUD_ID: ${PKA_MCP_ATLASSIAN_JIRA_CLOUD_ID:?definir PKA_MCP_ATLASSIAN_JIRA_CLOUD_ID dans infra/.env apres la decouverte}
+      PKA_MCP_ATLASSIAN_CONFLUENCE_CLOUD_ID: ${PKA_MCP_ATLASSIAN_CONFLUENCE_CLOUD_ID:?definir PKA_MCP_ATLASSIAN_CONFLUENCE_CLOUD_ID dans infra/.env apres la decouverte}

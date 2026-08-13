@@ -375,7 +375,7 @@ def test_remote_transport_uses_fixed_endpoint_no_redirects_and_bounded_timeouts(
     assert resolver.calls == [("mcp.figma.com", 443)]
 
 
-@pytest.mark.parametrize("protocol_version", ["2025-06-18", "2025-11-25"])
+@pytest.mark.parametrize("protocol_version", ["2025-06-18", "2025-03-26", "2024-11-05"])
 def test_remote_transport_rejects_unapproved_negotiated_protocol(
     monkeypatch: pytest.MonkeyPatch,
     protocol_version: str,

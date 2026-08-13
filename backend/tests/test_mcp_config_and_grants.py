@@ -59,14 +59,25 @@ def test_atlassian_site_bindings_require_provider_and_cloud_ids() -> None:
     )
     assert settings.mcp_atlassian_jira_cloud_id == JIRA_CLOUD_ID
 
-    with pytest.raises(ValidationError, match="distinct cloud IDs"):
+    # One Atlassian site issues a single cloud ID covering both products, so the two
+    # bindings sharing a value is the ordinary single-site configuration.
+    shared = Settings(
+        environment="test",
+        mcp_atlassian_enabled=True,
+        mcp_jira_enabled=True,
+        mcp_confluence_enabled=True,
+        mcp_atlassian_jira_cloud_id=JIRA_CLOUD_ID,
+        mcp_atlassian_confluence_cloud_id=JIRA_CLOUD_ID,
+    )
+    assert shared.mcp_atlassian_jira_cloud_id == shared.mcp_atlassian_confluence_cloud_id
+
+    with pytest.raises(ValidationError, match="server-side cloud ID"):
         Settings(
             environment="test",
             mcp_atlassian_enabled=True,
             mcp_jira_enabled=True,
             mcp_confluence_enabled=True,
             mcp_atlassian_jira_cloud_id=JIRA_CLOUD_ID,
-            mcp_atlassian_confluence_cloud_id=JIRA_CLOUD_ID,
         )
 
     distinct = Settings(

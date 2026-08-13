@@ -316,6 +316,20 @@ def test_unapproved_protocol_is_refused_before_tool_list() -> None:
     assert session.call_count == 0
 
 
+def test_atlassian_negotiated_protocol_is_approved() -> None:
+    """2025-11-25 is the highest revision the Atlassian MCP server speaks."""
+    workflow, _, session = workflow_for(
+        SourceSystem.FIGMA,
+        "whoami",
+        protocol_version="2025-11-25",
+    )
+
+    result = run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+
+    assert result.provenance.protocol_version == "2025-11-25"
+    assert session.call_count == 1
+
+
 def test_figma_target_is_injected_and_result_has_provenance() -> None:
     workflow, _, session = workflow_for(SourceSystem.FIGMA, "get_screenshot")
 
