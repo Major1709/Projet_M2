@@ -72,6 +72,20 @@ class MCPProvider(StrEnum):
     FIGMA = "figma"
 
 
+class MCPBindingKind(StrEnum):
+    """Which server-side binding a tool needs, and therefore which site it reads.
+
+    A delegated Atlassian token covers exactly one site, so this is also the key
+    that selects the grant: Jira and Confluence may live on different sites and
+    then require different tokens. ``NONE`` marks the site-independent tools.
+    """
+
+    NONE = "none"
+    JIRA = "jira"
+    CONFLUENCE = "confluence"
+    FIGMA = "figma"
+
+
 class MCPReadSourceSystem(StrEnum):
     ATLASSIAN = "atlassian"
     JIRA = "jira"

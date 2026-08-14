@@ -2,19 +2,28 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
 from string import Formatter
 from typing import Any
 from urllib.parse import quote
 
-from app.mcp.domain import MCPProvider, ToolActionClass
+from app.mcp.domain import MCPBindingKind, MCPProvider, ToolActionClass
 from app.mcp.domain import MCPReadSourceSystem as SourceSystem
 
 ATLASSIAN_ENDPOINT = "https://mcp.atlassian.com/v1/mcp"
 FIGMA_ENDPOINT = "https://mcp.figma.com/mcp"
-# One Atlassian site serves both products, so both origins are the same host,
-# confirmed against getAccessibleAtlassianResources. They stay separate constants
-# so a future multi-site deployment can diverge without touching the contracts.
+# Where a delegated Atlassian grant is traded for a fresh one, from the server's
+# own metadata at /.well-known/oauth-authorization-server. Pinned here rather than
+# read from the credentials document: that file only has to be tampered with once
+# to redirect a refresh token to an attacker, and the endpoint is not a per-install
+# value. Re-check it if Atlassian ever moves the authorisation server.
+ATLASSIAN_TOKEN_ENDPOINT = "https://cf.mcp.atlassian.com/v1/token"
+# One site now carries both products, so both origins are the same host. They stay
+# declared separately because that is a property of this deployment, not of the
+# protocol: Jira and Confluence can live on different sites, and a citation built
+# from the wrong origin resolves to a foreign server rather than failing loudly.
+# Verify against getAccessibleAtlassianResources when the deployment changes --
+# that tool only lists the sites the presented token covers, so a single call is
+# never proof that a site does not exist.
 JIRA_SOURCE_ORIGIN = "https://andrianalyfanny.atlassian.net"
 CONFLUENCE_SOURCE_ORIGIN = "https://andrianalyfanny.atlassian.net"
 FIGMA_SOURCE_ORIGIN = "https://www.figma.com"
@@ -29,13 +38,6 @@ APPROVED_PROTOCOL_VERSIONS = frozenset({"2026-07-28", "2025-11-25"})
 _NON_VALIDATION_SCHEMA_KEYS = frozenset(
     {"$schema", "$id", "default", "description", "examples", "title"}
 )
-
-
-class MCPBindingKind(StrEnum):
-    NONE = "none"
-    JIRA = "jira"
-    CONFLUENCE = "confluence"
-    FIGMA = "figma"
 
 
 def _semantic_schema(value: Any, *, parent_key: str | None = None) -> Any:

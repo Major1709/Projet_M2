@@ -153,13 +153,111 @@ Quatre contrats en portent un : `getJiraIssue` et `getJiraIssueRemoteIssueLinks`
 `/wiki/pages/{pageId}`. Les outils de recherche et de liste n'adressent pas une ressource
 unique et retournent `null`. `source_complete` reste `false` partout.
 
-Corrigé au passage : `JIRA_SOURCE_ORIGIN` pointait vers
-`https://andrianalyfanny-1786296714755.atlassian.net`, un hôte inexistant. Le site réel,
-confirmé par `getAccessibleAtlassianResources`, est `https://andrianalyfanny.atlassian.net`
-pour les deux produits. Toute citation Jira aurait été morte.
+## Deux sites Atlassian — 2026-08-14
+
+`getAccessibleAtlassianResources` ne liste que les sites couverts par **le jeton présenté**.
+Un appel unique n'est donc jamais la preuve qu'un site n'existe pas. Le 2026-08-13, ce
+raisonnement a été fait à l'envers : le jeton était scopé sur le site Confluence, l'outil n'a
+retourné que celui-ci, et `JIRA_SOURCE_ORIGIN` a été « corrigé » vers cet hôte. C'était faux.
+
+Le déploiement comporte **deux sites distincts**, chacun portant un produit, chacun confirmé
+par un jeton scopé sur lui :
+
+| Site | Produit | cloudId |
+| --- | --- | --- |
+| `https://andrianalyfanny-1786296714755.atlassian.net` | Jira | `c3f33a07-373a-4c4c-94ea-08d4fc750651` |
+| `https://andrianalyfanny.atlassian.net` | Confluence | `a761589f-69b8-4373-9c30-7561c2d45a39` |
+
+`JIRA_SOURCE_ORIGIN` est rétabli à sa valeur d'origine et `PKA_MCP_ATLASSIAN_JIRA_CLOUD_ID`
+corrigé : il portait le cloudId Confluence, donc toutes les lectures Jira du 2026-08-13
+interrogeaient le mauvais site. Elles répondaient `200` avec une liste vide, ce que le smoke
+test compte comme un succès — il qualifie la connexion, jamais la pertinence du contenu.
+
+Conséquence structurelle : **un jeton délégué ne couvre qu'un seul site**, alors que le
+courtier de grants indexait par fournisseur. Jira et Confluence ne pouvaient donc pas être lus
+dans la même configuration ; activer l'un faisait répondre 401 à l'autre. Corrigé le même jour :
+le courtier indexe désormais par `(fournisseur, liaison)`, chaque combinaison étant enregistrée
+explicitement à l'amorçage. Aucun repli à l'exécution : une liaison non enregistrée échoue en
+`MCP_GRANT_UNAVAILABLE` plutôt que d'emprunter le jeton d'une autre, ce qui reviendrait à
+présenter la crédentielle d'un site à un appel visant l'autre.
+
+Preuve des deux produits simultanés : Jira `KAN-1/2/3` sur `…-1786296714755`, et l'espace
+Confluence `DL` sur `andrianalyfanny`, lus dans la même configuration, avec deux
+`binding_fingerprint` distincts et deux `source_origin` distincts.
+
+Preuve de lecture réelle après correction : `KAN-2` du projet `KAN` (« My Software Team »),
+statut « En cours », citation `https://andrianalyfanny-1786296714755.atlassian.net/browse/KAN-2`,
+corrélation `963c710d26ea4fcab3b0d9a9bfb81bec:1`.
+
+## Jetons auto-renouvelés — 2026-08-14
+
+Un jeton d'accès Atlassian vit environ 8 h (`expires_in: 28320`), pas une heure comme
+l'annonçait le smoke test. Sur un montage à jeton statique, cela impose une ré-autorisation
+manuelle à peu près chaque jour ouvré — et chaque expiration se présentait comme un
+`MCP_TRANSPORT_FAILURE`, ce qui a envoyé le diagnostic vers le réseau deux fois dans la
+même journée.
+
+La cause n'était pas la durée de vie mais l'absence de renouvellement : le courtier lisait un
+fichier et rien d'autre, ignorant qu'un `refresh_token` existait. Le serveur MCP Atlassian
+publie pourtant tout ce qu'il faut à
+`/.well-known/oauth-authorization-server` : `token_endpoint` sur `cf.mcp.atlassian.com/v1/token`,
+`grant_types_supported` incluant `refresh_token`, et `token_endpoint_auth_method: none` —
+client public, donc aucun secret client à détenir.
+
+`RenewableCredentialsFile` échange donc lui-même un grant expiré. Trois points non évidents :
+
+- **Le `token_endpoint` est épinglé dans le registre, jamais lu depuis le document.** Il suffirait
+  de falsifier le fichier une fois pour rediriger le `refresh_token` vers un tiers.
+- **Atlassian fait tourner le `refresh_token` à chaque échange.** Le document est donc réécrit,
+  atomiquement (fichier voisin puis `os.replace`) : perdre le nouveau jeton ramènerait
+  définitivement à la ré-autorisation manuelle. Un verrou sérialise les renouvellements, deux
+  échanges concurrents révoquant le perdant.
+- **Un secret Compose `file:` ne convient pas** : il est copié en lecture seule à la création du
+  conteneur. D'où un montage lecture-écriture dans `compose.atlassian-oauth.yaml`, qui supprime
+  aussi le `--force-recreate` après rotation.
+
+Un échec de renouvellement remonte en `MCP_GRANT_UNAVAILABLE` (503), jamais avec le corps de
+la réponse : celui-ci contient le code d'erreur du fournisseur et parfois le grant lui-même.
+
+Reste ouvert : `ConnectTimeout` et un 401 fournisseur sont toujours classés
+`MCP_TRANSPORT_FAILURE` (502) au lieu de 504 et 503, et `CONNECT_TIMEOUT_SECONDS = 3.0`
+produit des échecs isolés au premier appel.
+
+Défaut de conception constaté à la mise en service : le renouvellement ne se déclenche que
+sur l'horloge, jamais sur un refus. Un jeton **révoqué** avant son expiration — ce que fait
+Atlassian quand le même client est ré-autorisé — reste présenté jusqu'à sa date théorique, et
+échoue en boucle. Un 401 devrait déclencher un échange puis une seule reprise.
+
+## Retour au mono-site — 2026-08-14
+
+Un espace Jira a été créé sur `andrianalyfanny`, qui porte déjà Confluence. Un seul site, donc
+un seul cloudId, un seul jeton, et les surcharges par liaison redeviennent inutiles : le
+document de credentials du fournisseur sert les trois liaisons par défaut. `JIRA_SOURCE_ORIGIN`
+suit et vaut désormais le même hôte que Confluence.
+
+Les tickets `KAN-1/2/3` (« My Software Team ») restent sur `…-1786296714755` et sortent du
+périmètre lisible ; le `KAN` du nouveau site (« Mon espace Kanban ») est vide.
+
+Deux erreurs de méthode dans cette séance, de la même famille que celle du 2026-08-13 :
+
+- Un diagnostic « mauvais site » a été prononcé alors que la mesure passait par l'**ancien
+  code** — le conteneur n'avait pas été reconstruit, et le courtier statique répondait à la
+  place du document. Le Dockerfile embarque les sources : `--force-recreate` ne suffit jamais,
+  il faut `--build`.
+- Là encore, `getAccessibleAtlassianResources` a été lu comme une propriété du site alors
+  qu'il est une propriété **du jeton présenté**.
 
 ## Outillage
 
 `scripts/mcp-smoke.sh` sonde les trois surfaces — identité seule, puis Jira et Confluence qui
 exercent en plus l'injection du cloudId — et extrait `detail.code`, seul champ qui discrimine les
 six causes regroupées sous 502.
+
+`scripts/atlassian_credentials_import.py` construit un document de credentials à partir du cache
+de `mcp-remote`, sans afficher ni faire transiter la moindre valeur par un copier-coller ou par
+l'historique du shell. À rejouer une fois par site, et seulement si le `refresh_token` est révoqué.
+
+Piège persistant du cache `mcp-remote` : il est indexé par une empreinte de l'URL du serveur,
+identique pour les deux sites. Une nouvelle autorisation écrase donc la précédente, et
+l'autorisation en cache est rejouée en silence — l'écran de choix du site ne réapparaît qu'après
+suppression de `~/.mcp-auth`.

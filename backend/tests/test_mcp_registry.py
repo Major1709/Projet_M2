@@ -86,8 +86,10 @@ def test_schema_fingerprint_ignores_only_documentation_and_order() -> None:
 def test_endpoints_origins_and_figma_target_are_fixed_not_configurable() -> None:
     assert ATLASSIAN_ENDPOINT == "https://mcp.atlassian.com/v1/mcp"
     assert FIGMA_ENDPOINT == "https://mcp.figma.com/mcp"
-    # One Atlassian site serves both products, confirmed against
-    # getAccessibleAtlassianResources, so both origins are the same host.
+    # Both products are hosted on one site in this deployment, so both origins are
+    # that site. An origin that drifts from the site actually read makes every
+    # citation resolve to a foreign server instead of failing loudly, which is why
+    # these are asserted rather than derived from configuration.
     assert JIRA_SOURCE_ORIGIN == "https://andrianalyfanny.atlassian.net"
     assert CONFLUENCE_SOURCE_ORIGIN == "https://andrianalyfanny.atlassian.net"
     assert FIGMA_FILE_KEY == "Ie3SsqL1KetjinTDHcNm2D"

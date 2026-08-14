@@ -38,6 +38,20 @@ class Settings(BaseSettings):
     mcp_figma_enabled: bool = False
     mcp_grant_backend: Literal["disabled", "development_files"] = "disabled"
     mcp_atlassian_bearer_token_file: Path | None = None
+    # A delegated Atlassian token covers exactly one site. When Jira and Confluence
+    # are hosted on different sites they need different tokens; these two override
+    # the provider-wide file for their binding and default to it when unset, so a
+    # single-site deployment stays configured by the one file above.
+    mcp_atlassian_jira_bearer_token_file: Path | None = None
+    mcp_atlassian_confluence_bearer_token_file: Path | None = None
+    # A credentials document carries the refresh token alongside the access token,
+    # so the broker renews the grant itself instead of expiring into a manual
+    # re-authorisation. Where one is configured it supersedes the bearer token file
+    # for that binding; the plain files stay supported for providers issuing
+    # long-lived personal tokens, which have nothing to refresh.
+    mcp_atlassian_credentials_file: Path | None = None
+    mcp_atlassian_jira_credentials_file: Path | None = None
+    mcp_atlassian_confluence_credentials_file: Path | None = None
     mcp_atlassian_grant_tenant_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_atlassian_grant_user_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_figma_bearer_token_file: Path | None = None
@@ -67,12 +81,18 @@ class Settings(BaseSettings):
             raise ValueError("The Jira MCP binding requires its server-side cloud ID")
         if self.mcp_confluence_enabled and self.mcp_atlassian_confluence_cloud_id is None:
             raise ValueError("The Confluence MCP binding requires its server-side cloud ID")
-        # Jira and Confluence keep separate settings so each binding is declared and
-        # injected on its own, but Atlassian issues one cloud ID per site covering
-        # both products, so the two values are expected to coincide on a single site.
+        # Atlassian issues one cloud ID per site covering both products: the two
+        # values coincide on a single-site deployment and differ as soon as Jira and
+        # Confluence live on separate sites. Each stays declared and injected on its
+        # own so neither binding can borrow the other's site.
 
         development_grant_values = (
             self.mcp_atlassian_bearer_token_file,
+            self.mcp_atlassian_jira_bearer_token_file,
+            self.mcp_atlassian_confluence_bearer_token_file,
+            self.mcp_atlassian_credentials_file,
+            self.mcp_atlassian_jira_credentials_file,
+            self.mcp_atlassian_confluence_credentials_file,
             self.mcp_atlassian_grant_tenant_id,
             self.mcp_atlassian_grant_user_id,
             self.mcp_figma_bearer_token_file,
@@ -98,7 +118,7 @@ class Settings(BaseSettings):
             if self.mcp_atlassian_enabled:
                 self._require_complete_grant_binding(
                     "Atlassian",
-                    self.mcp_atlassian_bearer_token_file,
+                    self.mcp_atlassian_bearer_token_file or self.mcp_atlassian_credentials_file,
                     self.mcp_atlassian_grant_tenant_id,
                     self.mcp_atlassian_grant_user_id,
                 )
@@ -125,6 +145,28 @@ class Settings(BaseSettings):
                     + ", ".join(missing)
                 )
         return self
+
+    @property
+    def atlassian_jira_token_file(self) -> Path | None:
+        """Token file serving the Jira binding: its override, else the provider file."""
+        return self.mcp_atlassian_jira_bearer_token_file or self.mcp_atlassian_bearer_token_file
+
+    @property
+    def atlassian_confluence_token_file(self) -> Path | None:
+        """Token file serving the Confluence binding: its override, else the provider file."""
+        return (
+            self.mcp_atlassian_confluence_bearer_token_file or self.mcp_atlassian_bearer_token_file
+        )
+
+    @property
+    def atlassian_jira_credentials_file(self) -> Path | None:
+        """Renewable credentials serving Jira: its override, else the provider document."""
+        return self.mcp_atlassian_jira_credentials_file or self.mcp_atlassian_credentials_file
+
+    @property
+    def atlassian_confluence_credentials_file(self) -> Path | None:
+        """Renewable credentials serving Confluence: its override, else the provider document."""
+        return self.mcp_atlassian_confluence_credentials_file or self.mcp_atlassian_credentials_file
 
     @staticmethod
     def _require_complete_grant_binding(

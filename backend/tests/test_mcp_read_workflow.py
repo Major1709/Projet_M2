@@ -16,6 +16,7 @@ from app.audit.domain import AuditEventType
 from app.core.config import Settings
 from app.core.identity import SecurityContext
 from app.mcp.domain import (
+    MCPBindingKind,
     MCPProvider,
     MCPReadBatch,
     MCPReadCommand,
@@ -45,7 +46,6 @@ from app.mcp.registry import (
     FIGMA_FILE_KEY,
     FIGMA_NODE_ID,
     JIRA_SOURCE_ORIGIN,
-    MCPBindingKind,
     MCPToolRegistry,
     ToolContract,
     schema_sha256,
@@ -104,17 +104,20 @@ class SpyTransport:
         self.session = session
         self.connect_count = 0
         self.providers: list[object] = []
+        self.bindings: list[object] = []
 
     @asynccontextmanager
     async def connect(
         self,
         *,
         provider: object,
+        binding: object,
         context: SecurityContext,
     ) -> AsyncIterator[MCPReadSession]:
         del context
         self.connect_count += 1
         self.providers.append(provider)
+        self.bindings.append(binding)
         yield self.session
 
 
@@ -372,6 +375,38 @@ def test_atlassian_cloud_id_is_injected_from_distinct_binding() -> None:
         "issueIdOrKey": "PKA-1",
         "cloudId": str(JIRA_CLOUD_ID),
     }
+
+
+@pytest.mark.parametrize(
+    ("source_system", "tool_name", "expected_binding"),
+    [
+        (SourceSystem.JIRA, "getJiraIssue", MCPBindingKind.JIRA),
+        (SourceSystem.CONFLUENCE, "getConfluenceSpaces", MCPBindingKind.CONFLUENCE),
+        (SourceSystem.ATLASSIAN, "atlassianUserInfo", MCPBindingKind.NONE),
+    ],
+)
+def test_transport_receives_the_binding_that_selects_the_site_token(
+    source_system: SourceSystem,
+    tool_name: str,
+    expected_binding: MCPBindingKind,
+) -> None:
+    """The grant is chosen per binding, so the contract's binding must reach the transport.
+
+    A delegated Atlassian token covers a single site. If the workflow only passed the
+    provider, a Confluence read would be authorised with the Jira site's token.
+    """
+
+    workflow, transport, _ = workflow_for(source_system, tool_name)
+    arguments = {"issueIdOrKey": "PKA-1"} if tool_name == "getJiraIssue" else {}
+
+    run_call(
+        workflow,
+        source_system=source_system,
+        tool_name=tool_name,
+        arguments=arguments,
+    )
+
+    assert transport.bindings == [expected_binding]
 
 
 def test_resource_reference_is_derived_from_validated_arguments() -> None:

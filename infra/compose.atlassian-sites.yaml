@@ -1,0 +1,50 @@
+# Un jeton par site Atlassian, developpement uniquement.
+#
+# A n'appliquer que si Jira et Confluence vivent sur DEUX sites distincts. Un
+# jeton delegue Atlassian ne couvre qu'un seul site : sans cette surcouche, la
+# liaison hebergee sur l'autre site repond 401, remonte en 502 et donne
+# l'impression trompeuse d'une panne reseau.
+#
+# Sur un deploiement mono-site, ne pas l'appliquer : atlassian_bearer_token sert
+# alors les deux liaisons, et c'est le comportement par defaut.
+#
+# Usage :
+#   docker compose -f compose.yaml \
+#                  -f compose.atlassian.yaml \
+#                  -f compose.atlassian-bindings.yaml \
+#                  -f compose.atlassian-sites.yaml up
+#
+# Prerequis : deposer chaque jeton dans son fichier, obtenu en relancant le flux
+# de consentement une fois par site (vider ~/.mcp-auth entre les deux, sinon
+# l'autorisation en cache est rejouee et l'ecran de choix ne reapparait pas).
+#
+#   ${SECRETS_DIR}/atlassian_jira_bearer_token        -> site portant Jira
+#   ${SECRETS_DIR}/atlassian_confluence_bearer_token  -> site portant Confluence
+#
+# atlassian_bearer_token reste requis : il sert les outils sans liaison
+# (atlassianUserInfo, getAccessibleAtlassianResources), qui ne visent aucun site.
+# N'importe lequel des deux jetons convient pour ce fichier.
+#
+# Les deux fichiers doivent EXISTER avant le premier `up`. Docker cree un
+# repertoire vide quand le chemin d'un secret `file:` est absent ; le courtier
+# lit alors un repertoire et refuse la lecture en MCP_GRANT_UNAVAILABLE. Si cela
+# arrive : arreter l'api, supprimer les repertoires, creer les fichiers, relancer.
+#
+# Rappel : un secret `file:` est copie a la creation du conteneur, pas monte en
+# direct. Apres rotation d'un jeton, `up -d --force-recreate api`.
+
+services:
+  api:
+    environment:
+      PKA_MCP_ATLASSIAN_JIRA_BEARER_TOKEN_FILE: /run/secrets/atlassian_jira_bearer_token
+      PKA_MCP_ATLASSIAN_CONFLUENCE_BEARER_TOKEN_FILE: /run/secrets/atlassian_confluence_bearer_token
+    secrets:
+      - atlassian_bearer_token
+      - atlassian_jira_bearer_token
+      - atlassian_confluence_bearer_token
+
+secrets:
+  atlassian_jira_bearer_token:
+    file: ${SECRETS_DIR:-./secrets/dev}/atlassian_jira_bearer_token
+  atlassian_confluence_bearer_token:
+    file: ${SECRETS_DIR:-./secrets/dev}/atlassian_confluence_bearer_token

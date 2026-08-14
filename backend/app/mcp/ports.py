@@ -4,6 +4,7 @@ from typing import Any, Protocol
 
 from app.core.identity import SecurityContext
 from app.mcp.domain import (
+    MCPBindingKind,
     MCPExecutionResult,
     MCPProvider,
     MCPToolCall,
@@ -79,5 +80,6 @@ class MCPReadTransport(Protocol):
         self,
         *,
         provider: MCPProvider,
+        binding: MCPBindingKind,
         context: SecurityContext,
     ) -> AbstractAsyncContextManager[MCPReadSession]: ...

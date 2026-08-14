@@ -16,7 +16,7 @@ from mcp_types import ImageContent, TextContent
 
 from app.core.identity import SecurityContext
 from app.mcp.adapters.grants import DelegatedGrantBroker
-from app.mcp.domain import MCPProvider
+from app.mcp.domain import MCPBindingKind, MCPProvider
 from app.mcp.errors import (
     MCPCallTimeout,
     MCPDNSRejected,
@@ -363,6 +363,7 @@ class SDKRemoteMCPTransport:
         self,
         *,
         provider: MCPProvider,
+        binding: MCPBindingKind,
         context: SecurityContext,
     ) -> AsyncIterator[MCPReadSession]:
         endpoint = _ENDPOINTS.get(provider)
@@ -380,7 +381,9 @@ class SDKRemoteMCPTransport:
             not _is_approved_public_address(address) for address in addresses
         ):
             raise MCPDNSRejected()
-        grant = await self._grant_broker.acquire(provider=provider, context=context)
+        grant = await self._grant_broker.acquire(
+            provider=provider, binding=binding, context=context
+        )
         timeout = httpx2.Timeout(
             CALL_TIMEOUT_SECONDS,
             connect=CONNECT_TIMEOUT_SECONDS,

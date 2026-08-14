@@ -78,17 +78,23 @@ fi
 printf '%d sonde(s) en echec.\n' "${failures}"
 cat <<'EOF'
 
-  MCP_TRANSPORT_FAILURE   jeton expire (~1 h) -- le cas le plus frequent
-  MCP_GRANT_UNAVAILABLE   identite ou fichier secret absent
+  MCP_TRANSPORT_FAILURE   jeton expire (~8 h) sur un montage sans renouvellement
+  MCP_GRANT_UNAVAILABLE   identite, fichier absent, ou renouvellement refuse
   MCP_PROVIDER_DISABLED   une surcouche compose manque
   MCP_PROTOCOL_REJECTED   Atlassian a change de version negociee
   MCP_SCHEMA_REJECTED     derive de schema cote Atlassian
   MCP_REMOTE_TOOL_FAILURE cloudId errone, ou arguments refuses
 
-Renouvellement du jeton :
+Avec compose.atlassian-oauth.yaml, le backend renouvelle seul et un jeton
+expire ne devrait plus apparaitre. Si MCP_GRANT_UNAVAILABLE persiste, le
+refresh_token a probablement ete revoque : re-autoriser une fois le site,
   npx -y mcp-remote https://mcp.atlassian.com/v1/mcp
-  puis recopier access_token dans infra/secrets/dev/atlassian_bearer_token
-  avec un editeur de texte, et recreer le conteneur :
+puis reconstruire le document, sans copier-coller de jeton :
+  python scripts/atlassian_credentials_import.py \
+         infra/secrets/dev/atlassian-credentials/<site>.json
+
+Sur un montage a jeton statique (compose.atlassian-sites.yaml), le jeton se
+remplace a la main et le conteneur doit etre recree :
   docker compose -f compose.yaml -f compose.atlassian.yaml \
                  -f compose.atlassian-bindings.yaml up -d --force-recreate api
 EOF

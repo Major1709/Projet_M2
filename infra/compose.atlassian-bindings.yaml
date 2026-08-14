@@ -16,9 +16,17 @@
 #   - les deux cloudId doivent etre des UUID valides ;
 #   - activer Jira ou Confluence exige que le cloudId correspondant soit fourni.
 #
-# Les deux variables restent separees pour que chaque liaison soit declaree et
-# injectee pour elle-meme, mais Atlassian emet un seul cloudId par site couvrant
-# les deux produits : sur un site unique, les deux valeurs sont identiques.
+# Atlassian emet un cloudId par SITE, couvrant les deux produits de ce site. Les
+# deux valeurs sont donc identiques sur un deploiement mono-site -- cas de ce
+# deploiement -- et distinctes des que Jira et Confluence vivent sur deux sites.
+# Elles restent declarees et injectees separement pour qu'aucune liaison ne
+# puisse emprunter le site de l'autre le jour ou elles divergent.
+#
+# Attention : un jeton delegue ne couvre qu'un seul site. Avec deux sites, un
+# jeton unique ne peut pas servir les deux liaisons a la fois ; l'une repondra
+# 401, remonte a tort en 502. Le courtier indexe les grants par
+# (fournisseur, liaison) : donner alors un document par site via
+# compose.atlassian-oauth.yaml, dont les commentaires detaillent le cas.
 
 services:
   api:

@@ -18,7 +18,7 @@ from app.mcp.adapters.remote import (
     _LimitedAsyncByteStream,
     _reject_oversized_response,
 )
-from app.mcp.domain import MCPProvider
+from app.mcp.domain import MCPBindingKind, MCPProvider
 from app.mcp.errors import (
     MCPCallTimeout,
     MCPDNSRejected,
@@ -32,17 +32,19 @@ from app.mcp.errors import (
 class StubGrantBroker:
     def __init__(self, token: str = "synthetic-adapter-token-0001") -> None:
         self.token = token
-        self.calls: list[tuple[MCPProvider, SecurityContext]] = []
+        self.calls: list[tuple[MCPProvider, MCPBindingKind, SecurityContext]] = []
 
     async def acquire(
         self,
         *,
         provider: MCPProvider,
+        binding: MCPBindingKind,
         context: SecurityContext,
     ) -> BearerGrant:
-        self.calls.append((provider, context))
+        self.calls.append((provider, binding, context))
         return BearerGrant(
             provider=provider,
+            binding=binding,
             tenant_id=context.tenant_id,
             user_id=context.user_id,
             access_token=self.token,
@@ -355,7 +357,9 @@ def test_remote_transport_uses_fixed_endpoint_no_redirects_and_bounded_timeouts(
     context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
 
     async def connect_once() -> str:
-        async with transport.connect(provider=MCPProvider.FIGMA, context=context) as session:
+        async with transport.connect(
+            provider=MCPProvider.FIGMA, binding=MCPBindingKind.FIGMA, context=context
+        ) as session:
             return session.protocol_version
 
     assert asyncio.run(connect_once()) == "2026-07-28"
@@ -412,6 +416,7 @@ def test_remote_transport_rejects_unapproved_negotiated_protocol(
     async def connect_once() -> None:
         async with transport.connect(
             provider=MCPProvider.ATLASSIAN,
+            binding=MCPBindingKind.JIRA,
             context=SecurityContext(tenant_id="tenant-a", user_id="user-a"),
         ):
             raise AssertionError("An unapproved protocol must not yield a session")
@@ -444,6 +449,7 @@ def test_dns_preflight_refuses_private_metadata_and_mixed_answers_before_grant(
     async def connect_once() -> None:
         async with transport.connect(
             provider=MCPProvider.FIGMA,
+            binding=MCPBindingKind.FIGMA,
             context=SecurityContext(tenant_id="tenant-a", user_id="user-a"),
         ):
             raise AssertionError("A rejected DNS answer must not open a transport")
@@ -464,6 +470,7 @@ def test_dns_preflight_resolution_failure_is_safe_and_precedes_grant() -> None:
     async def connect_once() -> None:
         async with transport.connect(
             provider=MCPProvider.ATLASSIAN,
+            binding=MCPBindingKind.JIRA,
             context=SecurityContext(tenant_id="tenant-a", user_id="user-a"),
         ):
             raise AssertionError("A resolver failure must not open a transport")

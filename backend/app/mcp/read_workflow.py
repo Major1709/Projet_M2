@@ -16,6 +16,7 @@ from app.audit.ports import AuditSink
 from app.core.config import Settings
 from app.core.identity import SecurityContext
 from app.mcp.domain import (
+    MCPBindingKind,
     MCPContentKind,
     MCPProvider,
     MCPReadBatch,
@@ -45,7 +46,6 @@ from app.mcp.registry import (
     APPROVED_PROTOCOL_VERSIONS,
     FIGMA_FILE_KEY,
     FIGMA_NODE_ID,
-    MCPBindingKind,
     MCPToolRegistry,
     ToolContract,
     canonical_json_sha256,
@@ -137,6 +137,7 @@ class MCPReadWorkflow:
             with anyio.fail_after(MCP_READ_BUDGET_SECONDS):
                 async with self._transport.connect(
                     provider=contract.provider,
+                    binding=contract.binding_kind,
                     context=context,
                 ) as session:
                     if session.protocol_version not in APPROVED_PROTOCOL_VERSIONS:

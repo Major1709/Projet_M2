@@ -23,9 +23,9 @@ from app.mcp.adapters.grants import (
     UnavailableGrantBroker,
 )
 from app.mcp.adapters.remote import SDKRemoteMCPTransport
-from app.mcp.domain import MCPProvider
+from app.mcp.domain import MCPBindingKind, MCPProvider
 from app.mcp.read_workflow import MCPReadWorkflow
-from app.mcp.registry import MCPToolRegistry
+from app.mcp.registry import ATLASSIAN_TOKEN_ENDPOINT, MCPToolRegistry
 
 
 @dataclass(frozen=True)
@@ -76,30 +76,60 @@ def _build_mcp_read_workflow(settings: Settings, audit_sink: AuditSink) -> MCPRe
     if settings.mcp_grant_backend == "development_files":
         bindings: list[DevelopmentGrantBinding] = []
         if (
-            settings.mcp_atlassian_bearer_token_file is not None
-            and settings.mcp_atlassian_grant_tenant_id is not None
+            settings.mcp_atlassian_grant_tenant_id is not None
             and settings.mcp_atlassian_grant_user_id is not None
         ):
-            bindings.append(
+            # One entry per binding kind: a delegated token covers a single site, so
+            # Jira and Confluence get their own grant when they live on separate sites
+            # and fall back to the provider-wide one otherwise. The mapping is fixed
+            # here at startup, so the broker never has to guess at call time.
+            #
+            # Each pairs a renewable credentials document with a static token file.
+            # The document wins where both are configured: it can refresh itself,
+            # while the plain file expires into a manual re-authorisation.
+            atlassian_grants = {
+                MCPBindingKind.NONE: (
+                    settings.mcp_atlassian_credentials_file,
+                    settings.mcp_atlassian_bearer_token_file,
+                ),
+                MCPBindingKind.JIRA: (
+                    settings.atlassian_jira_credentials_file,
+                    settings.atlassian_jira_token_file,
+                ),
+                MCPBindingKind.CONFLUENCE: (
+                    settings.atlassian_confluence_credentials_file,
+                    settings.atlassian_confluence_token_file,
+                ),
+            }
+            bindings.extend(
                 DevelopmentGrantBinding(
                     provider=MCPProvider.ATLASSIAN,
+                    binding=binding_kind,
                     tenant_id=settings.mcp_atlassian_grant_tenant_id,
                     user_id=settings.mcp_atlassian_grant_user_id,
-                    token_file=settings.mcp_atlassian_bearer_token_file,
+                    credentials_file=credentials_file,
+                    token_endpoint=ATLASSIAN_TOKEN_ENDPOINT if credentials_file else None,
+                    token_file=None if credentials_file else token_file,
                 )
+                for binding_kind, (credentials_file, token_file) in atlassian_grants.items()
+                if credentials_file is not None or token_file is not None
             )
         if (
             settings.mcp_figma_bearer_token_file is not None
             and settings.mcp_figma_grant_tenant_id is not None
             and settings.mcp_figma_grant_user_id is not None
         ):
-            bindings.append(
+            # whoami is site-independent and carries NONE; the others carry FIGMA.
+            # A single file serves both, but each is registered on its own key.
+            bindings.extend(
                 DevelopmentGrantBinding(
                     provider=MCPProvider.FIGMA,
+                    binding=binding_kind,
                     tenant_id=settings.mcp_figma_grant_tenant_id,
                     user_id=settings.mcp_figma_grant_user_id,
                     token_file=settings.mcp_figma_bearer_token_file,
                 )
+                for binding_kind in (MCPBindingKind.NONE, MCPBindingKind.FIGMA)
             )
         grant_broker = DevelopmentFileGrantBroker(
             environment=settings.environment,
