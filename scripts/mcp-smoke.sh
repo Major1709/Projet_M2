@@ -90,7 +90,7 @@ expire ne devrait plus apparaitre. Si MCP_GRANT_UNAVAILABLE persiste, le
 refresh_token a probablement ete revoque : re-autoriser une fois le site,
   npx -y mcp-remote https://mcp.atlassian.com/v1/mcp
 puis reconstruire le document, sans copier-coller de jeton :
-  python scripts/atlassian_credentials_import.py \
+  python scripts/mcp_credentials_import.py \
          infra/secrets/dev/atlassian-credentials/<site>.json
 
 Sur un montage a jeton statique (compose.atlassian-sites.yaml), le jeton se

@@ -109,8 +109,9 @@ Cinq constats ont forcé des correctifs, chacun masquant le suivant :
 
 ## Limites connues et blocages
 
-- **Figma n'est toujours pas qualifié.** La suite reste hermétique pour ce fournisseur et les
-  hash de schéma inscrits au registre restent à confirmer contre le serveur de production.
+- **Figma n'est pas qualifiable en l'état, et le blocage est administratif.** Voir
+  « Figma : blocage au catalogue » plus bas. La suite reste hermétique pour ce fournisseur et
+  les hash de schéma inscrits au registre restent à confirmer contre le serveur de production.
 - **Classification trompeuse de deux erreurs de transport.** `httpx2.ConnectTimeout` n'hérite
   pas du `TimeoutError` natif, et un 401 fournisseur n'est pas distingué : les deux remontent en
   `MCP_TRANSPORT_FAILURE` (502) au lieu de `MCPCallTimeout` (504) et `MCPGrantUnavailable` (503).
@@ -119,9 +120,10 @@ Cinq constats ont forcé des correctifs, chacun masquant le suivant :
   développement : des `ConnectTimeout` intermittents ont été observés sur des sondes isolées
   alors que le jeton et les liaisons étaient valides. Une sonde qui échoue seule pendant que les
   autres passent ne signale pas une expiration de jeton.
-- **Le jeton de développement expire en une heure environ** et rien ne le rafraîchit : le
-  courtier relit un fichier statique. Tout usage durable exige un compte de service et un vrai
-  flux OAuth.
+- **Le jeton de développement expirait sans être rafraîchi**, le courtier relisant un fichier
+  statique. Corrigé le 2026-08-14, voir « Jetons auto-renouvelés » plus bas : la durée réelle
+  est d'environ 8 h, et le courtier échange désormais lui-même le grant. Un compte de service
+  reste nécessaire pour un usage hors développement.
 - **Blocage externe Figma** : le serveur MCP Figma n'admet que les clients de son catalogue.
   L'admission du backend est un prérequis hors de notre contrôle avant tout test réel.
 - **Identité encore en mode développement** : `app/core/identity.py:28` porte toujours le
@@ -247,13 +249,42 @@ Deux erreurs de méthode dans cette séance, de la même famille que celle du 20
 - Là encore, `getAccessibleAtlassianResources` a été lu comme une propriété du site alors
   qu'il est une propriété **du jeton présenté**.
 
+## Figma : blocage au catalogue — 2026-08-14
+
+Tentative de connexion au serveur MCP Figma. Elle échoue avant l'écran de consentement :
+`mcp-remote` reçoit **403 Forbidden** sur `https://api.figma.com/v1/oauth/mcp/register`, en
+texte brut et non en erreur OAuth, ce qui fait d'ailleurs échouer son analyseur.
+
+La documentation de Figma donne la raison sans ambiguïté : seuls les clients inscrits à son
+catalogue — VS Code, Cursor, Claude Code, Codex, Xcode — peuvent se connecter. Le 403 sur
+l'enregistrement dynamique *est* le mécanisme d'application de cette règle.
+
+Aucun contournement n'existe côté dépôt. Une application OAuth déclarée à la main ne résout
+rien : la console d'applications Figma ne délivre pas la portée `mcp:connect`, seule portée
+annoncée par le serveur. La voie unique est l'admission au catalogue, via la liste d'attente
+liée depuis la page d'installation du serveur distant.
+
+Ce qui a quand même été livré, et qui reste valable :
+
+- **Le renouvellement gère désormais les clients confidentiels.** Les métadonnées de Figma
+  n'annoncent que `client_secret_basic` / `client_secret_post`, jamais `none` — contrairement à
+  Atlassian. Le `client_secret` est donc transmis quand le document en porte un, et omis
+  sinon ; l'envoyer à vide serait refusé par Atlassian. Deux tests couvrent les deux cas.
+- `infra/compose.figma.yaml`, la configuration `PKA_MCP_FIGMA_CREDENTIALS_FILE` et le câblage
+  d'amorçage sont en place et testés, prêts pour le jour de l'admission.
+- Le script d'import est devenu générique (`mcp_credentials_import.py`) et reprend le
+  `client_secret` quand `mcp-remote` en a reçu un.
+
+Non vérifié, et non vérifiable tant que le blocage tient : les hash de schéma des cinq outils
+Figma, et l'appartenance du `fileKey` épinglé `Ie3SsqL1KetjinTDHcNm2D` au compte courant.
+
 ## Outillage
 
 `scripts/mcp-smoke.sh` sonde les trois surfaces — identité seule, puis Jira et Confluence qui
 exercent en plus l'injection du cloudId — et extrait `detail.code`, seul champ qui discrimine les
 six causes regroupées sous 502.
 
-`scripts/atlassian_credentials_import.py` construit un document de credentials à partir du cache
+`scripts/mcp_credentials_import.py` construit un document de credentials à partir du cache
 de `mcp-remote`, sans afficher ni faire transiter la moindre valeur par un copier-coller ou par
 l'historique du shell. À rejouer une fois par site, et seulement si le `refresh_token` est révoqué.
 

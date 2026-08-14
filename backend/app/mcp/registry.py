@@ -17,6 +17,10 @@ FIGMA_ENDPOINT = "https://mcp.figma.com/mcp"
 # to redirect a refresh token to an attacker, and the endpoint is not a per-install
 # value. Re-check it if Atlassian ever moves the authorisation server.
 ATLASSIAN_TOKEN_ENDPOINT = "https://cf.mcp.atlassian.com/v1/token"
+# Same role for Figma, from its own metadata. Figma differs on one point that the
+# renewal has to honour: it advertises only client_secret_basic / client_secret_post,
+# never "none", so a Figma document carries a client secret where Atlassian's does not.
+FIGMA_TOKEN_ENDPOINT = "https://api.figma.com/v1/oauth/token"
 # One site now carries both products, so both origins are the same host. They stay
 # declared separately because that is a property of this deployment, not of the
 # protocol: Jira and Confluence can live on different sites, and a citation built

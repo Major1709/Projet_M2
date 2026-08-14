@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     mcp_atlassian_grant_tenant_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_atlassian_grant_user_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_figma_bearer_token_file: Path | None = None
+    mcp_figma_credentials_file: Path | None = None
     mcp_figma_grant_tenant_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_figma_grant_user_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_atlassian_jira_cloud_id: UUID | None = None
@@ -96,6 +97,7 @@ class Settings(BaseSettings):
             self.mcp_atlassian_grant_tenant_id,
             self.mcp_atlassian_grant_user_id,
             self.mcp_figma_bearer_token_file,
+            self.mcp_figma_credentials_file,
             self.mcp_figma_grant_tenant_id,
             self.mcp_figma_grant_user_id,
         )
@@ -125,7 +127,7 @@ class Settings(BaseSettings):
             if self.mcp_figma_enabled:
                 self._require_complete_grant_binding(
                     "Figma",
-                    self.mcp_figma_bearer_token_file,
+                    self.mcp_figma_bearer_token_file or self.mcp_figma_credentials_file,
                     self.mcp_figma_grant_tenant_id,
                     self.mcp_figma_grant_user_id,
                 )
@@ -184,4 +186,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

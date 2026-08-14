@@ -1,0 +1,68 @@
+# Surcouche d'activation Figma, developpement uniquement.
+#
+# INUTILISABLE EN L'ETAT -- lire ceci avant d'y passer du temps.
+#
+# Figma n'autorise que les clients inscrits a son catalogue (VS Code, Cursor,
+# Claude Code, Codex, Xcode). Son point d'enregistrement dynamique,
+# https://api.figma.com/v1/oauth/mcp/register, repond 403 Forbidden a tout le
+# reste : c'est ainsi que la regle est appliquee. Verifie le 2026-08-14.
+#
+# Consequence : aucun flux OAuth ne peut aboutir pour ce backend, ni via
+# mcp-remote, ni via une application declaree a la main -- la console
+# d'applications Figma ne delivre pas la portee mcp:connect. Le blocage est
+# administratif, pas technique, et rien dans ce depot ne peut le contourner.
+#
+# La seule voie est l'admission au catalogue :
+#   https://www.figma.com/mcp-catalog/
+#   liste d'attente : lien « join the waitlist » sur
+#   https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/
+#
+# Ce fichier et le cablage backend restent en place, testes, prets a servir le
+# jour de l'admission. Ils ne sont volontairement pas supprimes : le cout de les
+# reecrire depasserait celui de les garder.
+#
+# Autonome : elle n'a pas besoin des surcouches Atlassian et peut s'appliquer
+# seule ou avec elles.
+#
+# Usage :
+#   docker compose -f compose.yaml -f compose.figma.yaml up -d
+#
+# Prerequis :
+#   1. autoriser une fois le serveur MCP Figma :
+#        npx -y mcp-remote https://mcp.figma.com/mcp
+#      puis construire le document de credentials, sans copier-coller de jeton :
+#        python scripts/mcp_credentials_import.py \
+#               infra/secrets/dev/figma-credentials/figma.json
+#      (le script lit le cache de mcp-remote, quel que soit le fournisseur)
+#   2. renseigner dans infra/.env :
+#        PKA_MCP_FIGMA_GRANT_TENANT_ID et PKA_MCP_FIGMA_GRANT_USER_ID
+#      Ces valeurs doivent correspondre EXACTEMENT aux en-tetes d'identite
+#      envoyes sur POST /api/mcp/reads, sinon toute lecture repond 503 sans
+#      indiquer la cause (comparaison a temps constant, volontairement muette).
+#
+# Difference avec Atlassian, qui a une consequence concrete : Figma n'accepte
+# pas de client public. Ses metadonnees n'annoncent que client_secret_basic et
+# client_secret_post, jamais "none". Le document doit donc porter un
+# client_secret en plus du client_id, faute de quoi le renouvellement est
+# refuse et la lecture repond MCP_GRANT_UNAVAILABLE.
+#
+# Le fileKey et le nodeId ne sont pas configurables : ils sont epingles dans le
+# registre et injectes cote serveur, comme les cloudId Atlassian. Un noeud de
+# design choisi par le client ouvrirait la lecture a n'importe quel fichier.
+#
+# Le worker ne recoit deliberement ni jeton ni liaison : les lectures MCP sont
+# servies par l'API. Moindre privilege.
+
+services:
+  api:
+    environment:
+      PKA_MCP_READS_ENABLED: "true"
+      PKA_MCP_FIGMA_ENABLED: "true"
+      PKA_MCP_GRANT_BACKEND: development_files
+      PKA_MCP_FIGMA_CREDENTIALS_FILE: /run/figma-credentials/figma.json
+      PKA_MCP_FIGMA_GRANT_TENANT_ID: ${PKA_MCP_FIGMA_GRANT_TENANT_ID:?definir PKA_MCP_FIGMA_GRANT_TENANT_ID dans infra/.env}
+      PKA_MCP_FIGMA_GRANT_USER_ID: ${PKA_MCP_FIGMA_GRANT_USER_ID:?definir PKA_MCP_FIGMA_GRANT_USER_ID dans infra/.env}
+    volumes:
+      # Lecture-ecriture : le renouvellement reecrit le document, le refresh
+      # token pouvant etre remplace a chaque echange.
+      - ${SECRETS_DIR:-./secrets/dev}/figma-credentials:/run/figma-credentials:rw

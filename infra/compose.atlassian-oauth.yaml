@@ -13,7 +13,7 @@
 # Prerequis : creer les deux documents avec le script d'import, qui lit le cache
 # de mcp-remote apres un flux de consentement et n'affiche aucune valeur :
 #
-#   python scripts/atlassian_credentials_import.py \
+#   python scripts/mcp_credentials_import.py \
 #          infra/secrets/dev/atlassian-credentials/jira.json
 #
 # A relancer une fois par site, apres avoir vide ~/.mcp-auth pour que l'ecran de

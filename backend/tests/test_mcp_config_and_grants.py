@@ -412,6 +412,94 @@ def test_an_expired_credential_is_renewed_and_the_rotated_refresh_token_is_kept(
     assert len(calls) == 1
 
 
+def test_a_client_secret_is_sent_when_the_provider_is_not_a_public_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Figma advertises only client_secret_* auth, so omitting the secret is refused."""
+
+    path = tmp_path / "credentials.json"
+    path.write_text(
+        json.dumps(
+            {
+                "access_token": "expired-synthetic-token",
+                "refresh_token": "synthetic-refresh-0001",
+                "client_id": "synthetic-client",
+                "client_secret": "synthetic-secret-0001",
+                "expires_at": 0.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        grants.httpx2,
+        "AsyncClient",
+        partial(
+            _FakeAsyncClient,
+            calls,
+            _FakeResponse(200, {"access_token": "renewed-synthetic-token", "expires_in": 3600}),
+        ),
+    )
+    broker = DevelopmentFileGrantBroker(
+        environment="test",
+        bindings=(
+            DevelopmentGrantBinding(
+                provider=MCPProvider.FIGMA,
+                binding=MCPBindingKind.FIGMA,
+                tenant_id="tenant-a",
+                user_id="user-a",
+                credentials_file=path,
+                token_endpoint="https://api.example.invalid/v1/oauth/token",
+            ),
+        ),
+    )
+
+    grant = asyncio.run(
+        broker.acquire(
+            provider=MCPProvider.FIGMA,
+            binding=MCPBindingKind.FIGMA,
+            context=SecurityContext(tenant_id="tenant-a", user_id="user-a"),
+        )
+    )
+    assert grant.access_token == "renewed-synthetic-token"
+    assert calls[0]["client_secret"] == "synthetic-secret-0001"
+    # A rotation that returns no refresh token must keep the one already held,
+    # otherwise the next renewal has nothing to present.
+    assert json.loads(path.read_text(encoding="utf-8"))["refresh_token"] == "synthetic-refresh-0001"
+
+
+def test_a_public_client_document_sends_no_client_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Atlassian registers a public client; sending an empty secret would be rejected."""
+
+    path = tmp_path / "credentials.json"
+    path.write_text(
+        json.dumps(
+            {
+                "access_token": "expired-synthetic-token",
+                "refresh_token": "synthetic-refresh-0001",
+                "client_id": "synthetic-client",
+                "expires_at": 0.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        grants.httpx2,
+        "AsyncClient",
+        partial(
+            _FakeAsyncClient,
+            calls,
+            _FakeResponse(200, {"access_token": "renewed-synthetic-token", "expires_in": 3600}),
+        ),
+    )
+
+    _acquire(_credentials_broker(path))
+    assert "client_secret" not in calls[0]
+
+
 def test_a_refused_renewal_surfaces_as_an_unavailable_grant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

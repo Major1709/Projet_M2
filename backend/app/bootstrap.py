@@ -25,7 +25,11 @@ from app.mcp.adapters.grants import (
 from app.mcp.adapters.remote import SDKRemoteMCPTransport
 from app.mcp.domain import MCPBindingKind, MCPProvider
 from app.mcp.read_workflow import MCPReadWorkflow
-from app.mcp.registry import ATLASSIAN_TOKEN_ENDPOINT, MCPToolRegistry
+from app.mcp.registry import (
+    ATLASSIAN_TOKEN_ENDPOINT,
+    FIGMA_TOKEN_ENDPOINT,
+    MCPToolRegistry,
+)
 
 
 @dataclass(frozen=True)
@@ -114,20 +118,25 @@ def _build_mcp_read_workflow(settings: Settings, audit_sink: AuditSink) -> MCPRe
                 for binding_kind, (credentials_file, token_file) in atlassian_grants.items()
                 if credentials_file is not None or token_file is not None
             )
+        figma_credentials = settings.mcp_figma_credentials_file
+        figma_token = settings.mcp_figma_bearer_token_file
         if (
-            settings.mcp_figma_bearer_token_file is not None
+            (figma_credentials is not None or figma_token is not None)
             and settings.mcp_figma_grant_tenant_id is not None
             and settings.mcp_figma_grant_user_id is not None
         ):
-            # whoami is site-independent and carries NONE; the others carry FIGMA.
-            # A single file serves both, but each is registered on its own key.
+            # whoami carries NONE and needs no design node; the others carry FIGMA.
+            # One grant serves both, but each is registered on its own key. As for
+            # Atlassian, a renewable document supersedes a static token file.
             bindings.extend(
                 DevelopmentGrantBinding(
                     provider=MCPProvider.FIGMA,
                     binding=binding_kind,
                     tenant_id=settings.mcp_figma_grant_tenant_id,
                     user_id=settings.mcp_figma_grant_user_id,
-                    token_file=settings.mcp_figma_bearer_token_file,
+                    credentials_file=figma_credentials,
+                    token_endpoint=FIGMA_TOKEN_ENDPOINT if figma_credentials else None,
+                    token_file=None if figma_credentials else figma_token,
                 )
                 for binding_kind in (MCPBindingKind.NONE, MCPBindingKind.FIGMA)
             )

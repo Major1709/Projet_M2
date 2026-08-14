@@ -168,6 +168,18 @@ class RenewableCredentialsFile:
         client_id = document.get("client_id")
         if not isinstance(refresh_token, str) or not isinstance(client_id, str):
             raise MCPGrantUnavailable()
+        form = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+        }
+        # Public clients authenticate with the client_id alone; Figma advertises only
+        # client_secret_* and rejects that. The secret is sent in the form rather than
+        # in Basic auth because both providers accept the former, and one code path
+        # that works everywhere beats two that differ per provider.
+        client_secret = document.get("client_secret")
+        if isinstance(client_secret, str) and client_secret:
+            form["client_secret"] = client_secret
         try:
             async with httpx2.AsyncClient(
                 timeout=REFRESH_TIMEOUT_SECONDS,
@@ -176,11 +188,7 @@ class RenewableCredentialsFile:
             ) as client:
                 response = await client.post(
                     self._token_endpoint,
-                    data={
-                        "grant_type": "refresh_token",
-                        "refresh_token": refresh_token,
-                        "client_id": client_id,
-                    },
+                    data=form,
                     headers={"Accept": "application/json"},
                 )
         except httpx2.HTTPError as error:
