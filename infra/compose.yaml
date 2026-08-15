@@ -31,9 +31,12 @@ x-backend-environment: &backend-environment
   REDIS_PORT: "6379"
   REDIS_DB: ${REDIS_DB:-0}
   REDIS_PASSWORD_FILE: /run/secrets/redis_password
-  GROQ_API_BASE_URL: ${GROQ_API_BASE_URL:-https://api.groq.com/openai/v1}
-  GROQ_API_KEY_FILE: /run/secrets/groq_api_key
-  GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+  # No base URL: the Groq endpoint is pinned in the adapter. A configurable
+  # destination is a lever an edited environment file can pull, and it would carry
+  # the API key to wherever it was pointed.
+  PKA_LLM_GROQ_ENABLED: ${PKA_LLM_GROQ_ENABLED:-false}
+  PKA_LLM_GROQ_API_KEY_FILE: /run/secrets/groq_api_key
+  PKA_LLM_GROQ_MODEL: ${PKA_LLM_GROQ_MODEL:-qwen/qwen3.6-27b}
   EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
   EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
   TOKEN_ENCRYPTION_KEY_FILE: /run/secrets/token_encryption_key

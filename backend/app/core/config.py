@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     mcp_figma_grant_user_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_atlassian_jira_cloud_id: UUID | None = None
     mcp_atlassian_confluence_cloud_id: UUID | None = None
+    # The Groq endpoint is fixed in the adapter, not declared here. A destination
+    # that configuration could move is a destination an operator error -- or an
+    # edited environment file -- can point elsewhere, carrying the API key with it.
+    llm_groq_enabled: bool = False
+    llm_groq_model: str = Field(default="qwen/qwen3.6-27b", min_length=1, max_length=200)
+    llm_groq_api_key_file: Path | None = None
+    # Bounded by the model's own completion ceiling so no configuration can raise it
+    # past what the provider will actually produce.
+    llm_groq_max_completion_tokens: int = Field(default=16_384, ge=256, le=16_384)
 
     @model_validator(mode="after")
     def validate_runtime_adapters(self) -> "Settings":
@@ -153,6 +162,9 @@ class Settings(BaseSettings):
                     "PostgreSQL repository configuration is incomplete; missing: "
                     + ", ".join(missing)
                 )
+
+        if self.llm_groq_enabled and self.llm_groq_api_key_file is None:
+            raise ValueError("The Groq provider requires PKA_LLM_GROQ_API_KEY_FILE")
         return self
 
     @property

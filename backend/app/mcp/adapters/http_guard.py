@@ -13,7 +13,7 @@ is the one nobody re-reads.
 
 import ipaddress
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -109,7 +109,7 @@ class LimitedAsyncByteStream(httpx2.AsyncByteStream):
         await self._stream.aclose()
 
 
-async def reject_oversized_response(response: httpx2.Response) -> None:
+async def bound_response(response: httpx2.Response, maximum_bytes: int) -> None:
     """Bound a response before it is read, whatever its declared length claims.
 
     A declared ``content-length`` is only a claim, so it is checked and then the
@@ -129,8 +129,32 @@ async def reject_oversized_response(response: httpx2.Response) -> None:
             raise MCPInvalidResponse() from error
         if declared_size < 0:
             raise MCPInvalidResponse()
-        if declared_size > MAX_WIRE_RESPONSE_BYTES:
+        if declared_size > maximum_bytes:
             raise MCPResponseTooLarge()
     if not isinstance(response.stream, httpx2.AsyncByteStream):
         raise MCPInvalidResponse()
-    response.stream = LimitedAsyncByteStream(response.stream, MAX_WIRE_RESPONSE_BYTES)
+    response.stream = LimitedAsyncByteStream(response.stream, maximum_bytes)
+
+
+def bounded_response_hook(maximum_bytes: int) -> Callable[[httpx2.Response], Awaitable[None]]:
+    """Build an httpx response hook that enforces a caller-chosen byte ceiling.
+
+    The MCP transports read whole documents and share one generous ceiling; a chat
+    completion is orders of magnitude smaller and deserves its own. Passing the
+    ceiling in rather than reading a module constant keeps a single implementation
+    of the check while letting each caller bound its own blast radius.
+    """
+
+    if maximum_bytes <= 0:
+        raise ValueError("A response ceiling must be a positive number of bytes")
+
+    async def hook(response: httpx2.Response) -> None:
+        await bound_response(response, maximum_bytes)
+
+    return hook
+
+
+async def reject_oversized_response(response: httpx2.Response) -> None:
+    """Bound a response at the shared MCP wire ceiling."""
+
+    await bound_response(response, MAX_WIRE_RESPONSE_BYTES)
