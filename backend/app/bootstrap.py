@@ -17,12 +17,14 @@ from app.core.database import (
     create_session_factory,
     database_is_ready,
 )
+from app.mcp.adapters.figma_rest import FigmaRESTTransport
 from app.mcp.adapters.grants import (
     DevelopmentFileGrantBroker,
     DevelopmentGrantBinding,
     UnavailableGrantBroker,
 )
 from app.mcp.adapters.remote import SDKRemoteMCPTransport
+from app.mcp.adapters.routing import ProviderRoutedTransport
 from app.mcp.domain import MCPBindingKind, MCPProvider
 from app.mcp.read_workflow import MCPReadWorkflow
 from app.mcp.registry import (
@@ -125,20 +127,20 @@ def _build_mcp_read_workflow(settings: Settings, audit_sink: AuditSink) -> MCPRe
             and settings.mcp_figma_grant_tenant_id is not None
             and settings.mcp_figma_grant_user_id is not None
         ):
-            # whoami carries NONE and needs no design node; the others carry FIGMA.
-            # One grant serves both, but each is registered on its own key. As for
-            # Atlassian, a renewable document supersedes a static token file.
-            bindings.extend(
+            # Every Figma read is bound to the pinned file, so one key suffices. A
+            # personal access token has nothing to refresh and arrives as a plain
+            # token file; a renewable OAuth document supersedes it where configured,
+            # as it does for Atlassian.
+            bindings.append(
                 DevelopmentGrantBinding(
                     provider=MCPProvider.FIGMA,
-                    binding=binding_kind,
+                    binding=MCPBindingKind.FIGMA,
                     tenant_id=settings.mcp_figma_grant_tenant_id,
                     user_id=settings.mcp_figma_grant_user_id,
                     credentials_file=figma_credentials,
                     token_endpoint=FIGMA_TOKEN_ENDPOINT if figma_credentials else None,
                     token_file=None if figma_credentials else figma_token,
                 )
-                for binding_kind in (MCPBindingKind.NONE, MCPBindingKind.FIGMA)
             )
         grant_broker = DevelopmentFileGrantBroker(
             environment=settings.environment,
@@ -147,9 +149,18 @@ def _build_mcp_read_workflow(settings: Settings, audit_sink: AuditSink) -> MCPRe
     else:
         grant_broker = UnavailableGrantBroker()
 
+    transport = ProviderRoutedTransport(
+        {
+            MCPProvider.ATLASSIAN: SDKRemoteMCPTransport(grant_broker=grant_broker),
+            MCPProvider.FIGMA: FigmaRESTTransport(
+                grant_broker=grant_broker,
+                credential_kind=settings.mcp_figma_credential_kind,
+            ),
+        }
+    )
     return MCPReadWorkflow(
         settings=settings,
         registry=MCPToolRegistry(),
-        transport=SDKRemoteMCPTransport(grant_broker=grant_broker),
+        transport=transport,
         audit_sink=audit_sink,
     )

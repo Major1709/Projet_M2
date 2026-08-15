@@ -54,7 +54,7 @@ def test_postgres_audit_writer_uses_one_short_insert_only_transaction() -> None:
         tenant_id="tenant-a",
         actor_user_id="user-a",
         correlation_id="corr-a",
-        details={"provider": "figma", "tool_name": "whoami"},
+        details={"provider": "figma", "tool_name": "getFigmaFile"},
     )
 
     writer.append(event)

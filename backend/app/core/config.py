@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     mcp_atlassian_grant_user_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_figma_bearer_token_file: Path | None = None
     mcp_figma_credentials_file: Path | None = None
+    # Figma authenticates a personal access token and an OAuth token by different
+    # headers, and honours neither if the other is also present. The adapter sends
+    # exactly one, so the kind has to be declared rather than guessed. Development
+    # uses a personal token; per-user OAuth is the production shape.
+    mcp_figma_credential_kind: Literal["personal_access_token", "oauth"] = (
+        "personal_access_token"
+    )
     mcp_figma_grant_tenant_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_figma_grant_user_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_atlassian_jira_cloud_id: UUID | None = None

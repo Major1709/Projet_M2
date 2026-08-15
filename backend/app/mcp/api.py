@@ -14,6 +14,7 @@ from app.mcp.errors import (
     MCPInvalidResponse,
     MCPProtocolRejected,
     MCPProviderDisabled,
+    MCPRateLimited,
     MCPReadError,
     MCPRemoteToolFailure,
     MCPResponseTooLarge,
@@ -40,6 +41,11 @@ def translate_read_error(error: MCPReadError) -> HTTPException:
         (MCPAuditUnavailable, MCPBindingUnavailable, MCPGrantUnavailable),
     ):
         status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    elif isinstance(error, MCPRateLimited):
+        # 429 rather than 502: the provider is answering correctly and the caller
+        # should back off, which is a different instruction from "try again, the
+        # network may be broken".
+        status_code = status.HTTP_429_TOO_MANY_REQUESTS
     elif isinstance(error, MCPCallTimeout):
         status_code = status.HTTP_504_GATEWAY_TIMEOUT
     elif isinstance(

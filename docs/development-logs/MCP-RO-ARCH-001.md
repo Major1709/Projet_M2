@@ -278,6 +278,58 @@ Ce qui a quand même été livré, et qui reste valable :
 Non vérifié, et non vérifiable tant que le blocage tient : les hash de schéma des cinq outils
 Figma, et l'appartenance du `fileKey` épinglé `Ie3SsqL1KetjinTDHcNm2D` au compte courant.
 
+## Figma par l'API REST — 2026-08-14
+
+Le blocage du catalogue étant administratif et sans recours, Figma est désormais lu par son
+**API REST** plutôt que par son serveur MCP. Deux options avaient été mises en balance.
+
+La première — héberger notre propre serveur MCP, adossé à la même API REST — avait un attrait
+réel : le serveur aurait publié ses propres schémas, redonnant du sens au contrôle de dérive,
+et aurait été réutilisable depuis Cursor ou VS Code. Elle a été écartée pour une raison
+dirimante : depuis le backend, un serveur interne dans Docker est indiscernable d'une SSRF. Les
+trois invariants du transport — HTTPS validé à l'import, adresse `is_global`, port fixé à 443 —
+l'auraient refusé en `MCP_DNS_REJECTED`, et l'atteindre aurait exigé d'inscrire dans le dépôt
+l'endroit précis où le projet désactive sa propre protection. Coût certain, bénéfice hypothétique.
+
+La seconde a été retenue : `https://api.figma.com` est un hôte public en HTTPS sur 443, donc
+**aucun invariant n'a été relâché**. Le pipeline — allowlist, validation JSON-Schema, injection
+serveur de la liaison, bornes de taille, provenance, audit fail-closed — est resté inchangé,
+parce qu'il vit au-dessus du transport et non dedans.
+
+Ce que la bascule a coûté et rapporté :
+
+- **Lecture seule par construction, pas seulement par politique.** L'API REST de Figma n'expose
+  aucun point d'entrée qui crée ou modifie un nœud ; créer une frame demande l'API Plugin, qui
+  s'exécute dans l'éditeur. L'invariant du lot coïncide avec ce que le fournisseur autorise.
+- **Le contrôle de dérive devient tautologique** — les deux schémas comparés sont les nôtres. Il
+  n'a pas été retiré pour autant : l'adaptateur publie son manifeste, le registre déclare ses
+  contrats, les deux sont écrits séparément, et modifier l'un sans l'autre fait échouer la
+  lecture au lieu de passer en silence. Un test l'atteste.
+- **La version de protocole ne ment pas.** Une lecture REST ne traverse aucune session MCP,
+  l'étiqueter `2026-07-28` aurait mis une fausse affirmation dans chaque enregistrement de
+  provenance. Le marqueur `figma-rest-v1` est délibérément absent de
+  `APPROVED_REMOTE_PROTOCOL_VERSIONS` : un serveur distant qui l'annoncerait serait refusé.
+- **`nodeId` devient un argument public.** Seul le `fileKey` reste injecté côté serveur. Un
+  identifiant de nœud ne désigne qu'un emplacement *dans* le fichier épinglé : l'honorer ne
+  coûte rien, alors qu'un `fileKey` fourni par l'appelant transformerait un document approuvé
+  en n'importe quel document que le jeton peut atteindre.
+- **Deux erreurs de taxonomie signalées plus tôt sont corrigées sur ce transport** : un 401/403
+  remonte en `MCP_GRANT_UNAVAILABLE` et non en échec réseau, et un dépassement de délai remonte
+  en `MCP_CALL_TIMEOUT`. L'adaptateur MCP distant garde ses défauts, non traités ici.
+
+Les gardes de transport communs aux deux adaptateurs — endpoint fixe, adresse publique, bornes
+de réponse — ont été extraits dans `app/mcp/adapters/http_guard.py`. Deux copies d'un contrôle
+d'adresse, c'est deux endroits à affaiblir, et le second est celui que personne ne relit.
+
+`renderFigmaNode` renvoie l'URL produite par Figma sans la suivre : récupérer une destination
+nommée par une réponse est précisément la forme que ce transport existe pour refuser.
+
+Les cinq contrats du serveur MCP distant ont été retirés du registre. Les conserver aurait laissé
+dans l'allowlist — donc dans la surface de sécurité — cinq outils définitivement injoignables.
+
+Reste non vérifié : l'appartenance du `fileKey` épinglé au compte courant, et donc toute lecture
+réelle. Rien n'a encore été lu dans Figma.
+
 ## Outillage
 
 `scripts/mcp-smoke.sh` sonde les trois surfaces — identité seule, puis Jira et Confluence qui

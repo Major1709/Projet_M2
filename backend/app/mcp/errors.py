@@ -58,6 +58,11 @@ class MCPTransportFailure(MCPReadError):
     safe_message = "The MCP provider is unavailable"
 
 
+class MCPRateLimited(MCPReadError):
+    code = "MCP_RATE_LIMITED"
+    safe_message = "The MCP provider is rate limiting this credential"
+
+
 class MCPCallTimeout(MCPReadError):
     code = "MCP_CALL_TIMEOUT"
     safe_message = "The MCP provider did not respond within the allowed time"

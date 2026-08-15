@@ -1,25 +1,21 @@
 # Surcouche d'activation Figma, developpement uniquement.
 #
-# INUTILISABLE EN L'ETAT -- lire ceci avant d'y passer du temps.
+# Figma est lu par son API REST, pas par son serveur MCP.
 #
-# Figma n'autorise que les clients inscrits a son catalogue (VS Code, Cursor,
-# Claude Code, Codex, Xcode). Son point d'enregistrement dynamique,
-# https://api.figma.com/v1/oauth/mcp/register, repond 403 Forbidden a tout le
-# reste : c'est ainsi que la regle est appliquee. Verifie le 2026-08-14.
+# Pourquoi : le serveur MCP de Figma n'accepte que les clients inscrits a son
+# catalogue. Son point d'enregistrement dynamique repond 403 Forbidden a tout le
+# reste, et sa console d'applications ne delivre pas la portee mcp:connect --
+# aucun flux OAuth ne peut donc aboutir pour ce backend. Le blocage est
+# administratif, pas technique. Verifie le 2026-08-14.
 #
-# Consequence : aucun flux OAuth ne peut aboutir pour ce backend, ni via
-# mcp-remote, ni via une application declaree a la main -- la console
-# d'applications Figma ne delivre pas la portee mcp:connect. Le blocage est
-# administratif, pas technique, et rien dans ce depot ne peut le contourner.
+# L'API REST n'a pas cette barriere, et elle satisfait les invariants de
+# transport sans exception : api.figma.com est un hote public en HTTPS sur 443,
+# donc le controle anti-SSRF s'applique inchange. Un serveur MCP interne dans
+# Docker, lui, aurait exige de relacher ce controle.
 #
-# La seule voie est l'admission au catalogue :
-#   https://www.figma.com/mcp-catalog/
-#   liste d'attente : lien « join the waitlist » sur
-#   https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/
-#
-# Ce fichier et le cablage backend restent en place, testes, prets a servir le
-# jour de l'admission. Ils ne sont volontairement pas supprimes : le cout de les
-# reecrire depasserait celui de les garder.
+# Lecture seule par construction, pas seulement par politique : l'API REST de
+# Figma n'expose aucun point d'entree qui cree ou modifie un noeud. Creer une
+# frame demande l'API Plugin, qui s'execute dans l'editeur Figma.
 #
 # Autonome : elle n'a pas besoin des surcouches Atlassian et peut s'appliquer
 # seule ou avec elles.
@@ -28,27 +24,32 @@
 #   docker compose -f compose.yaml -f compose.figma.yaml up -d
 #
 # Prerequis :
-#   1. autoriser une fois le serveur MCP Figma :
-#        npx -y mcp-remote https://mcp.figma.com/mcp
-#      puis construire le document de credentials, sans copier-coller de jeton :
-#        python scripts/mcp_credentials_import.py \
-#               infra/secrets/dev/figma-credentials/figma.json
-#      (le script lit le cache de mcp-remote, quel que soit le fournisseur)
+#   1. creer un jeton personnel dans Figma :
+#        Settings > Security > Personal access tokens
+#      portee « File content : read-only » uniquement.
+#      Deposer sa valeur dans ${SECRETS_DIR}/figma_personal_access_token avec un
+#      editeur de texte -- pas avec echo, qui laisserait le jeton dans
+#      l'historique du shell. Le fichier ne contient que le jeton, sans
+#      guillemets ni retour a la ligne superflu.
 #   2. renseigner dans infra/.env :
 #        PKA_MCP_FIGMA_GRANT_TENANT_ID et PKA_MCP_FIGMA_GRANT_USER_ID
 #      Ces valeurs doivent correspondre EXACTEMENT aux en-tetes d'identite
 #      envoyes sur POST /api/mcp/reads, sinon toute lecture repond 503 sans
 #      indiquer la cause (comparaison a temps constant, volontairement muette).
 #
-# Difference avec Atlassian, qui a une consequence concrete : Figma n'accepte
-# pas de client public. Ses metadonnees n'annoncent que client_secret_basic et
-# client_secret_post, jamais "none". Le document doit donc porter un
-# client_secret en plus du client_id, faute de quoi le renouvellement est
-# refuse et la lecture repond MCP_GRANT_UNAVAILABLE.
+# Un secret Docker en lecture seule suffit ici, contrairement aux credentials
+# Atlassian : un jeton personnel ne tourne pas, il n'y a donc rien a reecrire.
+# Le passage a OAuth par utilisateur remplacera ce fichier par un document
+# renouvelable monte en lecture-ecriture, et basculera
+# PKA_MCP_FIGMA_CREDENTIAL_KIND sur « oauth » -- Figma authentifie un jeton
+# personnel par l'en-tete X-Figma-Token et un jeton OAuth par Authorization,
+# et l'adaptateur n'en envoie qu'un seul, choisi par cette variable.
 #
-# Le fileKey et le nodeId ne sont pas configurables : ils sont epingles dans le
-# registre et injectes cote serveur, comme les cloudId Atlassian. Un noeud de
-# design choisi par le client ouvrirait la lecture a n'importe quel fichier.
+# Le fileKey n'est pas configurable : il est epingle dans le registre et injecte
+# cote serveur, comme les cloudId Atlassian. Un fichier choisi par le client
+# ouvrirait la lecture a tout ce que le jeton peut atteindre. Le nodeId, lui,
+# est un argument public : il ne designe qu'un noeud a l'interieur du fichier
+# epingle, donc aucune valeur ne permet d'en sortir.
 #
 # Le worker ne recoit deliberement ni jeton ni liaison : les lectures MCP sont
 # servies par l'API. Moindre privilege.
@@ -59,10 +60,13 @@ services:
       PKA_MCP_READS_ENABLED: "true"
       PKA_MCP_FIGMA_ENABLED: "true"
       PKA_MCP_GRANT_BACKEND: development_files
-      PKA_MCP_FIGMA_CREDENTIALS_FILE: /run/figma-credentials/figma.json
+      PKA_MCP_FIGMA_BEARER_TOKEN_FILE: /run/secrets/figma_personal_access_token
+      PKA_MCP_FIGMA_CREDENTIAL_KIND: personal_access_token
       PKA_MCP_FIGMA_GRANT_TENANT_ID: ${PKA_MCP_FIGMA_GRANT_TENANT_ID:?definir PKA_MCP_FIGMA_GRANT_TENANT_ID dans infra/.env}
       PKA_MCP_FIGMA_GRANT_USER_ID: ${PKA_MCP_FIGMA_GRANT_USER_ID:?definir PKA_MCP_FIGMA_GRANT_USER_ID dans infra/.env}
-    volumes:
-      # Lecture-ecriture : le renouvellement reecrit le document, le refresh
-      # token pouvant etre remplace a chaque echange.
-      - ${SECRETS_DIR:-./secrets/dev}/figma-credentials:/run/figma-credentials:rw
+    secrets:
+      - figma_personal_access_token
+
+secrets:
+  figma_personal_access_token:
+    file: ${SECRETS_DIR:-./secrets/dev}/figma_personal_access_token

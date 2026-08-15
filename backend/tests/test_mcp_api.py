@@ -18,7 +18,7 @@ def test_mcp_api_is_default_deny() -> None:
             "calls": [
                 {
                     "source_system": "figma",
-                    "tool_name": "whoami",
+                    "tool_name": "getFigmaFile",
                     "arguments": {},
                 }
             ]
@@ -56,7 +56,7 @@ def test_mcp_api_refuses_unknown_tool_and_extra_request_fields() -> None:
             "calls": [
                 {
                     "source_system": "figma",
-                    "tool_name": "whoami",
+                    "tool_name": "getFigmaFile",
                     "arguments": {},
                     "endpoint": "https://attacker.invalid/mcp",
                 }
@@ -71,7 +71,7 @@ def test_mcp_api_refuses_unknown_tool_and_extra_request_fields() -> None:
 
 def test_mcp_api_enforces_three_calls_per_turn() -> None:
     client = TestClient(create_app(Settings(environment="test")))
-    call = {"source_system": "figma", "tool_name": "whoami", "arguments": {}}
+    call = {"source_system": "figma", "tool_name": "getFigmaFile", "arguments": {}}
 
     response = client.post("/api/mcp/reads", json={"calls": [call, call, call, call]})
 
@@ -97,7 +97,7 @@ def test_missing_development_secret_is_expurgated_from_api(tmp_path: Path) -> No
             "calls": [
                 {
                     "source_system": "figma",
-                    "tool_name": "whoami",
+                    "tool_name": "getFigmaFile",
                     "arguments": {},
                 }
             ]
@@ -127,7 +127,7 @@ def test_async_mcp_api_returns_workflow_result() -> None:
             "calls": [
                 {
                     "source_system": "figma",
-                    "tool_name": "whoami",
+                    "tool_name": "getFigmaFile",
                     "arguments": {},
                 }
             ]

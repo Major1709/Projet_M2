@@ -10,7 +10,13 @@ from app.mcp.domain import MCPBindingKind, MCPProvider, ToolActionClass
 from app.mcp.domain import MCPReadSourceSystem as SourceSystem
 
 ATLASSIAN_ENDPOINT = "https://mcp.atlassian.com/v1/mcp"
-FIGMA_ENDPOINT = "https://mcp.figma.com/mcp"
+# Figma is read through its ordinary REST API rather than its MCP server. That
+# server is reachable only by clients admitted to Figma's catalogue -- its dynamic
+# registration endpoint answers 403 to everyone else -- so no OAuth flow can ever
+# complete for this backend. The REST API has no such gate, is read-only by
+# construction (it exposes no endpoint that creates or edits a node), and is a
+# public HTTPS host on 443, so it satisfies the transport invariants unchanged.
+FIGMA_REST_ENDPOINT = "https://api.figma.com"
 # Where a delegated Atlassian grant is traded for a fresh one, from the server's
 # own metadata at /.well-known/oauth-authorization-server. Pinned here rather than
 # read from the credentials document: that file only has to be tampered with once
@@ -31,13 +37,23 @@ FIGMA_TOKEN_ENDPOINT = "https://api.figma.com/v1/oauth/token"
 JIRA_SOURCE_ORIGIN = "https://andrianalyfanny.atlassian.net"
 CONFLUENCE_SOURCE_ORIGIN = "https://andrianalyfanny.atlassian.net"
 FIGMA_SOURCE_ORIGIN = "https://www.figma.com"
-FIGMA_FILE_KEY = "Ie3SsqL1KetjinTDHcNm2D"
-FIGMA_NODE_ID = "36:114"
+# The Figma file this deployment was validated against. Kept as a documented
+# reference and used by tests; it is no longer a binding, because the assistant
+# has to read process files across the user's whole Figma space.
+FIGMA_REFERENCE_FILE_KEY = "Ie3SsqL1KetjinTDHcNm2D"
 MCP_POLICY_VERSION = "SPEC-MCP-RO-001-r2"
 # Pinned deliberately: a remote server negotiates down to whatever the client
 # accepts, so every entry added here widens what a provider can force on us.
 # 2025-11-25 is the highest version the Atlassian MCP server currently speaks.
-APPROVED_PROTOCOL_VERSIONS = frozenset({"2026-07-28", "2025-11-25"})
+APPROVED_REMOTE_PROTOCOL_VERSIONS = frozenset({"2026-07-28", "2025-11-25"})
+# Figma reads never cross an MCP session, so labelling them with an MCP protocol
+# version would put a false claim in the provenance record every audited read
+# carries. This marker says plainly what produced the result. It is deliberately
+# absent from APPROVED_REMOTE_PROTOCOL_VERSIONS: a remote server that announced
+# it would be refused, since no remote server can legitimately speak it.
+FIGMA_REST_PROTOCOL_VERSION = "figma-rest-v1"
+# What the read workflow accepts, whichever transport served the call.
+APPROVED_PROTOCOL_VERSIONS = APPROVED_REMOTE_PROTOCOL_VERSIONS | {FIGMA_REST_PROTOCOL_VERSION}
 
 _NON_VALIDATION_SCHEMA_KEYS = frozenset(
     {"$schema", "$id", "default", "description", "examples", "title"}
@@ -547,80 +563,182 @@ _CONFLUENCE_CONTRACTS = (
     ),
 )
 
-_FIGMA_CONTEXT_PROPERTIES = {
-    "fileKey": _REMOTE_STRING,
-    "nodeId": _REMOTE_STRING,
-    "clientLanguages": _REMOTE_STRING,
-    "clientFrameworks": _REMOTE_STRING,
+# A Figma node identifier as the API and the URLs write it: two integers joined by
+# a colon in the API, by a hyphen in a shared link. Constrained by pattern rather
+# than by length alone because this value is interpolated into a request path and
+# a query string, and a shape this narrow cannot carry a separator.
+_FIGMA_NODE_ID = {"type": "string", "minLength": 3, "maxLength": 64, "pattern": r"^\d+[:-]\d+$"}
+# ``fileKey`` is a caller argument, unlike the Atlassian cloud IDs it used to be
+# modelled on. The two are not comparable: a cloud ID selects which *tenant* is
+# read and must never be caller-chosen, whereas a Figma file key selects a
+# document inside the space the delegated credential already covers. Pinning it
+# would stop the assistant from reading the process files it exists to read,
+# while adding nothing -- the credential's own scope is the real boundary, which
+# is what the specification means by the source's rights staying authoritative.
+#
+# It is still constrained by pattern rather than length alone: the value is
+# interpolated into a request path and into the citation URL, and a shape this
+# narrow cannot carry a separator, a traversal segment or a scheme.
+_FIGMA_FILE_KEY = {
+    "type": "string",
+    "minLength": 10,
+    "maxLength": 64,
+    "pattern": r"^[A-Za-z0-9]+$",
+}
+_FIGMA_DEPTH = {"type": "integer", "minimum": 1, "maximum": 6}
+# Figma serves design files under /design and FigJam boards under /board, and
+# redirects the legacy /file form to whichever the key actually is. Citing
+# through /file therefore resolves for both without our having to guess a kind
+# we are never told.
+_FIGMA_CITATION = "/file/{fileKey}"
+# The one Figma tool that interprets rather than forwards, so the one that can
+# declare an output schema: the structure is ours, derived from the board, not a
+# shape a provider might change under us. Declaring it makes the workflow validate
+# every extraction before it reaches a caller, instead of trusting the adapter.
+_FIGMA_PROCESS_STEP = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["id", "label", "kind"],
+    "properties": {
+        "id": {"type": "string"},
+        "label": {"type": "string"},
+        # start and end are decided by connectivity, not by the drawing: a rounded
+        # shape with nothing arriving is an entry point, one with nothing leaving is
+        # an exit. "terminal" is the honest answer when it is both or neither.
+        "kind": {
+            "type": "string",
+            "enum": ["start", "end", "step", "decision", "terminal"],
+        },
+        "shape": {"type": "string"},
+        "section": {"type": ["string", "null"]},
+    },
+}
+_FIGMA_PROCESS_TRANSITION = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["id", "from", "to"],
+    "properties": {
+        "id": {"type": "string"},
+        # Null where a connector dangles: FigJam allows an arrow anchored to a
+        # coordinate rather than to a shape, and dropping those silently would hide
+        # an incomplete diagram behind a plausible graph.
+        "from": {"type": ["string", "null"]},
+        "to": {"type": ["string", "null"]},
+        "condition": {"type": ["string", "null"]},
+    },
+}
+_FIGMA_PROCESS_NOTE = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["id", "text"],
+    "properties": {
+        "id": {"type": "string"},
+        "text": {"type": "string"},
+        "section": {"type": ["string", "null"]},
+    },
+}
+_FIGMA_PROCESS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["file", "steps", "transitions", "notes"],
+    "properties": {
+        "file": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["key", "name"],
+            "properties": {
+                "key": {"type": "string"},
+                "name": {"type": "string"},
+                "lastModified": {"type": ["string", "null"]},
+            },
+        },
+        "steps": {"type": "array", "items": _FIGMA_PROCESS_STEP},
+        "transitions": {"type": "array", "items": _FIGMA_PROCESS_TRANSITION},
+        "notes": {"type": "array", "items": _FIGMA_PROCESS_NOTE},
+    },
 }
 
 _FIGMA_CONTRACTS = (
     ToolContract(
-        server_id="figma-remote",
+        server_id="figma-rest",
         provider=MCPProvider.FIGMA,
         source_system=SourceSystem.FIGMA,
         source_origin=FIGMA_SOURCE_ORIGIN,
-        tool_name="whoami",
-        binding_kind=MCPBindingKind.NONE,
-        public_input_schema=_EMPTY,
-        provider_input_schema=_EMPTY,
+        tool_name="getFigmaFile",
+        binding_kind=MCPBindingKind.FIGMA,
+        public_input_schema=_object_schema(
+            {"fileKey": _FIGMA_FILE_KEY, "depth": _FIGMA_DEPTH},
+            ("fileKey",),
+        ),
+        provider_input_schema=_object_schema(
+            {"fileKey": _FIGMA_FILE_KEY, "depth": _FIGMA_DEPTH},
+            ("fileKey",),
+        ),
+        resource_reference_path=_FIGMA_CITATION,
     ),
     ToolContract(
-        server_id="figma-remote",
+        server_id="figma-rest",
         provider=MCPProvider.FIGMA,
         source_system=SourceSystem.FIGMA,
         source_origin=FIGMA_SOURCE_ORIGIN,
-        tool_name="get_metadata",
+        tool_name="getFigmaNode",
         binding_kind=MCPBindingKind.FIGMA,
-        public_input_schema=_EMPTY,
-        provider_input_schema=_object_schema(
-            dict(_FIGMA_CONTEXT_PROPERTIES),
+        public_input_schema=_object_schema(
+            {"fileKey": _FIGMA_FILE_KEY, "nodeId": _FIGMA_NODE_ID, "depth": _FIGMA_DEPTH},
             ("fileKey", "nodeId"),
         ),
-    ),
-    ToolContract(
-        server_id="figma-remote",
-        provider=MCPProvider.FIGMA,
-        source_system=SourceSystem.FIGMA,
-        source_origin=FIGMA_SOURCE_ORIGIN,
-        tool_name="get_design_context",
-        binding_kind=MCPBindingKind.FIGMA,
-        public_input_schema=_EMPTY,
         provider_input_schema=_object_schema(
             {
-                **_FIGMA_CONTEXT_PROPERTIES,
-                "excludeScreenshot": {"type": "boolean"},
-                "forceCode": {"type": "boolean"},
-                "disableCodeConnect": {"type": "boolean"},
+                "fileKey": _FIGMA_FILE_KEY,
+                "nodeId": _FIGMA_NODE_ID,
+                "depth": _FIGMA_DEPTH,
             },
             ("fileKey", "nodeId"),
         ),
+        resource_reference_path=_FIGMA_CITATION,
     ),
     ToolContract(
-        server_id="figma-remote",
+        server_id="figma-rest",
         provider=MCPProvider.FIGMA,
         source_system=SourceSystem.FIGMA,
         source_origin=FIGMA_SOURCE_ORIGIN,
-        tool_name="get_screenshot",
+        tool_name="renderFigmaNode",
         binding_kind=MCPBindingKind.FIGMA,
-        public_input_schema=_EMPTY,
-        provider_input_schema=_object_schema(
-            dict(_FIGMA_CONTEXT_PROPERTIES),
+        public_input_schema=_object_schema(
+            {
+                "fileKey": _FIGMA_FILE_KEY,
+                "nodeId": _FIGMA_NODE_ID,
+                "scale": {"type": "number", "minimum": 0.5, "maximum": 4},
+            },
             ("fileKey", "nodeId"),
         ),
+        provider_input_schema=_object_schema(
+            {
+                "fileKey": _FIGMA_FILE_KEY,
+                "nodeId": _FIGMA_NODE_ID,
+                "scale": {"type": "number", "minimum": 0.5, "maximum": 4},
+            },
+            ("fileKey", "nodeId"),
+        ),
+        resource_reference_path=_FIGMA_CITATION,
     ),
     ToolContract(
-        server_id="figma-remote",
+        server_id="figma-rest",
         provider=MCPProvider.FIGMA,
         source_system=SourceSystem.FIGMA,
         source_origin=FIGMA_SOURCE_ORIGIN,
-        tool_name="get_variable_defs",
+        tool_name="extractFigmaProcess",
         binding_kind=MCPBindingKind.FIGMA,
-        public_input_schema=_EMPTY,
-        provider_input_schema=_object_schema(
-            dict(_FIGMA_CONTEXT_PROPERTIES),
-            ("fileKey", "nodeId"),
+        public_input_schema=_object_schema(
+            {"fileKey": _FIGMA_FILE_KEY, "nodeId": _FIGMA_NODE_ID},
+            ("fileKey",),
         ),
+        provider_input_schema=_object_schema(
+            {"fileKey": _FIGMA_FILE_KEY, "nodeId": _FIGMA_NODE_ID},
+            ("fileKey",),
+        ),
+        provider_output_schema=_FIGMA_PROCESS_SCHEMA,
+        resource_reference_path=_FIGMA_CITATION,
     ),
 )
 

@@ -44,8 +44,6 @@ from app.mcp.errors import (
 from app.mcp.ports import MCPReadTransport, RemoteContentBlock, RemoteToolResult
 from app.mcp.registry import (
     APPROVED_PROTOCOL_VERSIONS,
-    FIGMA_FILE_KEY,
-    FIGMA_NODE_ID,
     MCPToolRegistry,
     ToolContract,
     canonical_json_sha256,
@@ -355,9 +353,10 @@ class MCPReadWorkflow:
             if cloud_id is None:
                 raise MCPBindingUnavailable()
             bound["cloudId"] = str(cloud_id)
-        elif contract.binding_kind == MCPBindingKind.FIGMA:
-            bound["fileKey"] = FIGMA_FILE_KEY
-            bound["nodeId"] = FIGMA_NODE_ID
+        # Figma injects nothing. Its binding selects the credential, and that
+        # credential's own scope is what bounds which files can be read -- the
+        # assistant has to reach process boards across the user's space, and a
+        # server-chosen file key would prevent exactly that.
 
         if not Draft202012Validator(contract.provider_input_schema).is_valid(bound):
             raise MCPInputRejected()

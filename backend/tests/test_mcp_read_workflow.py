@@ -43,8 +43,7 @@ from app.mcp.ports import (
 )
 from app.mcp.read_workflow import MAX_IMAGE_BYTES, MAX_TEXT_BYTES, MCPReadWorkflow
 from app.mcp.registry import (
-    FIGMA_FILE_KEY,
-    FIGMA_NODE_ID,
+    FIGMA_REFERENCE_FILE_KEY,
     JIRA_SOURCE_ORIGIN,
     MCPToolRegistry,
     ToolContract,
@@ -197,13 +196,21 @@ def run_call(
     arguments: dict[str, Any] | None = None,
     action_class: ToolActionClass = ToolActionClass.READ,
 ):
+    if arguments is None:
+        # Every Figma tool now takes its file key from the caller, so the tests that
+        # do not care which file is read still have to name one.
+        arguments = (
+            {"fileKey": FIGMA_REFERENCE_FILE_KEY}
+            if source_system == SourceSystem.FIGMA
+            else {}
+        )
     return asyncio.run(
         workflow.execute_call(
             call=MCPReadToolCall(
                 source_system=source_system,
                 tool_name=tool_name,
                 action_class=action_class,
-                arguments=arguments or {},
+                arguments=arguments,
                 correlation_id="corr-test-1",
             ),
             context=CONTEXT,
@@ -214,12 +221,12 @@ def run_call(
 def test_provider_disabled_refuses_before_network() -> None:
     workflow, transport, session = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         settings=Settings(environment="test"),
     )
 
     with pytest.raises(MCPProviderDisabled):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
     assert transport.connect_count == 0
     assert session.list_count == 0
@@ -230,7 +237,7 @@ def test_provider_disabled_refuses_before_network() -> None:
     ("source_system", "tool_name", "action_class"),
     [
         (SourceSystem.FIGMA, "use_figma", ToolActionClass.READ),
-        (SourceSystem.FIGMA, "whoami", ToolActionClass.UPDATE),
+        (SourceSystem.FIGMA, "getFigmaFile", ToolActionClass.UPDATE),
         (SourceSystem.JIRA, "createJiraIssue", ToolActionClass.CREATE),
     ],
 )
@@ -239,7 +246,7 @@ def test_unknown_and_mutating_tools_never_reach_network(
     tool_name: str,
     action_class: ToolActionClass,
 ) -> None:
-    workflow, transport, session = workflow_for(SourceSystem.FIGMA, "whoami")
+    workflow, transport, session = workflow_for(SourceSystem.FIGMA, "getFigmaFile")
 
     with pytest.raises(MCPToolDenied):
         run_call(
@@ -256,13 +263,13 @@ def test_unknown_and_mutating_tools_never_reach_network(
 
 @pytest.mark.parametrize("injected_name", ["fileKey", "nodeId", "endpoint", "tenant_id"])
 def test_caller_cannot_inject_figma_or_identity_bindings(injected_name: str) -> None:
-    workflow, transport, session = workflow_for(SourceSystem.FIGMA, "get_metadata")
+    workflow, transport, session = workflow_for(SourceSystem.FIGMA, "getFigmaFile")
 
     with pytest.raises(MCPInputRejected):
         run_call(
             workflow,
             source_system=SourceSystem.FIGMA,
-            tool_name="get_metadata",
+            tool_name="getFigmaFile",
             arguments={injected_name: "attacker-controlled"},
         )
 
@@ -289,10 +296,10 @@ def test_caller_cannot_inject_atlassian_bindings(injected_name: str) -> None:
 
 
 def test_schema_drift_is_refused_after_list_and_before_call() -> None:
-    workflow, transport, session = workflow_for(SourceSystem.FIGMA, "whoami")
+    workflow, transport, session = workflow_for(SourceSystem.FIGMA, "getFigmaFile")
     session.tools = (
         RemoteToolDescription(
-            name="whoami",
+            name="getFigmaFile",
             input_schema={
                 "type": "object",
                 "properties": {"derived": {"type": "string"}},
@@ -302,7 +309,7 @@ def test_schema_drift_is_refused_after_list_and_before_call() -> None:
     )
 
     with pytest.raises(MCPSchemaRejected):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
     assert transport.connect_count == 1
     assert session.list_count == 1
@@ -312,12 +319,12 @@ def test_schema_drift_is_refused_after_list_and_before_call() -> None:
 def test_unapproved_protocol_is_refused_before_tool_list() -> None:
     workflow, _, session = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         protocol_version="2025-06-18",
     )
 
     with pytest.raises(MCPProtocolRejected):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
     assert session.list_count == 0
     assert session.call_count == 0
@@ -327,38 +334,95 @@ def test_atlassian_negotiated_protocol_is_approved() -> None:
     """2025-11-25 is the highest revision the Atlassian MCP server speaks."""
     workflow, _, session = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         protocol_version="2025-11-25",
     )
 
-    result = run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+    result = run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
     assert result.provenance.protocol_version == "2025-11-25"
     assert session.call_count == 1
 
 
-def test_figma_target_is_injected_and_result_has_provenance() -> None:
-    workflow, _, session = workflow_for(SourceSystem.FIGMA, "get_screenshot")
+def test_a_figma_read_carries_provenance_and_a_citation_to_its_own_file() -> None:
+    workflow, _, session = workflow_for(SourceSystem.FIGMA, "getFigmaFile")
 
     result = run_call(
         workflow,
         source_system=SourceSystem.FIGMA,
-        tool_name="get_screenshot",
+        tool_name="getFigmaFile",
     )
 
-    assert session.called_arguments == {"fileKey": FIGMA_FILE_KEY, "nodeId": FIGMA_NODE_ID}
+    assert session.called_arguments == {"fileKey": FIGMA_REFERENCE_FILE_KEY}
     assert result.provenance.source_system == SourceSystem.FIGMA
-    assert result.provenance.tool_name == "get_screenshot"
+    assert result.provenance.tool_name == "getFigmaFile"
     assert result.provenance.protocol_version == "2026-07-28"
     assert result.provenance.correlation_id == "corr-test-1"
     assert result.provenance.input_schema_sha256
     assert result.provenance.arguments_sha256
     assert result.provenance.binding_fingerprint
     assert result.provenance.output_schema_sha256 is None
-    assert result.provenance.resource_reference is None
+    # Derived from our own validated argument, never read back from the response,
+    # so a compromised provider cannot redirect where the citation points.
+    assert result.provenance.resource_reference == (
+        f"https://www.figma.com/file/{FIGMA_REFERENCE_FILE_KEY}"
+    )
     assert result.provenance.source_complete is False
     assert result.content[0].text == "safe result"
     assert result.structured_content is None
+
+
+def test_any_well_formed_figma_file_is_readable_and_a_malformed_one_is_not() -> None:
+    """The caller names the file; the credential's scope is what bounds the read.
+
+    A Figma file key is not the counterpart of an Atlassian cloud ID. A cloud ID
+    selects which tenant is read and must never be caller-chosen; a file key
+    selects a document inside the space the delegated credential already covers,
+    and the assistant has to reach process boards across that whole space. What
+    the schema still enforces is shape: the value lands in a request path and in
+    the citation URL, so it may not carry a separator or a traversal segment.
+    """
+    workflow, _, session = workflow_for(SourceSystem.FIGMA, "getFigmaNode")
+
+    result = run_call(
+        workflow,
+        source_system=SourceSystem.FIGMA,
+        tool_name="getFigmaNode",
+        arguments={"fileKey": "aDifferentBoardKey01", "nodeId": "36-114"},
+    )
+
+    assert session.called_arguments == {
+        "fileKey": "aDifferentBoardKey01",
+        "nodeId": "36-114",
+    }
+    assert result.provenance.resource_reference == (
+        "https://www.figma.com/file/aDifferentBoardKey01"
+    )
+
+
+@pytest.mark.parametrize(
+    "file_key",
+    [
+        "../../etc/passwd",
+        "abc123/nodes?ids=1",
+        "https://evil.invalid/x",
+        "short",
+        "clé-avec-tirets-01",
+    ],
+)
+def test_a_malformed_file_key_never_reaches_the_network(file_key: str) -> None:
+    workflow, transport, session = workflow_for(SourceSystem.FIGMA, "getFigmaFile")
+
+    with pytest.raises(MCPInputRejected):
+        run_call(
+            workflow,
+            source_system=SourceSystem.FIGMA,
+            tool_name="getFigmaFile",
+            arguments={"fileKey": file_key},
+        )
+
+    assert transport.connect_count == 0
+    assert session.call_count == 0
 
 
 def test_atlassian_cloud_id_is_injected_from_distinct_binding() -> None:
@@ -488,20 +552,20 @@ def test_text_and_structured_size_limit_is_enforced() -> None:
     }
     workflow, _, _ = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         result=result,
         approved_output_schema=output_schema,
     )
 
     with pytest.raises(MCPResponseTooLarge):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
 
 def test_image_size_and_mime_are_validated() -> None:
     oversized = base64.b64encode(b"x" * (MAX_IMAGE_BYTES + 1)).decode()
     workflow, _, _ = workflow_for(
         SourceSystem.FIGMA,
-        "get_screenshot",
+        "getFigmaFile",
         result=RemoteToolResult(
             content=(
                 RemoteContentBlock(kind="image", data=oversized, mime_type="image/png"),
@@ -512,12 +576,12 @@ def test_image_size_and_mime_are_validated() -> None:
         run_call(
             workflow,
             source_system=SourceSystem.FIGMA,
-            tool_name="get_screenshot",
+            tool_name="getFigmaFile",
         )
 
     workflow, _, _ = workflow_for(
         SourceSystem.FIGMA,
-        "get_screenshot",
+        "getFigmaFile",
         result=RemoteToolResult(
             content=(
                 RemoteContentBlock(
@@ -532,14 +596,14 @@ def test_image_size_and_mime_are_validated() -> None:
         run_call(
             workflow,
             source_system=SourceSystem.FIGMA,
-            tool_name="get_screenshot",
+            tool_name="getFigmaFile",
         )
 
 
 def test_resource_link_response_is_never_followed_or_returned() -> None:
     workflow, _, _ = workflow_for(
         SourceSystem.FIGMA,
-        "get_design_context",
+        "getFigmaFile",
         result=RemoteToolResult(
             content=(RemoteContentBlock(kind="unsupported"),),
         ),
@@ -549,7 +613,7 @@ def test_resource_link_response_is_never_followed_or_returned() -> None:
         run_call(
             workflow,
             source_system=SourceSystem.FIGMA,
-            tool_name="get_design_context",
+            tool_name="getFigmaFile",
         )
 
 
@@ -557,7 +621,7 @@ def test_non_json_structured_response_is_rejected() -> None:
     output_schema = {"type": "object"}
     workflow, _, _ = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         result=RemoteToolResult(
             content=(),
             structured_content={"invalid": float("nan")},
@@ -566,11 +630,11 @@ def test_non_json_structured_response_is_rejected() -> None:
     )
 
     with pytest.raises(MCPInvalidResponse):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
 
 def test_batch_is_limited_to_three_calls_before_execution() -> None:
-    command = MCPReadCommand(source_system=SourceSystem.FIGMA, tool_name="whoami")
+    command = MCPReadCommand(source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
     with pytest.raises(ValidationError):
         MCPReadBatch(calls=(command, command, command, command))
 
@@ -579,7 +643,7 @@ def test_batch_cannot_mix_source_systems_before_execution() -> None:
     with pytest.raises(ValidationError, match="one source system"):
         MCPReadBatch(
             calls=(
-                MCPReadCommand(source_system=SourceSystem.FIGMA, tool_name="whoami"),
+                MCPReadCommand(source_system=SourceSystem.FIGMA, tool_name="getFigmaFile"),
                 MCPReadCommand(
                     source_system=SourceSystem.JIRA,
                     tool_name="getJiraIssue",
@@ -592,12 +656,12 @@ def test_batch_cannot_mix_source_systems_before_execution() -> None:
 def test_remote_output_schema_is_refused_when_contract_has_none() -> None:
     workflow, transport, session = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         listed_output_schema={"type": "object"},
     )
 
     with pytest.raises(MCPSchemaRejected):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
     assert transport.connect_count == 1
     assert session.list_count == 1
@@ -607,12 +671,12 @@ def test_remote_output_schema_is_refused_when_contract_has_none() -> None:
 def test_structured_content_is_refused_when_contract_has_no_output_schema() -> None:
     workflow, _, session = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         result=RemoteToolResult(content=(), structured_content={"count": 1}),
     )
 
     with pytest.raises(MCPSchemaRejected):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
     assert session.call_count == 1
 
@@ -626,13 +690,13 @@ def test_pinned_output_schema_drift_is_refused_before_call() -> None:
     }
     workflow, _, session = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         approved_output_schema=approved,
         listed_output_schema={"type": "object", "additionalProperties": True},
     )
 
     with pytest.raises(MCPSchemaRejected):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
     assert session.call_count == 0
 
@@ -646,7 +710,7 @@ def test_pinned_output_schema_validates_structured_content_and_provenance() -> N
     }
     invalid_workflow, _, invalid_session = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         approved_output_schema=approved,
         result=RemoteToolResult(content=(), structured_content={"count": "one"}),
     )
@@ -654,20 +718,20 @@ def test_pinned_output_schema_validates_structured_content_and_provenance() -> N
         run_call(
             invalid_workflow,
             source_system=SourceSystem.FIGMA,
-            tool_name="whoami",
+            tool_name="getFigmaFile",
         )
     assert invalid_session.call_count == 1
 
     valid_workflow, _, _ = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         approved_output_schema=approved,
         result=RemoteToolResult(content=(), structured_content={"count": 1}),
     )
     result = run_call(
         valid_workflow,
         source_system=SourceSystem.FIGMA,
-        tool_name="whoami",
+        tool_name="getFigmaFile",
     )
     assert result.structured_content == {"count": 1}
     assert result.provenance.output_schema_sha256 == schema_sha256(approved)
@@ -681,12 +745,12 @@ def test_audit_authorization_failure_prevents_all_network() -> None:
 
     workflow, transport, session = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         audit_sink=FailingAuditSink(),
     )
 
     with pytest.raises(MCPAuditUnavailable, match="audit trail"):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
     assert transport.connect_count == 0
     assert session.list_count == 0
@@ -707,12 +771,12 @@ def test_final_audit_failure_withholds_successful_result() -> None:
     audit = FailOnSecondAuditSink()
     workflow, transport, session = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         audit_sink=audit,
     )
 
     with pytest.raises(MCPAuditUnavailable, match="audit trail"):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
     assert audit.calls == 2
     assert transport.connect_count == 1
@@ -752,7 +816,7 @@ def test_local_denial_is_audited_without_network() -> None:
     audit = InMemoryAuditSink()
     workflow, transport, session = workflow_for(
         SourceSystem.FIGMA,
-        "whoami",
+        "getFigmaFile",
         audit_sink=audit,
     )
 
@@ -777,12 +841,12 @@ def test_global_read_budget_covers_list_and_call(
     import app.mcp.read_workflow as read_workflow
 
     monkeypatch.setattr(read_workflow, "MCP_READ_BUDGET_SECONDS", 0.02)
-    workflow, _, session = workflow_for(SourceSystem.FIGMA, "whoami")
+    workflow, _, session = workflow_for(SourceSystem.FIGMA, "getFigmaFile")
     session.list_delay = 0.015
     session.call_delay = 0.015
 
     with pytest.raises(MCPCallTimeout):
-        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="whoami")
+        run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
 
     assert session.list_count == 1
     assert session.call_count == 1

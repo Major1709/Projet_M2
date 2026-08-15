@@ -8,15 +8,16 @@ from mcp_types import CallToolResult, ImageContent, ListToolsResult, TextContent
 
 from app.core.identity import SecurityContext
 from app.mcp.adapters.grants import BearerGrant
+from app.mcp.adapters.http_guard import (
+    CALL_TIMEOUT_SECONDS,
+    MAX_WIRE_RESPONSE_BYTES,
+    LimitedAsyncByteStream,
+    reject_oversized_response,
+)
 from app.mcp.adapters.remote import (
     ATLASSIAN_ENDPOINT,
-    CALL_TIMEOUT_SECONDS,
-    FIGMA_ENDPOINT,
-    MAX_WIRE_RESPONSE_BYTES,
     SDKMCPReadSession,
     SDKRemoteMCPTransport,
-    _LimitedAsyncByteStream,
-    _reject_oversized_response,
 )
 from app.mcp.domain import MCPBindingKind, MCPProvider
 from app.mcp.errors import (
@@ -274,7 +275,7 @@ def test_wire_content_length_limit_is_checked_before_body_read() -> None:
         headers = {"content-length": str(MAX_WIRE_RESPONSE_BYTES + 1)}
 
     with pytest.raises(MCPResponseTooLarge):
-        asyncio.run(_reject_oversized_response(Response()))  # type: ignore[arg-type]
+        asyncio.run(reject_oversized_response(Response()))  # type: ignore[arg-type]
 
 
 def test_compressed_wire_response_is_refused_before_body_read() -> None:
@@ -282,7 +283,7 @@ def test_compressed_wire_response_is_refused_before_body_read() -> None:
         headers = {"content-encoding": "gzip"}
 
     with pytest.raises(MCPInvalidResponse):
-        asyncio.run(_reject_oversized_response(Response()))  # type: ignore[arg-type]
+        asyncio.run(reject_oversized_response(Response()))  # type: ignore[arg-type]
 
 
 def test_chunked_wire_response_is_bounded_without_content_length() -> None:
@@ -297,8 +298,8 @@ def test_chunked_wire_response_is_bounded_without_content_length() -> None:
     response = httpx2.Response(200, stream=ChunkedStream())
 
     async def consume_response() -> None:
-        await _reject_oversized_response(response)
-        assert isinstance(response.stream, _LimitedAsyncByteStream)
+        await reject_oversized_response(response)
+        assert isinstance(response.stream, LimitedAsyncByteStream)
         response.stream._maximum_bytes = 3
         async for _ in response.stream:
             pass
@@ -358,12 +359,12 @@ def test_remote_transport_uses_fixed_endpoint_no_redirects_and_bounded_timeouts(
 
     async def connect_once() -> str:
         async with transport.connect(
-            provider=MCPProvider.FIGMA, binding=MCPBindingKind.FIGMA, context=context
+            provider=MCPProvider.ATLASSIAN, binding=MCPBindingKind.JIRA, context=context
         ) as session:
             return session.protocol_version
 
     assert asyncio.run(connect_once()) == "2026-07-28"
-    assert captured["endpoint"] == FIGMA_ENDPOINT
+    assert captured["endpoint"] == ATLASSIAN_ENDPOINT
     assert captured["terminate_on_close"] is False
     http_kwargs = captured["http_kwargs"]
     assert http_kwargs["follow_redirects"] is False
@@ -376,7 +377,7 @@ def test_remote_transport_uses_fixed_endpoint_no_redirects_and_bounded_timeouts(
     assert http_kwargs["timeout"].read == 30.0
     assert captured["client_kwargs"]["cache"] is None
     assert captured["client_kwargs"]["mode"] == "auto"
-    assert resolver.calls == [("mcp.figma.com", 443)]
+    assert resolver.calls == [("mcp.atlassian.com", 443)]
 
 
 @pytest.mark.parametrize("protocol_version", ["2025-06-18", "2025-03-26", "2024-11-05"])
@@ -448,8 +449,8 @@ def test_dns_preflight_refuses_private_metadata_and_mixed_answers_before_grant(
 
     async def connect_once() -> None:
         async with transport.connect(
-            provider=MCPProvider.FIGMA,
-            binding=MCPBindingKind.FIGMA,
+            provider=MCPProvider.ATLASSIAN,
+            binding=MCPBindingKind.JIRA,
             context=SecurityContext(tenant_id="tenant-a", user_id="user-a"),
         ):
             raise AssertionError("A rejected DNS answer must not open a transport")

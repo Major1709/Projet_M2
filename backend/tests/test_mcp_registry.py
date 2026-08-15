@@ -4,9 +4,8 @@ from app.mcp.domain import MCPReadSourceSystem as SourceSystem
 from app.mcp.registry import (
     ATLASSIAN_ENDPOINT,
     CONFLUENCE_SOURCE_ORIGIN,
-    FIGMA_ENDPOINT,
-    FIGMA_FILE_KEY,
-    FIGMA_NODE_ID,
+    FIGMA_REFERENCE_FILE_KEY,
+    FIGMA_REST_ENDPOINT,
     JIRA_SOURCE_ORIGIN,
     MCPToolRegistry,
     schema_sha256,
@@ -26,11 +25,10 @@ ATLASSIAN_TOOLS = {
     "searchConfluenceUsingCql",
 }
 FIGMA_TOOLS = {
-    "whoami",
-    "get_metadata",
-    "get_design_context",
-    "get_screenshot",
-    "get_variable_defs",
+    "getFigmaFile",
+    "getFigmaNode",
+    "renderFigmaNode",
+    "extractFigmaProcess",
 }
 
 
@@ -85,15 +83,14 @@ def test_schema_fingerprint_ignores_only_documentation_and_order() -> None:
 
 def test_endpoints_origins_and_figma_target_are_fixed_not_configurable() -> None:
     assert ATLASSIAN_ENDPOINT == "https://mcp.atlassian.com/v1/mcp"
-    assert FIGMA_ENDPOINT == "https://mcp.figma.com/mcp"
+    assert FIGMA_REST_ENDPOINT == "https://api.figma.com"
     # Both products are hosted on one site in this deployment, so both origins are
     # that site. An origin that drifts from the site actually read makes every
     # citation resolve to a foreign server instead of failing loudly, which is why
     # these are asserted rather than derived from configuration.
     assert JIRA_SOURCE_ORIGIN == "https://andrianalyfanny.atlassian.net"
     assert CONFLUENCE_SOURCE_ORIGIN == "https://andrianalyfanny.atlassian.net"
-    assert FIGMA_FILE_KEY == "Ie3SsqL1KetjinTDHcNm2D"
-    assert FIGMA_NODE_ID == "36:114"
+    assert FIGMA_REFERENCE_FILE_KEY == "Ie3SsqL1KetjinTDHcNm2D"
     for forbidden_field in (
         "mcp_atlassian_endpoint",
         "mcp_figma_endpoint",

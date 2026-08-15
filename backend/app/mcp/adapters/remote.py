@@ -1,11 +1,9 @@
 import base64
 import binascii
-import ipaddress
 import json
-import socket
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from typing import Any, Protocol
+from typing import Any
 from urllib.parse import urlsplit
 
 import anyio
@@ -16,6 +14,16 @@ from mcp_types import ImageContent, TextContent
 
 from app.core.identity import SecurityContext
 from app.mcp.adapters.grants import DelegatedGrantBroker
+from app.mcp.adapters.http_guard import (
+    CALL_TIMEOUT_SECONDS,
+    CONNECT_TIMEOUT_SECONDS,
+    HTTPS_PORT,
+    EndpointResolver,
+    SystemEndpointResolver,
+    is_approved_public_address,
+    reject_oversized_response,
+    validate_fixed_endpoint,
+)
 from app.mcp.domain import MCPBindingKind, MCPProvider
 from app.mcp.errors import (
     MCPCallTimeout,
@@ -24,7 +32,6 @@ from app.mcp.errors import (
     MCPProtocolRejected,
     MCPReadError,
     MCPRemoteToolFailure,
-    MCPResponseTooLarge,
     MCPTransportFailure,
 )
 from app.mcp.ports import (
@@ -34,74 +41,20 @@ from app.mcp.ports import (
     RemoteToolResult,
 )
 from app.mcp.registry import (
-    APPROVED_PROTOCOL_VERSIONS,
+    APPROVED_REMOTE_PROTOCOL_VERSIONS,
     ATLASSIAN_ENDPOINT,
-    FIGMA_ENDPOINT,
 )
 
-CONNECT_TIMEOUT_SECONDS = 3.0
-CALL_TIMEOUT_SECONDS = 30.0
 MAX_LISTED_TOOLS = 256
 MAX_TOOL_LIST_PAGES = 10
-MAX_WIRE_RESPONSE_BYTES = 12 * 1024 * 1024
 
 _ENDPOINTS = {
     MCPProvider.ATLASSIAN: ATLASSIAN_ENDPOINT,
-    MCPProvider.FIGMA: FIGMA_ENDPOINT,
 }
 
 
-def _validate_fixed_endpoint(endpoint: str) -> None:
-    parsed = urlsplit(endpoint)
-    if (
-        parsed.scheme != "https"
-        or parsed.port not in {None, 443}
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("MCP endpoints must be fixed HTTPS destinations")
-
-
 for _endpoint in _ENDPOINTS.values():
-    _validate_fixed_endpoint(_endpoint)
-
-
-class _LimitedAsyncByteStream(httpx2.AsyncByteStream):
-    def __init__(self, stream: httpx2.AsyncByteStream, maximum_bytes: int) -> None:
-        self._stream = stream
-        self._maximum_bytes = maximum_bytes
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        seen = 0
-        async for chunk in self._stream:
-            seen += len(chunk)
-            if seen > self._maximum_bytes:
-                raise MCPResponseTooLarge()
-            yield chunk
-
-    async def aclose(self) -> None:
-        await self._stream.aclose()
-
-
-async def _reject_oversized_response(response: httpx2.Response) -> None:
-    content_encoding = response.headers.get("content-encoding", "").strip().lower()
-    if content_encoding not in {"", "identity"}:
-        raise MCPInvalidResponse()
-    content_length = response.headers.get("content-length")
-    if content_length is not None:
-        try:
-            declared_size = int(content_length)
-        except ValueError as error:
-            raise MCPInvalidResponse() from error
-        if declared_size < 0:
-            raise MCPInvalidResponse()
-        if declared_size > MAX_WIRE_RESPONSE_BYTES:
-            raise MCPResponseTooLarge()
-    if not isinstance(response.stream, httpx2.AsyncByteStream):
-        raise MCPInvalidResponse()
-    response.stream = _LimitedAsyncByteStream(response.stream, MAX_WIRE_RESPONSE_BYTES)
+    validate_fixed_endpoint(_endpoint)
 
 
 def _contains_across_text_fragments(secret: str, fragments: Iterable[str]) -> bool:
@@ -149,35 +102,6 @@ def _structured_text_fragments(value: Any, seen: set[int] | None = None) -> list
         for child in value:
             fragments.extend(_structured_text_fragments(child, seen))
     return fragments
-
-
-class EndpointResolver(Protocol):
-    async def resolve(self, *, hostname: str, port: int) -> tuple[str, ...]: ...
-
-
-class SystemEndpointResolver:
-    async def resolve(self, *, hostname: str, port: int) -> tuple[str, ...]:
-        def resolve_blocking() -> tuple[str, ...]:
-            records = socket.getaddrinfo(
-                hostname,
-                port,
-                family=socket.AF_UNSPEC,
-                type=socket.SOCK_STREAM,
-                proto=socket.IPPROTO_TCP,
-            )
-            return tuple(record[4][0] for record in records)
-
-        return await anyio.to_thread.run_sync(resolve_blocking)
-
-
-def _is_approved_public_address(address: str) -> bool:
-    try:
-        parsed = ipaddress.ip_address(address)
-    except ValueError:
-        return False
-    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
-        parsed = parsed.ipv4_mapped
-    return parsed.is_global
 
 
 class SDKMCPReadSession:
@@ -374,11 +298,11 @@ class SDKRemoteMCPTransport:
         if hostname is None:  # pragma: no cover - fixed endpoints are checked at import
             raise MCPDNSRejected()
         try:
-            addresses = await self._resolver.resolve(hostname=hostname, port=443)
+            addresses = await self._resolver.resolve(hostname=hostname, port=HTTPS_PORT)
         except Exception as error:
             raise MCPDNSRejected() from error
         if not addresses or any(
-            not _is_approved_public_address(address) for address in addresses
+            not is_approved_public_address(address) for address in addresses
         ):
             raise MCPDNSRejected()
         grant = await self._grant_broker.acquire(
@@ -399,7 +323,7 @@ class SDKRemoteMCPTransport:
             timeout=timeout,
             follow_redirects=False,
             trust_env=False,
-            event_hooks={"response": [_reject_oversized_response]},
+            event_hooks={"response": [reject_oversized_response]},
         )
         transport = streamable_http_client(
             endpoint,
@@ -415,7 +339,7 @@ class SDKRemoteMCPTransport:
         )
         try:
             async with http_client, client:
-                if client.protocol_version not in APPROVED_PROTOCOL_VERSIONS:
+                if client.protocol_version not in APPROVED_REMOTE_PROTOCOL_VERSIONS:
                     raise MCPProtocolRejected()
                 yield SDKMCPReadSession(
                     client=client,
