@@ -15,8 +15,9 @@ class LLMRequest(BaseModel):
     # reveals a site, a file key, or a credential.
     tools: tuple[dict[str, Any], ...] = ()
     # What the model is allowed to have chosen. Kept separate from ``tools`` on
-    # purpose: the allowlist is the enforcement list, and it must hold even if a
-    # provider returns a name that was never offered.
+    # purpose: a provider can return a name that was never offered, and the adapter
+    # refuses it when this tuple is non-empty. It is a boundary check, not the
+    # authority -- the registry allowlist in the read workflow remains that.
     allowed_tool_names: tuple[str, ...] = ()
     max_steps: int = Field(default=8, ge=1, le=20)
     # Asked for per request, not fixed by the adapter. A provider counts the whole

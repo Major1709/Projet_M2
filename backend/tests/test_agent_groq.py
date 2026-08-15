@@ -9,8 +9,13 @@ import pytest
 
 from app.agent.adapters.groq import (
     GROQ_ENDPOINT,
+    MAX_API_KEY_BYTES,
     MAX_COMPLETION_TOKENS,
     MAX_RESPONSE_BYTES,
+    MAX_TEXT_CHARACTERS,
+    MAX_TOOL_ARGUMENTS_CHARACTERS,
+    MAX_TOOL_CALLS,
+    MAX_TOOL_NAME_CHARACTERS,
     GroqLLMProvider,
 )
 from app.agent.domain import LLMRequest
@@ -110,8 +115,17 @@ def test_the_endpoint_is_pinned_and_not_configurable() -> None:
     assert GROQ_ENDPOINT == "https://api.groq.com/openai/v1"
     # A destination that configuration can move is a destination that can be pointed
     # at a server we never approved -- carrying the API key with it on the first call.
-    for forbidden_field in ("llm_groq_api_base_url", "groq_api_base_url", "llm_groq_endpoint"):
-        assert forbidden_field not in Settings.model_fields
+    #
+    # Asserted as a property rather than a list of guessed names: enumerating
+    # forbidden names only catches the spellings someone thought of, and a field
+    # called llm_groq_url would reintroduce the lever without failing the test.
+    destination_words = ("url", "endpoint", "host", "base", "origin", "address")
+    offending = [
+        name
+        for name in Settings.model_fields
+        if ("groq" in name or "llm" in name) and any(word in name for word in destination_words)
+    ]
+    assert offending == []
     assert Settings.model_fields["llm_groq_max_completion_tokens"].default == MAX_COMPLETION_TOKENS
 
 
@@ -296,7 +310,7 @@ async def test_rate_limiting_logs_retry_after_and_nothing_else(
         await provider.generate(request=REQUEST, context=CONTEXT)
 
     record = next(r for r in caplog.records if r.message == "Groq is rate limiting this credential")
-    assert record.retry_after == "42"
+    assert record.retry_after == 42
     assert "gsk" not in caplog.text
 
 
@@ -482,6 +496,181 @@ async def test_a_compressed_body_is_refused(tmp_path: Path) -> None:
     # Its decoded size is unbounded by anything we can measure here.
     with pytest.raises(LLMInvalidResponse):
         await provider.generate(request=REQUEST, context=CONTEXT)
+
+
+@pytest.mark.anyio
+async def test_deeply_nested_tool_arguments_stay_inside_the_taxonomy(tmp_path: Path) -> None:
+    # RecursionError is not a ValueError. Uncaught it escapes the fail-closed taxonomy
+    # and surfaces as a generic 500 with a traceback -- reachable from a page whose
+    # content the model was asked to relay.
+    nested = '{"a":' + "[" * 5_000 + "]" * 5_000 + "}"
+    assert len(nested) < MAX_TOOL_ARGUMENTS_CHARACTERS
+    handler = json_handler(
+        completion(
+            text="",
+            tool_calls=[
+                {"type": "function", "function": {"name": "getJiraIssue", "arguments": nested}}
+            ],
+        )
+    )
+    provider = provider_for(tmp_path, handler)
+    with pytest.raises(LLMInvalidResponse):
+        await provider.generate(request=REQUEST, context=CONTEXT)
+
+
+@pytest.mark.anyio
+async def test_a_deeply_nested_body_stays_inside_the_taxonomy(tmp_path: Path) -> None:
+    nested = b'{"a":' + b"[" * 5_000 + b"]" * 5_000 + b"}"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=nested)
+
+    provider = provider_for(tmp_path, handler)
+    with pytest.raises(LLMInvalidResponse):
+        await provider.generate(request=REQUEST, context=CONTEXT)
+
+
+@pytest.mark.anyio
+async def test_a_tool_name_that_was_never_offered_is_refused(tmp_path: Path) -> None:
+    handler = json_handler(
+        completion(
+            text="",
+            tool_calls=[
+                {"type": "function", "function": {"name": "createJiraIssue", "arguments": "{}"}}
+            ],
+        )
+    )
+    provider = provider_for(tmp_path, handler)
+    with pytest.raises(LLMInvalidResponse):
+        await provider.generate(
+            request=REQUEST.model_copy(update={"allowed_tool_names": ("getJiraIssue",)}),
+            context=CONTEXT,
+        )
+
+
+@pytest.mark.anyio
+async def test_an_offered_tool_name_passes_the_boundary_check(tmp_path: Path) -> None:
+    handler = json_handler(
+        completion(
+            text="",
+            tool_calls=[
+                {"type": "function", "function": {"name": "getJiraIssue", "arguments": "{}"}}
+            ],
+        )
+    )
+    provider = provider_for(tmp_path, handler)
+
+    response = await provider.generate(
+        request=REQUEST.model_copy(update={"allowed_tool_names": ("getJiraIssue",)}),
+        context=CONTEXT,
+    )
+
+    assert response.tool_calls[0].tool_name == "getJiraIssue"
+
+
+@pytest.mark.anyio
+async def test_reasoning_left_in_the_answer_never_reaches_the_text(tmp_path: Path) -> None:
+    # Honouring reasoning_format is the model's choice, and the configured model is a
+    # free-form string. A substituted model must degrade to a plain answer rather than
+    # leak its chain of thought into whatever renders the text.
+    leaked = "<think>The user asked about Jira. I should recall...</think>Jira suit les tickets."
+    provider = provider_for(tmp_path, json_handler(completion(text=leaked)))
+
+    response = await provider.generate(request=REQUEST, context=CONTEXT)
+
+    assert response.text == "Jira suit les tickets."
+    assert "<think>" not in response.text
+
+
+@pytest.mark.anyio
+async def test_an_unterminated_reasoning_block_takes_everything_after_it(tmp_path: Path) -> None:
+    provider = provider_for(
+        tmp_path,
+        json_handler(completion(text="Réponse courte.<think>et un raisonnement jamais fermé")),
+    )
+
+    response = await provider.generate(request=REQUEST, context=CONTEXT)
+
+    assert response.text == "Réponse courte."
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("too_many_calls", None),
+        ("name_too_long", None),
+        ("arguments_too_long", None),
+    ],
+)
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_each_declared_tool_bound_is_enforced(
+    tmp_path: Path,
+    field: str,
+    value: None,
+    anyio_backend: str,
+) -> None:
+    call = {"type": "function", "function": {"name": "getJiraIssue", "arguments": "{}"}}
+    if field == "too_many_calls":
+        calls = [call] * (MAX_TOOL_CALLS + 1)
+        expected: type[Exception] = LLMResponseTooLarge
+    elif field == "name_too_long":
+        long_name = "g" * (MAX_TOOL_NAME_CHARACTERS + 1)
+        calls = [{"type": "function", "function": {"name": long_name, "arguments": "{}"}}]
+        expected = LLMInvalidResponse
+    else:
+        long_arguments = '{"k":"' + "v" * MAX_TOOL_ARGUMENTS_CHARACTERS + '"}'
+        calls = [
+            {"type": "function", "function": {"name": "getJiraIssue", "arguments": long_arguments}}
+        ]
+        expected = LLMResponseTooLarge
+
+    provider = provider_for(tmp_path, json_handler(completion(text="", tool_calls=calls)))
+    with pytest.raises(expected):
+        await provider.generate(request=REQUEST, context=CONTEXT)
+
+
+@pytest.mark.anyio
+async def test_a_long_text_under_the_byte_ceiling_is_still_refused(tmp_path: Path) -> None:
+    # A distinct path from the 2 MiB body ceiling: this text passes the wire bound and
+    # must be stopped by the character bound instead.
+    text = "a" * (MAX_TEXT_CHARACTERS + 1)
+    assert len(text.encode("utf-8")) < MAX_RESPONSE_BYTES
+    provider = provider_for(tmp_path, json_handler(completion(text=text)))
+    with pytest.raises(LLMResponseTooLarge):
+        await provider.generate(request=REQUEST, context=CONTEXT)
+
+
+@pytest.mark.anyio
+async def test_an_oversized_api_key_is_refused(tmp_path: Path) -> None:
+    provider = provider_for(
+        tmp_path,
+        json_handler(completion()),
+        key=b"gsk_" + b"a" * MAX_API_KEY_BYTES,
+    )
+    with pytest.raises(LLMCredentialUnavailable):
+        await provider.generate(request=REQUEST, context=CONTEXT)
+
+
+@pytest.mark.anyio
+async def test_a_hostile_retry_after_is_not_written_verbatim_to_the_log(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = provider_for(
+        tmp_path,
+        json_handler(
+            {"error": "x"},
+            status_code=429,
+            headers={"retry-after": "12\nWARNING intrus: compte administrateur cree"},
+        ),
+    )
+    with caplog.at_level(logging.WARNING), pytest.raises(LLMRateLimited):
+        await provider.generate(request=REQUEST, context=CONTEXT)
+
+    record = next(r for r in caplog.records if r.message == "Groq is rate limiting this credential")
+    assert record.retry_after is None
+    assert "intrus" not in caplog.text
 
 
 @pytest.mark.anyio

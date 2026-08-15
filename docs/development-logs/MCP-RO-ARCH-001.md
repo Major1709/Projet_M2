@@ -330,6 +330,121 @@ dans l'allowlist — donc dans la surface de sécurité — cinq outils définit
 Reste non vérifié : l'appartenance du `fileKey` épinglé au compte courant, et donc toute lecture
 réelle. Rien n'a encore été lu dans Figma.
 
+## Fournisseur LLM : Groq — 2026-08-15
+
+Le premier consommateur des lectures MCP est un modèle. L'adaptateur qui l'appelle est livré ;
+rien ne le câble encore, faute de boucle d'orchestration à alimenter.
+
+### Choix du fournisseur et du modèle
+
+Groq a été retenu pour le développement, sur trois critères : palier gratuit suffisant pour les
+dizaines d'itérations qu'exige la mise au point d'une boucle agentique, débit élevé qui rend le
+cycle supportable, et **API compatible OpenAI** — donc un seul adaptateur couvre Groq et OpenAI,
+et le changement de fournisseur devient une variable d'environnement plutôt qu'un module.
+
+Groq **ne propose aucun modèle d'embedding**. La question du fournisseur d'embeddings, laissée
+ouverte pour l'étape d'indexation Confluence, n'est donc pas résolue par ce choix : elle est
+tranchée séparément par `EMBEDDING_PROVIDER=local` avec `BAAI/bge-m3`, qui coûte zéro euro.
+
+Le modèle est `qwen/qwen3.6-27b`. C'est le plus performant du catalogue Groq en raisonnement, ce
+qui correspond au profil de la tâche : choisir le bon outil MCP et composer ses arguments. Trois
+propriétés en découlent, toutes structurantes :
+
+- **Sortie plafonnée à 16 384 tokens** contre 65 536 pour `gpt-oss-120b`. L'adaptateur borne la
+  demande à cette valeur.
+- **Modèle en preview** chez Groq : évaluation seulement, aucune garantie de disponibilité. À
+  rebasculer sur un modèle de production avant une démonstration.
+- **Vision native.** `renderFigmaNode` renvoie une URL d'image sans la suivre ; un modèle capable
+  de lire une image ouvre la description de maquette. La suivre serait une requête sortante vers
+  un CDN qu'aucun garde ne couvre aujourd'hui — décision de sécurité à part entière, non prise.
+
+### Ce que l'adaptateur fixe
+
+**L'endpoint est épinglé dans le module, validé à l'import, et absent de la configuration.** Une
+destination que la configuration peut déplacer est une destination qu'un fichier d'environnement
+modifié peut pointer ailleurs — en emportant la clé API dès la première requête. Un test échoue
+si un champ de réglage évoquant une URL, un hôte ou une origine réapparaît dans `Settings`.
+
+Les variables `GROQ_*` sont devenues `PKA_LLM_GROQ_*`. `Settings` ne lit que le préfixe `PKA_` :
+les anciennes étaient injectées par Compose et lues par personne. La configuration paraissait
+active alors qu'elle ne l'était pas.
+
+**Tout ce qui revient est traité comme non fiable** : corps borné à 2 Mio avant bufferisation,
+arguments d'outil parsés et refusés s'ils ne sont pas un objet, nom d'outil vérifié contre la
+liste réellement proposée, classe d'action imposée à `READ` et jamais lue dans la réponse. Un
+modèle qui renvoie `createJiraIssue` ressort en `READ`, et le registre le refuse ensuite.
+
+Le garde de taille de `http_guard.py` devient paramétrable. Les transports MCP conservent leur
+plafond de 12 Mio ; une complétion bornée à 16 384 tokens n'a aucune raison d'en obtenir autant.
+
+`LLMProvider.generate` passe en `async` : un appel bloquant dans la boucle d'orchestration
+gèlerait l'event loop le temps d'une inférence.
+
+### Limites constatées en réel
+
+Quatre problèmes que les tests unitaires ne pouvaient pas révéler, tous trouvés par sonde contre
+`api.groq.com` :
+
+- **Le palier gratuit plafonne à 8 000 tokens par minute, et le budget demandé compte** qu'il
+  soit consommé ou non. L'adaptateur demandait 16 384 tokens à chaque appel : chaque requête
+  dépassait la limite à elle seule. Le plafond devait être une borne, pas une quantité imposée ;
+  `max_completion_tokens` est désormais demandé par requête, défaut 2 048.
+- **Groq répond 413 pour ce cas**, en l'étiquetant `rate_limit_exceeded`. Attendre n'y change
+  rien : il faut envoyer moins. `LLM_REQUEST_TOO_LARGE` est distinct de `LLM_RATE_LIMITED`.
+  C'est la quatrième erreur de taxonomie du chantier et la troisième portant sur un quota ; le
+  motif est constant, un fournisseur qui répond correctement se fait classer comme une panne.
+- **Le modèle écrivait son raisonnement en clair dans la réponse**, entre balises `<think>`. Le
+  texte destiné à l'utilisateur n'était pas la réponse, et le cheminement aurait fini dans une
+  citation rendue. `reasoning_format: "parsed"` l'isole, et `_text_of` retire les balises par
+  précaution — honorer le paramètre est un choix du modèle, et le modèle est configurable.
+- **Le raisonnement consomme le budget de complétion.** Sur un modèle de raisonnement,
+  `max_completion_tokens` couvre la réflexion *et* la réponse ; trop bas, la réflexion épuise le
+  budget avant que la réponse commence, et `finish_reason: "length"` remonte en échec.
+
+Conséquence à retenir pour la boucle : 8 000 tokens par minute est très serré pour un cycle
+agentique qui réinjecte le contenu Jira ou Confluence à chaque tour. Trois étapes avec 5 000
+tokens de contexte dépassent la fenêtre. À mesurer quand la boucle existera.
+
+### Vérification indépendante — 2026-08-15
+
+Le critère d'acceptation « QA et MCP/Sécurité rendent un verdict indépendant », ouvert depuis le
+début du lot, est fermé sur ce périmètre. Deux agents ont audité le commit sans l'avoir écrit.
+
+**QA : conforme avec réserves.** Chiffres reproduits indépendamment. Deux trous relevés : une
+assertion faible dans le test d'épinglage — une liste de noms devinés plutôt qu'une propriété —
+et cinq bornes déclarées mais non exercées, dont `MAX_TEXT_CHARACTERS`, qui est un chemin
+distinct du plafond d'octets.
+
+**Sécurité : approuvé sous réserve.** Épinglage vérifié jusqu'aux redirections et au proxy, clé
+non divulguée y compris dans la chaîne d'exception, bornage confirmé antérieur à la
+bufferisation par lecture de la source de `httpx2`, et **aucune régression** des transports MCP
+après extraction du garde. Un défaut réel : `json.loads` lève `RecursionError`, qui n'est pas une
+`ValueError` et échappait donc à la taxonomie fail-closed — atteignable depuis un contenu que le
+modèle relaie. Trois écarts commentaire/code, dont un commentaire affirmant que
+`allowed_tool_names` était appliqué alors qu'aucun code ne le lisait.
+
+Tous ces constats sont corrigés. Le point le plus instructif est le dernier : un commentaire
+rassurant sur un contrôle absent est plus dangereux que pas de commentaire du tout, et c'est
+exactement ce que l'audit avait pour consigne de traquer.
+
+**Réserve maintenue, non levée :** ne pas câbler l'adaptateur dans une boucle d'orchestration
+tant qu'un audit d'appel LLM — tenant, utilisateur, corrélation — n'est pas livré. `context` est
+aujourd'hui accepté et inutilisé. L'audit vérifiable est un non-négociable du projet.
+
+**Limite transversale identifiée par les deux audits :** le contrôle DNS est un TOCTOU. La
+résolution de validation et celle de la connexion sont distinctes, donc un rebinding passe entre
+les deux. Le contrôle reste utile — il échoue vite sur une résolution manifestement fausse — mais
+la vraie liaison est la validation TLS du certificat. Le schéma est identique dans `remote.py` et
+`figma_rest.py` : à traiter comme une décision d'architecture sur les trois adaptateurs, pas
+comme un correctif Groq isolé.
+
+### Suite immédiate
+
+La boucle d'orchestration, sur `feature/agent-orchestration`. Groq et l'orchestration dépassent
+le périmètre de `feature/mcp-readonly-connectors`, dont le nom ne les couvre plus. Le commit
+Groq reste dans l'historique de la branche MCP : elle est publiée, et la réécrire pour corriger
+le périmètre d'un seul commit coûterait plus que ça ne rapporte.
+
 ## Outillage
 
 `scripts/mcp-smoke.sh` sonde les trois surfaces — identité seule, puis Jira et Confluence qui

@@ -62,9 +62,10 @@ validate_fixed_endpoint(GROQ_ENDPOINT)
 # reaching Groq should be as quick as reaching anything else.
 CALL_TIMEOUT_SECONDS: Final = 120.0
 
-# qwen3.6-27b caps completions at 16 384 tokens. Clamping here rather than trusting
-# the caller means an oversized request is rejected by us with a clear error instead
-# of being silently truncated mid-answer by the provider.
+# qwen3.6-27b caps completions at 16 384 tokens. This is a ceiling the adapter
+# applies to whatever the caller asks for -- the ask is lowered to fit, not refused.
+# Getting a shorter completion is better than a request the provider rejects
+# outright, and the truncation that would follow is caught by ``finish_reason``.
 MAX_COMPLETION_TOKENS: Final = 16_384
 
 # A completion bounded at 16 384 tokens cannot honestly exceed a couple of megabytes
@@ -80,6 +81,9 @@ MAX_TOOL_NAME_CHARACTERS: Final = 200
 
 MIN_API_KEY_BYTES: Final = 16
 MAX_API_KEY_BYTES: Final = 4096
+
+_REASONING_OPEN: Final = "<think>"
+_REASONING_CLOSE: Final = "</think>"
 
 
 def _validated_api_key(raw: bytes) -> str:
@@ -113,11 +117,40 @@ def _text_of(message: dict[str, Any]) -> str:
         raise LLMInvalidResponse()
     if len(content) > MAX_TEXT_CHARACTERS:
         raise LLMResponseTooLarge()
-    return content
+    return _without_reasoning(content)
 
 
-def _tool_calls_of(message: dict[str, Any]) -> tuple[ProposedToolCall, ...]:
-    """Rebuild the model's tool calls, treating every field as untrusted input."""
+def _without_reasoning(content: str) -> str:
+    """Drop any <think> block a model wrote into the answer despite the request.
+
+    The request asks for reasoning in its own field, but honouring that is the
+    model's choice, and the configured model is a free-form string. Stripping here
+    means a substituted model degrades to a plain answer rather than leaking its
+    chain of thought into whatever renders the text.
+    """
+
+    while True:
+        opening = content.find(_REASONING_OPEN)
+        if opening == -1:
+            return content.strip()
+        closing = content.find(_REASONING_CLOSE, opening)
+        if closing == -1:
+            # Unterminated: everything from the tag onward is reasoning.
+            return content[:opening].strip()
+        content = content[:opening] + content[closing + len(_REASONING_CLOSE) :]
+
+
+def _tool_calls_of(
+    message: dict[str, Any],
+    allowed_tool_names: tuple[str, ...],
+) -> tuple[ProposedToolCall, ...]:
+    """Rebuild the model's tool calls, treating every field as untrusted input.
+
+    ``allowed_tool_names`` is enforced here when the caller supplies one. It does not
+    replace the registry allowlist further down -- that one stays the authority -- but
+    a name that was never offered is a malformed answer, and saying so at the boundary
+    beats carrying it deeper to be refused with less context.
+    """
 
     raw_calls = message.get("tool_calls")
     if raw_calls is None:
@@ -138,6 +171,8 @@ def _tool_calls_of(message: dict[str, Any]) -> tuple[ProposedToolCall, ...]:
         name = function.get("name")
         if not isinstance(name, str) or not name or len(name) > MAX_TOOL_NAME_CHARACTERS:
             raise LLMInvalidResponse()
+        if allowed_tool_names and name not in allowed_tool_names:
+            raise LLMInvalidResponse()
 
         # OpenAI-shaped providers return the arguments as a JSON *string*, so this is
         # a parse, not a cast. Anything that is not an object is refused rather than
@@ -150,7 +185,12 @@ def _tool_calls_of(message: dict[str, Any]) -> tuple[ProposedToolCall, ...]:
             raise LLMResponseTooLarge()
         try:
             arguments = json.loads(raw_arguments or "{}")
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
+            # A deeply nested document exhausts the parser's stack and raises
+            # RecursionError, which is not a ValueError. Left uncaught it escapes the
+            # fail-closed taxonomy entirely and surfaces as a generic 500 with a
+            # traceback -- reachable from a page whose content the model was asked to
+            # relay, so it is untrusted input like everything else here.
             raise LLMInvalidResponse() from error
         if not isinstance(arguments, dict):
             raise LLMInvalidResponse()
@@ -211,8 +251,13 @@ class GroqLLMProvider:
             "max_tokens": min(request.max_completion_tokens, self._max_completion_tokens),
             # qwen3.6-27b reasons before answering, and by default writes that
             # reasoning into the answer inside <think> tags. Asking for it parsed puts
-            # it in its own field: the user-facing text stays the answer, and the
-            # chain of thought never reaches a citation or a rendered response.
+            # it in its own field, so the user-facing text stays the answer.
+            #
+            # This holds for models that honour the parameter, which is a property of
+            # the configured model rather than of this adapter. A model that ignored
+            # it would put its reasoning back into ``content`` -- and from there into a
+            # rendered answer -- which is why ``_text_of`` strips the tags defensively
+            # rather than trusting the request to have been respected.
             "reasoning_format": "parsed",
         }
         if request.tools:
@@ -244,7 +289,7 @@ class GroqLLMProvider:
         )
         async with client:
             document = await self._post(client, payload, request.correlation_id)
-        return self._normalize(document)
+        return self._normalize(document, request.allowed_tool_names)
 
     async def _reject_unapproved_address(self) -> None:
         """Resolve the pinned host and refuse anything that is not publicly routable.
@@ -299,7 +344,11 @@ class GroqLLMProvider:
             # A quota is not an outage. Filing it under a transport failure would send
             # the operator hunting a network problem that does not exist, and would
             # discard the one actionable value in the answer.
-            retry_after = response.headers.get("retry-after")
+            # Parsed before it is logged. The value is provider-controlled, and a raw
+            # header written verbatim into a log line is a log-injection primitive for
+            # any sink that does not escape.
+            raw_retry_after = response.headers.get("retry-after", "")
+            retry_after = int(raw_retry_after) if raw_retry_after.strip().isdigit() else None
             logger.warning(
                 "Groq is rate limiting this credential",
                 extra={"llm_provider": "groq", "retry_after": retry_after},
@@ -329,13 +378,17 @@ class GroqLLMProvider:
 
         try:
             document = response.json()
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
             raise LLMInvalidResponse() from error
         if not isinstance(document, dict):
             raise LLMInvalidResponse()
         return document
 
-    def _normalize(self, document: dict[str, Any]) -> LLMResponse:
+    def _normalize(
+        self,
+        document: dict[str, Any],
+        allowed_tool_names: tuple[str, ...],
+    ) -> LLMResponse:
         choices = document.get("choices")
         if not isinstance(choices, list) or not choices:
             raise LLMInvalidResponse()
@@ -356,7 +409,7 @@ class GroqLLMProvider:
         served_model = document.get("model")
         return LLMResponse(
             text=_text_of(message),
-            tool_calls=_tool_calls_of(message),
+            tool_calls=_tool_calls_of(message, allowed_tool_names),
             model_name=self._model,
             # What the provider says it served, kept apart from what we asked for so a
             # silent substitution is visible rather than assumed away.
