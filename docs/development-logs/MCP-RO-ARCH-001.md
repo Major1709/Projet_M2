@@ -826,6 +826,43 @@ n'a été lue, ce qui casserait les questions dont la réponse est légitimement
 sur des exécutions différentes. Le plafond de jetons par minute du palier gratuit a interrompu
 chaque tentative de confirmation.
 
+## Suites de la revue locale — 2026-08-16
+
+### L'identité est vérifiée là où elle est utilisée
+
+`get_development_security_context` lit `X-Tenant-ID` et `X-User-ID` sans les vérifier, et c'est la
+dépendance de toutes les routes. La protection existait, mais loin du risque : `auth_mode` n'admet
+qu'une seule valeur et la configuration refuse `production` tant que cette valeur est
+`dev_headers`, ce qui rend aujourd'hui la production littéralement inconstructible.
+
+**La sûreté reposait donc sur une annotation de type à un seul membre, pas sur le code de la
+requête.** Ajouter `"oidc"` à ce `Literal` — geste attendu au moment d'implémenter l'IAM — aurait
+rendu la production constructible pendant que chaque route continuait de croire les en-têtes. La
+trace d'audit aurait alors enregistré un locataire choisi par l'appelant : pire qu'une trace
+absente, puisque les valeurs paraissent plausibles.
+
+La dépendance consulte désormais `auth_mode` elle-même et refuse la requête pour tout mode qu'elle
+n'implémente pas. Le point d'application est revenu là où est le risque, et l'ajout d'un mode ne
+peut plus élargir l'accès par inadvertance.
+
+### Le nombre de lectures d'une question est borné
+
+`max_steps` ne bornait que les étapes. Un tour peut porter plusieurs appels — l'adaptateur en
+accepte huit — donc huit étapes de huit appels faisaient **soixante-quatre lectures**, chacune avec
+son propre budget de transport. Une question pouvait occuper le processus plusieurs minutes et
+consommer le quota d'une source bien au-delà de ce que `max_steps` laissait croire à qui l'avait
+réglé.
+
+Un plafond de douze lectures par question s'applique désormais à toutes les étapes confondues. Il
+n'est **pas** un champ de la question : un plafond choisi par l'appelant est un plafond que
+l'appelant relève. Le compteur suit les tentatives et non les succès, car une lecture qui échoue a
+tout de même atteint la source. Un appel écarté avant le transport — doublon, ou plafond atteint —
+ne consomme rien : le garde-fou protège le budget, il ne le dépense pas.
+
+Le modèle est **prévenu** plutôt que coupé : il reçoit une observation lui demandant de répondre
+avec ce qu'il a et de dire ce qui lui manque. `AGENT_TOOL_CALL_SKIPPED` porte maintenant
+`reason=read_limit` à côté de `reason=duplicate`.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`

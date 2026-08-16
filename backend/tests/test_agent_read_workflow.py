@@ -8,6 +8,8 @@ from app.agent.domain import LLMRequest, LLMResponse, ProposedToolCall
 from app.agent.errors import AgentAuditUnavailable, LLMRateLimited
 from app.agent.read_workflow import (
     MAX_OBSERVATION_CHARACTERS,
+    MAX_READS_PER_QUESTION,
+    READ_LIMIT_NOTICE,
     REPEATED_READ_NOTICE,
     AgentQuestion,
     AgentReadWorkflow,
@@ -439,6 +441,106 @@ def test_a_failed_read_may_be_attempted_again() -> None:
     ask(agent)
 
     assert len(reads.calls) == 2
+
+
+def proposing_many(count: int, *, first: int = 0) -> LLMResponse:
+    """One turn carrying several distinct calls, as the adapter allows."""
+
+    return LLMResponse(
+        text="",
+        model_name=MODEL,
+        tool_calls=tuple(
+            ProposedToolCall(
+                call_id=f"call_{first + index}",
+                tool_name="getJiraIssue",
+                action_class=ToolActionClass.READ,
+                arguments={"issueIdOrKey": f"KAN-{first + index}"},
+            )
+            for index in range(count)
+        ),
+    )
+
+
+def test_several_calls_in_one_turn_each_get_their_own_result_message() -> None:
+    # The adapter accepts up to eight calls per turn, so the loop has to answer
+    # each one by its own id or the model cannot tell the answers apart.
+    reads, session = jira_reads_with_session()
+    provider = ScriptedProvider(proposing_many(3), answered("Fait."))
+    agent = agent_for(provider, reads)
+
+    ask(agent)
+
+    assert session.call_count == 3
+    results = [m for m in provider.requests[1].messages if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in results] == ["call_0", "call_1", "call_2"]
+
+
+def test_a_question_cannot_perform_more_reads_than_the_ceiling() -> None:
+    # Steps alone do not bound this: eight steps of eight calls would be sixty-four
+    # reads, each with its own transport budget.
+    reads, session = jira_reads_with_session()
+    provider = ScriptedProvider(
+        proposing_many(8),
+        proposing_many(8, first=100),
+        answered("Fait."),
+    )
+    agent = agent_for(provider, reads)
+
+    answer = ask(agent, max_steps=3)
+
+    assert session.call_count == MAX_READS_PER_QUESTION
+    assert answer.stop_reason == AgentStopReason.ANSWERED
+
+
+def test_the_model_is_told_when_the_read_ceiling_is_reached() -> None:
+    # Told rather than cut off: it can still answer from what it read.
+    reads, _ = jira_reads_with_session()
+    provider = ScriptedProvider(
+        proposing_many(8),
+        proposing_many(8, first=100),
+        answered("Fait."),
+    )
+    agent = agent_for(provider, reads)
+
+    ask(agent, max_steps=3)
+
+    refused = [
+        message
+        for message in provider.requests[2].messages
+        if message["role"] == "tool" and message["content"] == READ_LIMIT_NOTICE
+    ]
+    assert len(refused) == 4
+
+
+def test_a_call_refused_by_the_ceiling_is_audited_with_its_reason() -> None:
+    reads, _ = jira_reads_with_session()
+    sink = InMemoryAuditSink()
+    provider = ScriptedProvider(
+        proposing_many(8),
+        proposing_many(8, first=100),
+        answered("Fait."),
+    )
+    agent = agent_for(provider, reads, audit_sink=sink)
+
+    ask(agent)
+
+    reasons = [
+        event.details["reason"]
+        for event in sink.snapshot()
+        if event.event_type == AuditEventType.AGENT_TOOL_CALL_SKIPPED
+    ]
+    assert reasons == ["read_limit"] * 4
+
+
+def test_a_declined_duplicate_does_not_consume_the_read_budget() -> None:
+    # The guard protects the budget; it must not spend it.
+    reads, session = jira_reads_with_session()
+    provider = ScriptedProvider(*[proposing() for _ in range(4)], answered("Fait."))
+    agent = agent_for(provider, reads, registry=MCPToolRegistry())
+
+    ask(agent, max_steps=5)
+
+    assert session.call_count == 1
 
 
 def test_a_duplicate_tool_name_is_refused_at_construction() -> None:

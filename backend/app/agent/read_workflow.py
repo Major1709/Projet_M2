@@ -52,6 +52,25 @@ MAX_OBSERVATION_CHARACTERS = 6_000
 # transcript, so cost grows with the square of the step count; on the free tier
 # three steps is already the practical limit.
 DEFAULT_MAX_STEPS = 4
+# Reads one question may perform, across every step.
+#
+# The step count does not bound this on its own: a single turn may carry several
+# tool calls -- the adapter accepts up to eight -- so eight steps of eight calls
+# would be sixty-four reads, each with its own transport budget. A question could
+# then hold the process for minutes and spend a source's quota far beyond what
+# ``max_steps`` suggests to whoever set it.
+#
+# Not a field on the question: a caller-chosen ceiling is one the caller raises.
+# Twelve leaves room for a search followed by several reads, and stops well short
+# of the arithmetic above.
+MAX_READS_PER_QUESTION = 12
+
+# Handed back when the ceiling is reached, so the model stops proposing reads and
+# answers with what it already has rather than being cut off mid-question.
+READ_LIMIT_NOTICE = (
+    "Lecture ignoree : le nombre de lectures autorisees pour cette question est "
+    "atteint. Reponds avec ce que tu as deja lu, et dis ce qui te manque."
+)
 
 # The paragraph on searching is there for a measured reason. A search read carries
 # no ``resource_reference``, so it becomes a source without a link -- correct, since
@@ -216,6 +235,9 @@ class AgentReadWorkflow:
         # than replayed. Scoped to the question: a later one may legitimately ask the
         # same thing again, and would then deserve fresh content.
         performed: set[str] = set()
+        # Counts attempts, not successes: a read that failed still reached the
+        # source and spent its budget there.
+        attempted_reads = 0
         last_text = ""
 
         for step in range(1, question.max_steps + 1):
@@ -246,22 +268,26 @@ class AgentReadWorkflow:
             # never looked at.
             messages.append(self._assistant_turn(response.text, response.tool_calls))
             for call in response.tool_calls:
-                observation, record = await self._observe(
+                if attempted_reads >= MAX_READS_PER_QUESTION:
+                    await self._record_skip(
+                        call=call,
+                        question=question,
+                        context=context,
+                        fingerprint=self._read_fingerprint(call),
+                        reason="read_limit",
+                    )
+                    messages.append(self._tool_turn(call, READ_LIMIT_NOTICE))
+                    continue
+                observation, record, attempted = await self._observe(
                     call=call,
                     question=question,
                     context=context,
                     performed=performed,
                 )
+                attempted_reads += attempted
                 if record is not None:
                     records.append(record)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.call_id,
-                        "name": call.tool_name,
-                        "content": observation,
-                    }
-                )
+                messages.append(self._tool_turn(call, observation))
 
         logger.info(
             "The orchestration loop reached its step limit",
@@ -277,6 +303,17 @@ class AgentReadWorkflow:
             steps_used=question.max_steps,
             sources=sources_from(tuple(records)),
         )
+
+    @staticmethod
+    def _tool_turn(call: ProposedToolCall, observation: str) -> dict[str, Any]:
+        """One result message, answering the call the model made by its own id."""
+
+        return {
+            "role": "tool",
+            "tool_call_id": call.call_id,
+            "name": call.tool_name,
+            "content": observation,
+        }
 
     @staticmethod
     def _assistant_turn(
@@ -320,12 +357,20 @@ class AgentReadWorkflow:
         question: AgentQuestion,
         context: SecurityContext,
         performed: set[str],
-    ) -> tuple[str, ReadRecord | None]:
+    ) -> tuple[str, ReadRecord | None, int]:
+        """Observe one proposed call.
+
+        Returns the observation, the read record when one was produced, and how
+        many reads actually reached a source -- one, or zero when the call was
+        declined before the transport. The caller counts those against the
+        question's ceiling, so a refusal never consumes the budget it protects.
+        """
+
         contract = self._contracts.get(call.tool_name)
         if contract is None:
             # Unreachable while ``allowed_tool_names`` covers the catalogue, kept
             # because that coupling is not enforced by the type system.
-            return ("Lecture refusee : outil inconnu.", None)
+            return ("Lecture refusee : outil inconnu.", None, 0)
 
         fingerprint = self._read_fingerprint(call)
         if fingerprint in performed:
@@ -334,10 +379,11 @@ class AgentReadWorkflow:
                 question=question,
                 context=context,
                 fingerprint=fingerprint,
+                reason="duplicate",
             )
             # No record: the first read already produced one, and the source list
             # deduplicates on provenance anyway.
-            return (REPEATED_READ_NOTICE, None)
+            return (REPEATED_READ_NOTICE, None, 0)
 
         read = MCPReadToolCall(
             source_system=contract.source_system,
@@ -360,14 +406,21 @@ class AgentReadWorkflow:
             )
             # Only the code and the safe message: both are ours, so nothing a
             # provider wrote reaches the transcript through an error path.
-            return (f"Lecture echouee ({error.code}) : {error.safe_message}.", None)
+            #
+            # Counted as an attempt all the same: it reached the source and spent
+            # budget there, which is exactly what the ceiling exists to bound.
+            return (f"Lecture echouee ({error.code}) : {error.safe_message}.", None, 1)
 
         # Registered only once the read succeeded. A call that failed produced no
         # result to reuse, and its error observation invites a corrected retry --
         # which the step limit already bounds.
         performed.add(fingerprint)
         observation, truncated = self._render(result.content)
-        return (observation, ReadRecord(provenance=result.provenance, truncated=truncated))
+        return (
+            observation,
+            ReadRecord(provenance=result.provenance, truncated=truncated),
+            1,
+        )
 
     async def _record_skip(
         self,
@@ -376,6 +429,7 @@ class AgentReadWorkflow:
         question: AgentQuestion,
         context: SecurityContext,
         fingerprint: str,
+        reason: str,
     ) -> None:
         """Record that a call was declined, so a suppressed step stays visible."""
 
@@ -387,7 +441,7 @@ class AgentReadWorkflow:
             # question remains a single trail.
             correlation_id=question.correlation_id,
             details={
-                "reason": "duplicate",
+                "reason": reason,
                 "tool_name": call.tool_name,
                 # The digest, never the arguments themselves.
                 "arguments_fingerprint": fingerprint,
@@ -433,6 +487,8 @@ class AgentReadWorkflow:
 __all__ = [
     "DEFAULT_MAX_STEPS",
     "MAX_OBSERVATION_CHARACTERS",
+    "MAX_READS_PER_QUESTION",
+    "READ_LIMIT_NOTICE",
     "REPEATED_READ_NOTICE",
     "SYSTEM_PROMPT",
     "AgentAnswer",
