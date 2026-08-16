@@ -541,7 +541,13 @@ async def test_a_deeply_nested_body_stays_inside_the_taxonomy(tmp_path: Path) ->
 
 
 @pytest.mark.anyio
-async def test_a_tool_name_that_was_never_offered_is_refused(tmp_path: Path) -> None:
+async def test_a_tool_name_that_was_never_offered_is_passed_on_not_raised(
+    tmp_path: Path,
+) -> None:
+    # It used to raise, which killed the whole request over the most ordinary
+    # mistake a model makes. The orchestration loop refuses the name against the
+    # registry -- the authority -- and tells the model, so nothing reaches a
+    # transport either way and the question survives.
     handler = json_handler(
         completion(
             text="",
@@ -555,11 +561,15 @@ async def test_a_tool_name_that_was_never_offered_is_refused(tmp_path: Path) -> 
         )
     )
     provider = provider_for(tmp_path, handler)
-    with pytest.raises(LLMInvalidResponse):
-        await provider.generate(
-            request=REQUEST.model_copy(update={"allowed_tool_names": ("getJiraIssue",)}),
-            context=CONTEXT,
-        )
+
+    response = await provider.generate(
+        request=REQUEST.model_copy(update={"allowed_tool_names": ("getJiraIssue",)}),
+        context=CONTEXT,
+    )
+
+    assert response.tool_calls[0].tool_name == "createJiraIssue"
+    # Still bounded and character-checked like any other name.
+    assert response.tool_calls[0].call_id == "call_1"
 
 
 @pytest.mark.anyio

@@ -88,6 +88,14 @@ STEP_LIMIT_MESSAGE = (
     "ete atteint avant que je puisse repondre."
 )
 
+# Handed back when the model names a tool the registry does not know. The name is
+# never echoed: it comes from the provider, and repeating it into the transcript
+# would let a compromised one place text of its choosing in our own words.
+UNKNOWN_TOOL_NOTICE = (
+    "Lecture refusee : cet outil n'existe pas. Choisis un outil de la liste qui "
+    "t'a ete fournie, ou reponds avec ce que tu as deja lu."
+)
+
 # Substituted when the model ends the loop of its own accord yet says nothing.
 # Distinct from the message above, because the two are not the same event: this
 # one is a model that had every step it asked for and produced no answer, and
@@ -169,7 +177,12 @@ class AgentQuestion(BaseModel):
     question: str = Field(min_length=1, max_length=4_000)
     correlation_id: str = Field(min_length=1, max_length=200)
     max_steps: int = Field(default=DEFAULT_MAX_STEPS, ge=1, le=8)
-    max_completion_tokens: int = Field(default=1_024, ge=64, le=16_384)
+    # The floor is measured, not conventional. On a reasoning model the thinking
+    # spends the ceiling before the answer begins, so a low value does not produce
+    # a short answer -- it produces none at all, with ``finish_reason == "length"``,
+    # having cost the same budget. Observed failing at 64 and at 450, succeeding at
+    # 700. Accepting 64 would let the schema promise a call that cannot work.
+    max_completion_tokens: int = Field(default=1_024, ge=768, le=16_384)
 
 
 class AgentAnswer(BaseModel):
@@ -413,9 +426,18 @@ class AgentReadWorkflow:
 
         contract = self._contracts.get(call.tool_name)
         if contract is None:
-            # Unreachable while ``allowed_tool_names`` covers the catalogue, kept
-            # because that coupling is not enforced by the type system.
-            return ("Lecture refusee : outil inconnu.", None, 0)
+            # The registry is the authority on what exists, so an invented name is
+            # refused here and told to the model rather than aborting the request.
+            # Naming a tool that was never offered is the most ordinary mistake a
+            # model makes, and it is exactly what this loop exists to absorb.
+            await self._record_skip(
+                call=call,
+                question=question,
+                context=context,
+                fingerprint=self._read_fingerprint(call),
+                reason="unknown_tool",
+            )
+            return (UNKNOWN_TOOL_NOTICE, None, 0)
 
         fingerprint = self._read_fingerprint(call)
         if fingerprint in performed:
@@ -539,6 +561,7 @@ __all__ = [
     "REPEATED_READ_NOTICE",
     "STEP_LIMIT_MESSAGE",
     "SYSTEM_PROMPT",
+    "UNKNOWN_TOOL_NOTICE",
     "AgentAnswer",
     "AgentQuestion",
     "AgentReadWorkflow",

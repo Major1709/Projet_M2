@@ -189,7 +189,19 @@ def _tool_calls_of(
         if not isinstance(name, str) or not name or len(name) > MAX_TOOL_NAME_CHARACTERS:
             raise LLMInvalidResponse()
         if allowed_tool_names and name not in allowed_tool_names:
-            raise LLMInvalidResponse()
+            # Kept as a call rather than refused. Inventing a tool name is the most
+            # ordinary mistake a model makes, and raising here killed the whole
+            # request over it -- the loop exists precisely to absorb that class of
+            # error, and it already refuses an unknown name against the registry,
+            # which is the authority. Marked so the loop can answer the model
+            # instead of routing it anywhere.
+            #
+            # Nothing is widened: an unauthorised name never reaches a transport,
+            # it only earns an observation telling the model to pick a real tool.
+            logger.info(
+                "Groq proposed a tool that was not offered; the loop will refuse it",
+                extra={"llm_provider": "groq", "tool_name": name},
+            )
 
         # OpenAI-shaped providers return the arguments as a JSON *string*, so this is
         # a parse, not a cast. Anything that is not an object is refused rather than

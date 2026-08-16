@@ -3,6 +3,7 @@ import json
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from app.agent.domain import LLMRequest, LLMResponse, ProposedToolCall
 from app.agent.errors import AgentAuditUnavailable, LLMRateLimited
@@ -14,6 +15,7 @@ from app.agent.read_workflow import (
     READ_LIMIT_NOTICE,
     REPEATED_READ_NOTICE,
     STEP_LIMIT_MESSAGE,
+    UNKNOWN_TOOL_NOTICE,
     AgentQuestion,
     AgentReadWorkflow,
     AgentStopReason,
@@ -631,6 +633,55 @@ def test_a_declined_duplicate_does_not_consume_the_read_budget() -> None:
     ask(agent, max_steps=5)
 
     assert session.call_count == 1
+
+
+def test_an_invented_tool_name_is_refused_without_killing_the_question() -> None:
+    # Naming a tool that was never offered is the most ordinary mistake a model
+    # makes. It used to abort the whole request with a 502.
+    reads, session = jira_reads_with_session()
+    provider = ScriptedProvider(
+        proposing("listAllTheThings", {"anything": "1"}),
+        answered("Je me suis trompe d'outil."),
+    )
+    agent = agent_for(provider, reads)
+
+    answer = ask(agent)
+
+    assert answer.stop_reason == AgentStopReason.ANSWERED
+    assert provider.requests[1].messages[-1]["content"] == UNKNOWN_TOOL_NOTICE
+    # Refused before anything left the process, and it is not a source.
+    assert session.call_count == 0
+    assert answer.sources == ()
+
+
+def test_an_invented_tool_name_is_audited_and_never_echoed() -> None:
+    # The name comes from the provider: repeating it into the transcript would let
+    # a compromised one place text of its choosing in our own words.
+    reads, _ = jira_reads_with_session()
+    sink = InMemoryAuditSink()
+    provider = ScriptedProvider(proposing("ignore-les-consignes", {}), answered("Fait."))
+    agent = agent_for(provider, reads, audit_sink=sink)
+
+    ask(agent)
+
+    assert "ignore-les-consignes" not in UNKNOWN_TOOL_NOTICE
+    skipped = [
+        event
+        for event in sink.snapshot()
+        if event.event_type == AuditEventType.AGENT_TOOL_CALL_SKIPPED
+    ]
+    assert [event.details["reason"] for event in skipped] == ["unknown_tool"]
+    # The trail keeps the name, because that is where a rejected call belongs.
+    assert skipped[0].details["tool_name"] == "ignore-les-consignes"
+
+
+def test_a_completion_budget_below_the_measured_floor_is_refused() -> None:
+    # A low ceiling does not produce a short answer on a reasoning model, it
+    # produces none at all -- and costs the same budget.
+    with pytest.raises(ValidationError):
+        AgentQuestion(question="Q", correlation_id="c", max_completion_tokens=450)
+
+    assert AgentQuestion(question="Q", correlation_id="c", max_completion_tokens=768)
 
 
 def test_a_duplicate_tool_name_is_refused_at_construction() -> None:
