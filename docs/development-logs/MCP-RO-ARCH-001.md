@@ -780,6 +780,52 @@ déterministe. Ce qu'il faut retenir pour la suite : un prompt ne rend aucun com
 impossible, et rien qui repose sur lui ne peut porter une garantie. La boucle reste sûre dans tous
 les cas — ce qui varie est la citabilité d'une réponse, jamais ce qui peut être lu.
 
+## Garde-fou contre la lecture répétée — 2026-08-16
+
+Une lecture déjà effectuée avec exactement les mêmes arguments n'est plus rejouée. Le modèle
+reçoit à la place une observation lui indiquant qu'il possède déjà ce résultat. La clé est
+l'empreinte SHA-256 du nom d'outil et des arguments **triés** : un modèle qui réordonne les mêmes
+clés ne passe pas à travers.
+
+Trois décisions, et leurs raisons :
+
+- **Le garde-fou n'ajoute aucune autorité.** Il ne sait que refuser un appel, jamais en élargir un.
+  C'est ce qui permet de le placer dans la boucle d'orchestration plutôt que dans la couche MCP.
+- **Seules les lectures réussies sont mémorisées.** Un échec n'a produit aucun résultat
+  réutilisable, et son observation d'erreur invite justement à corriger les arguments : refuser la
+  reprise piégerait un cas légitime. Un modèle qui échoue en boucle reste borné par la limite
+  d'étapes.
+- **La portée est la question, pas la session.** Une question ultérieure peut légitimement
+  redemander la même chose, et mérite alors du contenu frais.
+
+### Traçabilité d'un appel supprimé
+
+Un pas qui ne produit aucune lecture serait autrement indiscernable d'un pas qui n'a jamais eu
+lieu. `AGENT_TOOL_CALL_SKIPPED` enregistre donc `reason=duplicate`, le nom de l'outil,
+l'empreinte des arguments et le `correlation_id`.
+
+**Jamais les arguments eux-mêmes** : une clé de ticket ou une clause JQL peut nommer une personne
+ou reformuler du contenu confidentiel, et la trace d'audit a une rétention et un public différents
+de ceux du corpus qu'elle recopierait.
+
+L'événement n'est précédé d'aucune autorisation, contrairement aux lectures : rien n'est sorti du
+processus, et enregistrer un non-événement comme un appel autorisé corromprait le sens de la
+trace. L'écriture reste néanmoins bloquante, comme toutes les autres — une trace fiable partout
+sauf à un endroit est une trace sur laquelle personne ne peut raisonner, et à ce stade le puits a
+déjà accepté plusieurs écritures dans la même requête.
+
+### Ce que le garde-fou ne fait pas
+
+Il supprime la répétition, pas la citation manquante. Le modèle peut toujours énumérer les projets
+ou répondre à partir de la seule recherche, donc une réponse nommant un ticket sans lien cliquable
+reste atteignable. L'interdire supposerait de refuser toute réponse finale tant qu'aucune ressource
+n'a été lue, ce qui casserait les questions dont la réponse est légitimement une liste.
+
+**Statut de vérification : garde-fou validé par tests unitaires uniquement.** Le parcours réel
+`recherche → lecture → réponse citée` n'a jamais été observé en entier — seulement en deux morceaux,
+sur des exécutions différentes. Le plafond de jetons par minute du palier gratuit a interrompu
+chaque tentative de confirmation.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`

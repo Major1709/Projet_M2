@@ -8,6 +8,7 @@ from app.agent.adapters.groq import GroqLLMProvider
 from app.agent.api import get_agent
 from app.agent.audit import AuditedLLMProvider
 from app.agent.errors import (
+    AgentAuditUnavailable,
     LLMAuditUnavailable,
     LLMCallTimeout,
     LLMCredentialUnavailable,
@@ -100,6 +101,9 @@ def test_the_identity_reaching_the_agent_is_server_derived() -> None:
     ("error", "expected_status"),
     [
         (LLMAuditUnavailable(), 503),
+        # The loop's own trail, distinct from the provider's: an operator restores
+        # it, and until then a question that would suppress a call is refused.
+        (AgentAuditUnavailable(), 503),
         (LLMCredentialUnavailable(), 503),
         (LLMRateLimited(), 429),
         # Waiting does not help; the request has to get smaller.

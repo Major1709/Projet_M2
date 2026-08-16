@@ -108,6 +108,9 @@ def _build_agent(
             audit_sink=audit_sink,
         ),
         reads=mcp_reads,
+        # The same sink the provider and the reads write to, so a question and
+        # everything it caused share one trail.
+        audit_sink=audit_sink,
     )
 
 

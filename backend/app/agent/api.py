@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.agent.errors import (
+    AgentAuditUnavailable,
     LLMAuditUnavailable,
     LLMCallTimeout,
     LLMCredentialUnavailable,
@@ -40,7 +41,9 @@ def get_agent(request: Request) -> AgentReadWorkflow:
 
 
 def translate_llm_error(error: LLMError) -> HTTPException:
-    if isinstance(error, (LLMAuditUnavailable, LLMCredentialUnavailable)):
+    if isinstance(
+        error, (AgentAuditUnavailable, LLMAuditUnavailable, LLMCredentialUnavailable)
+    ):
         # Nothing the caller can fix and nothing that retrying now will resolve, but
         # the deployment can: an operator restores the trail or the credential.
         status_code = status.HTTP_503_SERVICE_UNAVAILABLE

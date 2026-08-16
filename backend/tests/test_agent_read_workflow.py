@@ -5,14 +5,17 @@ from typing import Any
 import pytest
 
 from app.agent.domain import LLMRequest, LLMResponse, ProposedToolCall
-from app.agent.errors import LLMRateLimited
+from app.agent.errors import AgentAuditUnavailable, LLMRateLimited
 from app.agent.read_workflow import (
     MAX_OBSERVATION_CHARACTERS,
+    REPEATED_READ_NOTICE,
     AgentQuestion,
     AgentReadWorkflow,
     AgentStopReason,
     tool_catalogue,
 )
+from app.audit.adapters.memory import InMemoryAuditSink
+from app.audit.domain import AuditEventType
 from app.core.identity import SecurityContext
 from app.mcp.domain import MCPReadSourceSystem as SourceSystem
 from app.mcp.domain import ToolActionClass
@@ -106,6 +109,24 @@ def jira_reads(text: str = '{"key": "KAN-1"}'):
     return workflow
 
 
+def jira_reads_with_session(text: str = '{"key": "KAN-1"}'):
+    workflow, _, session = workflow_for(
+        SourceSystem.JIRA,
+        "getJiraIssue",
+        result=RemoteToolResult(
+            content=(RemoteContentBlock(kind="text", text=text),),
+            structured_content=None,
+        ),
+    )
+    return workflow, session
+
+
+def agent_for(provider: Any, reads: Any, **changes: Any) -> AgentReadWorkflow:
+    values: dict[str, Any] = {"audit_sink": InMemoryAuditSink()}
+    values.update(changes)
+    return AgentReadWorkflow(provider=provider, reads=reads, **values)
+
+
 def ask(agent: AgentReadWorkflow, **changes: Any):
     values: dict[str, Any] = {"question": "Que dit KAN-1 ?", "correlation_id": "corr-agent-1"}
     values.update(changes)
@@ -114,7 +135,7 @@ def ask(agent: AgentReadWorkflow, **changes: Any):
 
 def test_an_answer_without_tool_calls_ends_the_loop() -> None:
     provider = ScriptedProvider(answered("Jira suit les tickets."))
-    agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
+    agent = agent_for(provider, jira_reads())
 
     answer = ask(agent)
 
@@ -126,7 +147,7 @@ def test_an_answer_without_tool_calls_ends_the_loop() -> None:
 
 def test_a_read_is_performed_and_its_result_returned_to_the_model() -> None:
     provider = ScriptedProvider(proposing(), answered("KAN-1 parle de connexion."))
-    agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
+    agent = agent_for(provider, jira_reads())
 
     answer = ask(agent)
 
@@ -140,7 +161,7 @@ def test_a_read_is_performed_and_its_result_returned_to_the_model() -> None:
 
 def test_each_read_becomes_a_source_the_model_could_not_have_invented() -> None:
     provider = ScriptedProvider(proposing(), answered("Fait."))
-    agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
+    agent = agent_for(provider, jira_reads())
 
     answer = ask(agent)
 
@@ -153,7 +174,7 @@ def test_each_read_becomes_a_source_the_model_could_not_have_invented() -> None:
 
 def test_the_assistant_turn_is_rebuilt_from_validated_fields() -> None:
     provider = ScriptedProvider(proposing(), answered("Fait."))
-    agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
+    agent = agent_for(provider, jira_reads())
 
     ask(agent)
 
@@ -165,7 +186,7 @@ def test_the_assistant_turn_is_rebuilt_from_validated_fields() -> None:
 
 def test_the_step_limit_stops_a_model_that_keeps_calling_tools() -> None:
     provider = ScriptedProvider(*[proposing() for _ in range(3)])
-    agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
+    agent = agent_for(provider, jira_reads())
 
     answer = ask(agent, max_steps=3)
 
@@ -182,7 +203,7 @@ def test_the_step_limit_stops_a_model_that_keeps_calling_tools() -> None:
 )
 def test_a_recoverable_read_failure_is_handed_back_to_the_model(error: Exception) -> None:
     provider = ScriptedProvider(proposing(), answered("Je n'ai pas pu lire ce ticket."))
-    agent = AgentReadWorkflow(provider=provider, reads=RefusingReads(error))
+    agent = agent_for(provider, RefusingReads(error))
 
     answer = ask(agent)
 
@@ -210,7 +231,7 @@ def test_a_security_or_infrastructure_refusal_stops_the_loop(error: Exception) -
     # Retrying against a closed door burns the token budget and hides the refusal
     # from the caller behind a vague answer.
     provider = ScriptedProvider(proposing(), answered("jamais atteint"))
-    agent = AgentReadWorkflow(provider=provider, reads=RefusingReads(error))
+    agent = agent_for(provider, RefusingReads(error))
 
     with pytest.raises(type(error)):
         ask(agent)
@@ -220,7 +241,7 @@ def test_a_security_or_infrastructure_refusal_stops_the_loop(error: Exception) -
 
 def test_an_llm_failure_is_not_swallowed_by_the_loop() -> None:
     provider = ScriptedProvider(LLMRateLimited())
-    agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
+    agent = agent_for(provider, jira_reads())
 
     with pytest.raises(LLMRateLimited):
         ask(agent)
@@ -229,7 +250,7 @@ def test_an_llm_failure_is_not_swallowed_by_the_loop() -> None:
 def test_the_action_class_is_imposed_not_carried_over() -> None:
     reads = RefusingReads(MCPRemoteToolFailure())
     provider = ScriptedProvider(proposing(), answered("Fait."))
-    agent = AgentReadWorkflow(provider=provider, reads=reads)
+    agent = agent_for(provider, reads)
 
     ask(agent)
 
@@ -239,7 +260,7 @@ def test_the_action_class_is_imposed_not_carried_over() -> None:
 def test_the_correlation_id_reaches_the_read() -> None:
     reads = RefusingReads(MCPRemoteToolFailure())
     provider = ScriptedProvider(proposing(), answered("Fait."))
-    agent = AgentReadWorkflow(provider=provider, reads=reads)
+    agent = agent_for(provider, reads)
 
     ask(agent, correlation_id="corr-xyz")
 
@@ -252,7 +273,7 @@ def test_the_tool_name_routes_to_its_own_source_system() -> None:
         proposing("getConfluencePage", {"pageId": "12345"}),
         answered("Fait."),
     )
-    agent = AgentReadWorkflow(provider=provider, reads=reads)
+    agent = agent_for(provider, reads)
 
     ask(agent)
 
@@ -261,7 +282,7 @@ def test_the_tool_name_routes_to_its_own_source_system() -> None:
 
 def test_the_model_is_only_offered_names_the_registry_knows() -> None:
     provider = ScriptedProvider(answered("Fait."))
-    agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
+    agent = agent_for(provider, jira_reads())
 
     ask(agent)
 
@@ -293,7 +314,7 @@ def test_no_binding_argument_is_ever_offered_to_the_model() -> None:
 
 def test_an_oversized_observation_is_truncated_and_says_so() -> None:
     provider = ScriptedProvider(proposing(), answered("Fait."))
-    agent = AgentReadWorkflow(provider=provider, reads=jira_reads("x" * 40_000))
+    agent = agent_for(provider, jira_reads("x" * 40_000))
 
     ask(agent)
 
@@ -303,6 +324,121 @@ def test_an_oversized_observation_is_truncated_and_says_so() -> None:
     # A model that cannot tell it received a fragment answers as though it received
     # the whole thing.
     assert observation.startswith("x" * MAX_OBSERVATION_CHARACTERS)
+
+
+def test_an_identical_read_is_declined_rather_than_replayed() -> None:
+    # The behaviour a live probe caught: the model repeated the same read instead of
+    # using the result it already had. The prompt asks it not to; this makes the
+    # repeat impossible rather than merely discouraged.
+    reads, session = jira_reads_with_session()
+    provider = ScriptedProvider(proposing(), proposing(), answered("Fait."))
+    agent = agent_for(provider, reads)
+
+    answer = ask(agent)
+
+    assert session.call_count == 1
+    assert provider.requests[2].messages[-1]["content"] == REPEATED_READ_NOTICE
+    assert answer.stop_reason == AgentStopReason.ANSWERED
+    # The declined call is not a second consultation, so it adds no source.
+    assert len(answer.sources) == 1
+
+
+def test_a_declined_read_stays_visible_in_the_audit_trail() -> None:
+    # A suppressed step must not look like a step that never happened.
+    reads, _ = jira_reads_with_session()
+    sink = InMemoryAuditSink()
+    provider = ScriptedProvider(proposing(), proposing(), answered("Fait."))
+    agent = agent_for(provider, reads, audit_sink=sink)
+
+    ask(agent, correlation_id="corr-skip")
+
+    skipped = [
+        event
+        for event in sink.snapshot()
+        if event.event_type == AuditEventType.AGENT_TOOL_CALL_SKIPPED
+    ]
+    assert len(skipped) == 1
+    assert skipped[0].correlation_id == "corr-skip"
+    assert skipped[0].details["reason"] == "duplicate"
+    assert skipped[0].details["tool_name"] == "getJiraIssue"
+    assert len(skipped[0].details["arguments_fingerprint"]) == 64
+
+
+def test_no_raw_argument_reaches_the_audit_trail() -> None:
+    # An issue key or a JQL clause can name a person or restate confidential
+    # content. Only the digest is recorded.
+    reads, _ = jira_reads_with_session()
+    sink = InMemoryAuditSink()
+    call = proposing(arguments={"issueIdOrKey": "SECRET-42"})
+    provider = ScriptedProvider(call, call, answered("Fait."))
+    agent = agent_for(provider, reads, audit_sink=sink)
+
+    ask(agent)
+
+    for event in sink.snapshot():
+        assert "SECRET-42" not in str(event.details)
+
+
+def test_a_broken_audit_trail_refuses_the_question() -> None:
+    # Fail-closed like every other audit write here. A trail that is fail-closed
+    # except in one place is a trail nobody can reason about.
+    class BrokenSink:
+        def append(self, event: Any) -> None:
+            raise RuntimeError("sink down")
+
+    reads, _ = jira_reads_with_session()
+    provider = ScriptedProvider(proposing(), proposing(), answered("Fait."))
+    agent = agent_for(provider, reads, audit_sink=BrokenSink())
+
+    with pytest.raises(AgentAuditUnavailable):
+        ask(agent)
+
+
+def test_a_read_with_different_arguments_is_still_performed() -> None:
+    reads, session = jira_reads_with_session()
+    provider = ScriptedProvider(
+        proposing(arguments={"issueIdOrKey": "KAN-1"}),
+        proposing(arguments={"issueIdOrKey": "KAN-2"}),
+        answered("Fait."),
+    )
+    agent = agent_for(provider, reads)
+
+    ask(agent)
+
+    # The guard refuses repetition, not exploration.
+    assert session.call_count == 2
+
+
+def test_the_fingerprint_keys_on_what_is_asked_not_on_key_order() -> None:
+    def fingerprint(tool_name: str, arguments: dict[str, Any]) -> str:
+        return AgentReadWorkflow._read_fingerprint(
+            ProposedToolCall(
+                call_id="call_1",
+                tool_name=tool_name,
+                action_class=ToolActionClass.READ,
+                arguments=arguments,
+            )
+        )
+
+    assert fingerprint("getJiraIssue", {"a": 1, "b": 2}) == fingerprint(
+        "getJiraIssue", {"b": 2, "a": 1}
+    )
+    assert fingerprint("getJiraIssue", {"a": 1}) != fingerprint("getJiraIssue", {"a": 2})
+    # Two tools asked the same thing are two different reads.
+    assert fingerprint("getJiraIssue", {"a": 1}) != fingerprint("getConfluencePage", {"a": 1})
+
+
+def test_a_failed_read_may_be_attempted_again() -> None:
+    # Only a successful read is registered: a failure produced no result to reuse,
+    # and its error observation invites a corrected retry. The step limit bounds a
+    # model that keeps failing.
+    reads = RefusingReads(MCPRemoteToolFailure())
+    provider = ScriptedProvider(proposing(), proposing(), answered("Fait."))
+    agent = agent_for(provider, reads)
+
+    ask(agent)
+
+    assert len(reads.calls) == 2
 
 
 def test_a_duplicate_tool_name_is_refused_at_construction() -> None:
@@ -316,13 +452,14 @@ def test_a_duplicate_tool_name_is_refused_at_construction() -> None:
         AgentReadWorkflow(
             provider=ScriptedProvider(),
             reads=jira_reads(),
+            audit_sink=InMemoryAuditSink(),
             registry=MCPToolRegistry((contract, twin)),
         )
 
 
 def test_the_system_prompt_frames_read_content_as_data() -> None:
     provider = ScriptedProvider(answered("Fait."))
-    agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
+    agent = agent_for(provider, jira_reads())
 
     ask(agent)
 
@@ -337,7 +474,7 @@ def test_the_system_prompt_asks_for_a_read_before_a_named_claim() -> None:
     # mitigation, not a control: a live run kept the instruction and repeated a
     # search anyway, which is why a deterministic guard sits behind it.
     provider = ScriptedProvider(answered("Fait."))
-    agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
+    agent = agent_for(provider, jira_reads())
 
     ask(agent)
 

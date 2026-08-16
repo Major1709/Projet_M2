@@ -13,16 +13,21 @@ mitigation, not the control. The control is that a proposed call can only ever b
 a read of a source the delegated credential already covers.
 """
 
+import hashlib
 import json
 import logging
 from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any
 
+import anyio.to_thread
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent.citations import AgentSource, ReadRecord, sources_from
 from app.agent.domain import LLMProvider, LLMRequest, ProposedToolCall
+from app.agent.errors import AgentAuditUnavailable
+from app.audit.domain import AuditEvent, AuditEventType
+from app.audit.ports import AuditSink
 from app.core.identity import SecurityContext
 from app.mcp.domain import MCPReadToolCall, ToolActionClass
 from app.mcp.errors import (
@@ -92,6 +97,20 @@ _RECOVERABLE_READ_ERRORS: tuple[type[MCPReadError], ...] = (
     MCPRemoteToolFailure,
     # Asked for too much at once. A smaller depth or limit is a legitimate retry.
     MCPResponseTooLarge,
+)
+
+# Handed back instead of performing a read the model has already performed, with
+# the same arguments, in the same run. The system prompt asks it not to repeat a
+# search; a live run did anyway. A prompt cannot make a behaviour impossible, so
+# the repetition is refused here instead.
+#
+# This adds no authority: it can only decline a call, never widen one. It saves the
+# per-minute budget the repeat would have burned, and it makes the wasted step
+# visible to the model rather than silently identical.
+REPEATED_READ_NOTICE = (
+    "Lecture ignoree : tu as deja effectue exactement cette lecture, avec les memes "
+    "arguments. Sers-toi du resultat precedent. Pour en savoir plus, lis une ressource "
+    "precise par son identifiant, ou reponds avec ce que tu as."
 )
 
 
@@ -168,10 +187,15 @@ class AgentReadWorkflow:
         *,
         provider: LLMProvider,
         reads: MCPReadWorkflow,
+        audit_sink: AuditSink,
         registry: MCPToolRegistry | None = None,
     ) -> None:
         self._provider = provider
         self._reads = reads
+        # Required rather than optional. An audit sink that may be omitted is one
+        # that will be, and a deployment missing it would suppress calls with no
+        # record that anything was suppressed.
+        self._audit_sink = audit_sink
         self._registry = registry or MCPToolRegistry()
         self._contracts = _index_by_tool_name(self._registry)
         self._catalogue = tool_catalogue(self._registry)
@@ -188,6 +212,10 @@ class AgentReadWorkflow:
             {"role": "user", "content": question.question},
         ]
         records: list[ReadRecord] = []
+        # Reads already performed in this run, so an identical one is declined rather
+        # than replayed. Scoped to the question: a later one may legitimately ask the
+        # same thing again, and would then deserve fresh content.
+        performed: set[str] = set()
         last_text = ""
 
         for step in range(1, question.max_steps + 1):
@@ -222,6 +250,7 @@ class AgentReadWorkflow:
                     call=call,
                     question=question,
                     context=context,
+                    performed=performed,
                 )
                 if record is not None:
                     records.append(record)
@@ -270,18 +299,45 @@ class AgentReadWorkflow:
             ],
         }
 
+    @staticmethod
+    def _read_fingerprint(call: ProposedToolCall) -> str:
+        """Identify a read by what it asks for, without storing what it asks for.
+
+        The arguments are sorted before hashing, so a model that reorders the same
+        keys does not slip past as a different call. Only the digest is ever
+        recorded: an issue key or a JQL clause can name a person or restate
+        confidential content, and the audit trail has a different retention and a
+        different audience than the corpus it would be copying.
+        """
+
+        canonical = json.dumps(call.arguments, sort_keys=True, default=str)
+        return hashlib.sha256(f"{call.tool_name}\x00{canonical}".encode()).hexdigest()
+
     async def _observe(
         self,
         *,
         call: ProposedToolCall,
         question: AgentQuestion,
         context: SecurityContext,
+        performed: set[str],
     ) -> tuple[str, ReadRecord | None]:
         contract = self._contracts.get(call.tool_name)
         if contract is None:
             # Unreachable while ``allowed_tool_names`` covers the catalogue, kept
             # because that coupling is not enforced by the type system.
             return ("Lecture refusee : outil inconnu.", None)
+
+        fingerprint = self._read_fingerprint(call)
+        if fingerprint in performed:
+            await self._record_skip(
+                call=call,
+                question=question,
+                context=context,
+                fingerprint=fingerprint,
+            )
+            # No record: the first read already produced one, and the source list
+            # deduplicates on provenance anyway.
+            return (REPEATED_READ_NOTICE, None)
 
         read = MCPReadToolCall(
             source_system=contract.source_system,
@@ -306,8 +362,48 @@ class AgentReadWorkflow:
             # provider wrote reaches the transcript through an error path.
             return (f"Lecture echouee ({error.code}) : {error.safe_message}.", None)
 
+        # Registered only once the read succeeded. A call that failed produced no
+        # result to reuse, and its error observation invites a corrected retry --
+        # which the step limit already bounds.
+        performed.add(fingerprint)
         observation, truncated = self._render(result.content)
         return (observation, ReadRecord(provenance=result.provenance, truncated=truncated))
+
+    async def _record_skip(
+        self,
+        *,
+        call: ProposedToolCall,
+        question: AgentQuestion,
+        context: SecurityContext,
+        fingerprint: str,
+    ) -> None:
+        """Record that a call was declined, so a suppressed step stays visible."""
+
+        event = AuditEvent(
+            event_type=AuditEventType.AGENT_TOOL_CALL_SKIPPED,
+            tenant_id=context.tenant_id,
+            actor_user_id=context.user_id,
+            # The same identifier the reads and the model calls carry, so one
+            # question remains a single trail.
+            correlation_id=question.correlation_id,
+            details={
+                "reason": "duplicate",
+                "tool_name": call.tool_name,
+                # The digest, never the arguments themselves.
+                "arguments_fingerprint": fingerprint,
+            },
+        )
+        try:
+            await anyio.to_thread.run_sync(self._audit_sink.append, event)
+        except Exception:
+            logger.error(
+                "The assistant audit trail is unavailable; the question is refused",
+                extra={
+                    "audit_event_type": AuditEventType.AGENT_TOOL_CALL_SKIPPED.value,
+                    "correlation_id": question.correlation_id,
+                },
+            )
+            raise AgentAuditUnavailable() from None
 
     @staticmethod
     def _render(blocks: Sequence[Any]) -> tuple[str, bool]:
@@ -337,6 +433,7 @@ class AgentReadWorkflow:
 __all__ = [
     "DEFAULT_MAX_STEPS",
     "MAX_OBSERVATION_CHARACTERS",
+    "REPEATED_READ_NOTICE",
     "SYSTEM_PROMPT",
     "AgentAnswer",
     "AgentQuestion",

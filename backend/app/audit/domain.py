@@ -27,6 +27,12 @@ class AuditEventType(StrEnum):
     # answer that our own ceiling cut short. That is a fact about the content, not
     # about the provider, and collapsing it into a refusal would hide truncation.
     LLM_INVOCATION_BOUNDED = "LLM_INVOCATION_BOUNDED"
+    # A call the orchestration loop declined to perform. No authorization precedes
+    # it, unlike the read events, because nothing left the process: recording a
+    # non-event as an authorized call would corrupt the meaning of the trail. It is
+    # written so a suppressed call stays visible -- otherwise a step that produced
+    # no read is indistinguishable from a step that never happened.
+    AGENT_TOOL_CALL_SKIPPED = "AGENT_TOOL_CALL_SKIPPED"
 
 
 class AuditEvent(BaseModel):

@@ -28,6 +28,21 @@ class LLMAuditUnavailable(LLMError):
     safe_message = "The language model audit trail is unavailable"
 
 
+class AgentAuditUnavailable(LLMError):
+    """The orchestration loop could not record what it decided.
+
+    Fail-closed like every other audit write in this system, and deliberately not
+    an exception to that rule. The event it guards records a call the loop declined
+    rather than one it made, so nothing external is at stake -- but a trail that is
+    fail-closed except in one place is a trail nobody can reason about, and by the
+    time this runs the sink has already accepted several writes in the same
+    request, so the added failure surface is close to nothing.
+    """
+
+    code = "AGENT_AUDIT_UNAVAILABLE"
+    safe_message = "The assistant audit trail is unavailable"
+
+
 class LLMCredentialUnavailable(LLMError):
     code = "LLM_CREDENTIAL_UNAVAILABLE"
     safe_message = "No usable language model credential is available"
