@@ -103,7 +103,8 @@ class MCPReadWorkflow:
             contract = self._authorize_locally(call)
             bound_arguments = self._bind_and_validate_arguments(contract, call.arguments)
         except MCPReadError as error:
-            await self._append_local_refusal_audit(call, context, error)
+            # Logged first, for the reason given on the refusal path below: an
+            # unavailable sink must not take the diagnosis down with it.
             logger.warning(
                 "MCP read refused before transport",
                 extra={
@@ -112,6 +113,7 @@ class MCPReadWorkflow:
                     "correlation_id": call.correlation_id,
                 },
             )
+            await self._append_local_refusal_audit(call, context, error)
             raise
 
         await self._append_audit(
@@ -168,7 +170,11 @@ class MCPReadWorkflow:
             await self._append_failed_audit(timeout, contract, context, call.correlation_id)
             raise timeout from error
         except MCPReadError as error:
-            await self._append_failed_audit(error, contract, context, call.correlation_id)
+            # Logged before the audit write, not after: if the sink is down, that
+            # write raises MCPAuditUnavailable and replaces this error, and the
+            # original refusal would otherwise vanish from the journals as well as
+            # from the response. Failing closed is right; losing the diagnosis is
+            # not.
             logger.warning(
                 "MCP read refused",
                 extra={
@@ -178,6 +184,7 @@ class MCPReadWorkflow:
                     "correlation_id": call.correlation_id,
                 },
             )
+            await self._append_failed_audit(error, contract, context, call.correlation_id)
             raise
         except Exception as error:
             failure = MCPTransportFailure()
@@ -245,7 +252,8 @@ class MCPReadWorkflow:
         )
         try:
             await anyio.to_thread.run_sync(self._audit_sink.append, event)
-        except Exception:
+        except Exception as error:
+            self._log_sink_failure(event.event_type, call.correlation_id, error)
             raise MCPAuditUnavailable() from None
 
     async def _append_failed_audit(
@@ -290,8 +298,31 @@ class MCPReadWorkflow:
         )
         try:
             await anyio.to_thread.run_sync(self._audit_sink.append, event)
-        except Exception:
+        except Exception as error:
+            self._log_sink_failure(event_type, correlation_id, error)
             raise MCPAuditUnavailable() from None
+
+    @staticmethod
+    def _log_sink_failure(
+        event_type: AuditEventType,
+        correlation_id: str,
+        error: Exception,
+    ) -> None:
+        """Say why the trail failed, without repeating what the sink said.
+
+        The chain is cut when the error is raised, so this is the only place the
+        cause is recorded. Only the exception's type: a sink message can carry a
+        connection string or a fragment of the row it was writing.
+        """
+
+        logger.error(
+            "The MCP audit trail is unavailable; the read is refused",
+            extra={
+                "audit_event_type": event_type.value,
+                "correlation_id": correlation_id,
+                "error_type": type(error).__name__,
+            },
+        )
 
     @staticmethod
     def _validate_listed_output_schema(
