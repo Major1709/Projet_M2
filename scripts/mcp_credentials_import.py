@@ -154,6 +154,11 @@ def main() -> None:
     with os.fdopen(handle, "w", encoding="utf-8") as stream:
         json.dump(document, stream, indent=2, sort_keys=True)
         stream.write("\n")
+    # Le mode passe a os.open ne s'applique qu'a la creation : reimporter par-dessus
+    # un fichier existant conserverait ses droits d'origine. Or ce document porte
+    # l'access_token, le refresh_token et, pour Figma, le client_secret. On force
+    # donc les permissions apres coup, sur le descripteur deja ecrit.
+    os.chmod(destination, 0o600)
 
     age = time.time() - token_file.stat().st_mtime
     print(f"Ecrit : {destination}")
