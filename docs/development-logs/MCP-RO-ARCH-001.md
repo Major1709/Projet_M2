@@ -853,11 +853,39 @@ son propre budget de transport. Une question pouvait occuper le processus plusie
 consommer le quota d'une source bien au-delà de ce que `max_steps` laissait croire à qui l'avait
 réglé.
 
-Un plafond de douze lectures par question s'applique désormais à toutes les étapes confondues. Il
-n'est **pas** un champ de la question : un plafond choisi par l'appelant est un plafond que
-l'appelant relève. Le compteur suit les tentatives et non les succès, car une lecture qui échoue a
-tout de même atteint la source. Un appel écarté avant le transport — doublon, ou plafond atteint —
-ne consomme rien : le garde-fou protège le budget, il ne le dépense pas.
+Un plafond de **quatre** lectures par question s'applique désormais à toutes les étapes confondues.
+Quatre est ce que coûte une vraie question — chercher puis lire, sur chacune de deux sources. Les
+valeurs plus généreuses ne sont pas seulement larges, elles sont impayables : douze lectures au
+budget de transport de trente secondes font six minutes sur une seule question, et suffisent à
+dépasser l'allocation de dix par minute de certains points d'accès Figma.
+
+Un déploiement peut relever ce chiffre, jamais au-delà d'un plafond absolu de douze — une limite
+qu'on peut porter à n'importe quelle valeur n'est pas une limite. Le réglage appartient au
+déploiement et **jamais à la requête** : un plafond choisi par l'appelant est un plafond que
+l'appelant relève.
+
+Le compteur suit les tentatives et non les succès, car une lecture qui échoue a tout de même
+atteint la source. Certaines erreurs sont refusées avant de l'atteindre réellement, ce qui rend le
+bornage un peu plus strict qu'exact — dans le bon sens.
+
+Un appel écarté avant le transport — doublon, ou plafond atteint — ne consomme rien : le garde-fou
+protège le budget, il ne le dépense pas.
+
+### Une réponse interrompue le dit
+
+La boucle renvoyait le texte du dernier tour. Or un tour qui propose des outils n'en porte
+généralement aucun : une question arrêtée par la limite d'étapes produisait donc un **200 au corps
+vide**. Le client affichait une réponse blanche et le lecteur n'apprenait jamais que l'assistant
+avait été interrompu plutôt que silencieux.
+
+Seul un tour non vide est désormais retenu, de sorte qu'un tour d'outils n'efface plus la dernière
+phrase réelle du modèle ; et à défaut de toute phrase, un message serveur explicite est substitué.
+
+### Permissions d'un document de credentials réimporté
+
+`os.open(..., 0o600)` n'honore le mode qu'à la **création**. Réimporter par-dessus un fichier
+existant conservait ses droits d'origine, alors que le document porte `access_token`,
+`refresh_token` et, pour Figma, `client_secret`. Un `chmod` explicite suit désormais l'écriture.
 
 Le modèle est **prévenu** plutôt que coupé : il reçoit une observation lui demandant de répondre
 avec ce qu'il a et de dire ce qui lui manque. `AGENT_TOOL_CALL_SKIPPED` porte maintenant
