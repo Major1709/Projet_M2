@@ -9,6 +9,7 @@ from app.agent.errors import AgentAuditUnavailable, LLMRateLimited
 from app.agent.read_workflow import (
     ABSOLUTE_MAX_READS_PER_QUESTION,
     DEFAULT_MAX_READS_PER_QUESTION,
+    EMPTY_ANSWER_MESSAGE,
     MAX_OBSERVATION_CHARACTERS,
     READ_LIMIT_NOTICE,
     REPEATED_READ_NOTICE,
@@ -212,6 +213,38 @@ def test_a_step_limited_answer_is_never_empty() -> None:
 
     assert answer.text == STEP_LIMIT_MESSAGE
     assert answer.stop_reason == AgentStopReason.STEP_LIMIT_REACHED
+
+
+def test_an_answered_reply_is_never_empty_either() -> None:
+    # The stop reason claims the answer is complete, so an empty body here is the
+    # more misleading of the two exits, not the lesser one.
+    provider = ScriptedProvider(answered(""))
+    agent = agent_for(provider, jira_reads())
+
+    answer = ask(agent)
+
+    assert answer.text == EMPTY_ANSWER_MESSAGE
+    assert answer.stop_reason == AgentStopReason.ANSWERED
+
+
+def test_a_silent_final_turn_falls_back_to_what_the_model_last_said() -> None:
+    # Preferred over the substitute message: the model did answer, it simply said
+    # nothing more on its closing turn.
+    spoke = LLMResponse(
+        text="KAN-1 est un bug ouvert.",
+        model_name=MODEL,
+        tool_calls=proposing().tool_calls,
+    )
+    provider = ScriptedProvider(spoke, answered(""))
+    agent = agent_for(provider, jira_reads())
+
+    assert ask(agent).text == "KAN-1 est un bug ouvert."
+
+
+def test_the_step_limit_message_promises_no_list_of_sources() -> None:
+    # Sources may be empty; a message pointing at a list that is not there sends
+    # the reader looking for something that does not exist.
+    assert "ci-dessous" not in STEP_LIMIT_MESSAGE
 
 
 def test_the_last_real_sentence_survives_a_later_silent_turn() -> None:

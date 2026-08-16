@@ -24,10 +24,25 @@ def client_for(auth_mode: str | None) -> TestClient:
     return TestClient(create_app(settings, container))
 
 
-def test_the_declared_mode_is_the_one_the_request_path_honours() -> None:
-    response = client_for(SUPPORTED_AUTH_MODE).get(SOME_CONVERSATION)
+def test_the_declared_mode_lets_the_derived_identity_through() -> None:
+    # Asserting "not 500" would pass on a 404 and prove nothing. The identity has
+    # to be shown reaching the workflow: the owner sees the conversation, and a
+    # different user under the same tenant does not.
+    client = client_for(SUPPORTED_AUTH_MODE)
+    owner = {"X-Tenant-ID": "tenant-a", "X-User-ID": "owner"}
 
-    assert response.status_code != 500
+    created = client.post("/api/conversations", headers=owner, json={"title": "Suivi Jira"})
+    assert created.status_code == 201
+    conversation = f"/api/conversations/{created.json()['id']}"
+
+    assert client.get(conversation, headers=owner).status_code == 200
+    assert (
+        client.get(
+            conversation,
+            headers={"X-Tenant-ID": "tenant-a", "X-User-ID": "someone-else"},
+        ).status_code
+        == 404
+    )
 
 
 def test_an_unimplemented_identity_mode_refuses_the_request() -> None:

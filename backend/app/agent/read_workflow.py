@@ -79,10 +79,22 @@ READ_LIMIT_NOTICE = (
 # carried only tool calls, whose text is empty. Without it the API answers 200
 # with an empty body: a caller displays a blank answer and the reader never learns
 # the assistant was interrupted rather than silent.
+#
+# It says nothing about the sources: they may be empty, and a message that points
+# at a list which is not there sends the reader looking for something that does
+# not exist.
 STEP_LIMIT_MESSAGE = (
     "Je n'ai pas pu terminer : le nombre d'etapes autorisees pour cette question a "
-    "ete atteint avant que je puisse repondre. Les sources deja consultees sont "
-    "listees ci-dessous."
+    "ete atteint avant que je puisse repondre."
+)
+
+# Substituted when the model ends the loop of its own accord yet says nothing.
+# Distinct from the message above, because the two are not the same event: this
+# one is a model that had every step it asked for and produced no answer, and
+# reporting it as an interruption would blame a limit that never fired.
+EMPTY_ANSWER_MESSAGE = (
+    "Je n'ai pas produit de reponse exploitable pour cette question. Reformule-la, "
+    "ou precise la ressource a consulter."
 )
 
 # The paragraph on searching is there for a measured reason. A search read carries
@@ -283,7 +295,11 @@ class AgentReadWorkflow:
 
             if not response.tool_calls:
                 return AgentAnswer(
-                    text=response.text,
+                    # Same rule as the step-limit exit, and for the same reason: an
+                    # empty body is indistinguishable from an assistant that had
+                    # nothing to say. ``answered`` claims the answer is complete,
+                    # so an empty one here is the more misleading of the two.
+                    text=response.text or last_text or EMPTY_ANSWER_MESSAGE,
                     stop_reason=AgentStopReason.ANSWERED,
                     steps_used=step,
                     sources=sources_from(tuple(records)),
@@ -517,6 +533,7 @@ __all__ = [
     "ABSOLUTE_MAX_READS_PER_QUESTION",
     "DEFAULT_MAX_READS_PER_QUESTION",
     "DEFAULT_MAX_STEPS",
+    "EMPTY_ANSWER_MESSAGE",
     "MAX_OBSERVATION_CHARACTERS",
     "READ_LIMIT_NOTICE",
     "REPEATED_READ_NOTICE",
