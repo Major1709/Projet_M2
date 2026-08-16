@@ -926,6 +926,28 @@ avec le **type** de l'exception seulement — un message de puits peut porter un
 ou un fragment de la ligne qu'il écrivait. Le comportement fail-closed est inchangé ; seule la
 perte de diagnostic est corrigée.
 
+### La connexion va à l'adresse qui a été approuvée
+
+Les trois adaptateurs résolvaient le nom d'hôte, validaient chaque adresse, puis construisaient
+leur client **sur le nom d'hôte** — que httpx résolvait une seconde fois. C'est cette seconde
+réponse qui était contactée. Un résolveur compromis pouvait donc répondre publiquement à la
+vérification et en interne à la connexion, ce qui vidait le contrôle de sa substance.
+
+Un transport partagé, `PinnedAddressTransport`, réécrit désormais la requête vers l'adresse
+approuvée. **Seul l'hôte change** : schéma, port, chemin et requête restent tels que l'appelant les
+a construits, faute de quoi un garde-fou censé fixer la destination pourrait déplacer la requête
+vers une autre ressource.
+
+L'identité de la destination est préservée — `Host` pour le routage côté serveur, et le nom SNI
+pour la poignée de main. La vérification du certificat continue donc de se faire contre le nom
+d'hôte : **épingler l'adresse ne doit pas devenir un moyen d'accepter un certificat qui n'a jamais
+été valide pour elle.** C'est le point qui aurait pu transformer un correctif anti-SSRF en faille
+TLS.
+
+Un seul exemplaire pour les trois adaptateurs, pour la raison déjà écrite en tête de `http_guard` :
+deux copies d'un contrôle d'adresse font deux endroits à affaiblir, et le second est celui que
+personne ne relit.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`
