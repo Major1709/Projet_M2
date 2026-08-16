@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.agent.api import router as agent_router
 from app.approvals.api import router as approvals_router
 from app.bootstrap import ApplicationContainer, build_container
 from app.conversations.api import router as conversations_router
@@ -38,6 +39,7 @@ def create_app(
     app.include_router(conversations_router)
     app.include_router(approvals_router)
     app.include_router(mcp_router)
+    app.include_router(agent_router)
     return app
 
 

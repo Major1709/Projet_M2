@@ -625,6 +625,70 @@ Le câblage dans `bootstrap.py`, la route API et une sonde réelle. Rien de tout
 branché : la boucle est éprouvée contre un fournisseur simulé, sans réseau. C'est au câblage que
 la réserve H5 se vérifiera en pratique, et que le plafond de jetons par minute se manifestera.
 
+## Câblage et sonde réelle de l'agent — 2026-08-16
+
+`bootstrap.py` construit l'agent, `POST /api/agent/questions` l'expose, et la chaîne complète a
+répondu à une vraie question en lisant Jira.
+
+### Le fournisseur nu n'entre pas dans le conteneur
+
+`_build_agent` enveloppe systématiquement `GroqLLMProvider` dans `AuditedLLMProvider`. La
+décoration est faite là plutôt que laissée à l'appelant : une invocation sans trace de son tenant
+et de son utilisateur doit être **inatteignable par construction**, pas par le souvenir d'avoir
+enveloppé au bon endroit. Un test lit la composition du conteneur pour le vérifier. C'est la
+vérification pratique de la réserve H5, qui est donc levée.
+
+L'agent vaut `None` quand aucun fournisseur n'est configuré, et les lectures MCP restent
+disponibles : l'assistant est la couche optionnelle, pas les connecteurs en dessous. La route
+répond alors `403 LLM_PROVIDER_DISABLED`, comme la couche MCP le fait pour un provider éteint.
+
+### Une cause, un code
+
+Les erreurs LLM ont leur table de traduction — 503 pour l'audit ou l'identifiant indisponible,
+429 pour le quota, **413** pour une requête trop grosse puisque attendre n'y change rien, 504 pour
+le délai, 502 pour le reste. Un refus de lecture jugé fatal par la boucle est traduit par la
+table **de la couche MCP**, si bien qu'une même cause garde le même code qu'elle soit atteinte
+directement ou à travers l'assistant.
+
+### Ce que la sonde réelle a montré
+
+```
+Question : « Quels sont les projets Jira visibles ? Cite leur cle. »
+Reponse  : « Il y a un projet Jira visible : KAN (Mon espace Kanban) »
+Arret    : answered en 2 etapes, source getVisibleJiraProjects
+
+LLM_INVOCATION_AUTHORIZED / COMPLETED
+MCP_READ_AUTHORIZED / COMPLETED
+LLM_INVOCATION_AUTHORIZED / COMPLETED     -- le tout sous un seul correlation_id
+```
+
+Le modèle a choisi l'outil, le registre l'a autorisé, la lecture a abouti contre le vrai serveur
+Rovo, et la réponse cite un projet réel. La trace d'audit reconstitue l'enchaînement complet.
+
+### Le plafond par minute est la contrainte dimensionnante
+
+Au premier essai, deux questions enchaînées ont produit `LLM_RATE_LIMITED` sur le second appel de
+la seconde question — après une lecture MCP réussie. Le catalogue pèse à lui seul ~1 800 jetons et
+il est renvoyé à chaque tour ; avec le budget de complétion demandé compté qu'il soit consommé ou
+non, deux tours à 1 200 jetons suffisent à approcher les 8 000 par minute du tier gratuit.
+
+La sonde ne passe qu'en réduisant le budget à 700 jetons et en laissant la fenêtre se rouvrir.
+C'est une limite de compte, pas de conception, mais elle borne en pratique l'agent à deux ou trois
+étapes par question tant que le tier gratuit est utilisé.
+
+### Constats annexes
+
+Une invocation dont le budget de complétion est trop court échoue en `LLM_RESPONSE_TOO_LARGE`
+avant d'avoir rien produit d'utile : le raisonnement consomme le budget avant que la réponse ne
+commence. Observé à 400 jetons, résolu à 1 200. Le plancher utile est donc nettement plus haut que
+le minimum accepté par le schéma.
+
+`validate_runtime_adapters` exige le fichier de jeton **au niveau du provider** Atlassian, sans
+tenir compte des surcharges par binding. Un déploiement qui ne renseignerait que
+`PKA_MCP_ATLASSIAN_JIRA_BEARER_TOKEN_FILE` et son équivalent Confluence serait refusé alors que
+l'amorçage fonctionnerait. Sans danger — le défaut va vers le refus — mais plus strict que
+nécessaire. Non corrigé ici.
+
 ## Outillage
 
 `scripts/mcp-smoke.sh` sonde les trois surfaces — identité seule, puis Jira et Confluence qui

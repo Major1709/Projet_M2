@@ -3,6 +3,9 @@ from dataclasses import dataclass
 
 from sqlalchemy import Engine
 
+from app.agent.adapters.groq import GroqLLMProvider
+from app.agent.audit import AuditedLLMProvider
+from app.agent.read_workflow import AgentReadWorkflow
 from app.approvals.adapters.memory import InMemoryApprovalUnitOfWork
 from app.approvals.adapters.postgres import PostgresApprovalUnitOfWorkFactory
 from app.approvals.workflow import ApprovalWorkflow
@@ -44,6 +47,10 @@ class ApplicationContainer:
     mcp_reads: MCPReadWorkflow
     readiness_probe: Callable[[], bool]
     settings: Settings
+    # Absent when no language model provider is configured. The MCP reads stay
+    # available in that case: the assistant is the optional layer, not the
+    # connectors underneath it.
+    agent: AgentReadWorkflow | None = None
     engine: Engine | None = None
 
 
@@ -57,6 +64,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
             audit=approval_uow_factory.audit,
             conversations=ConversationWorkflow(conversation_repository),
             mcp_reads=mcp_reads,
+            agent=_build_agent(settings, approval_uow_factory.audit, mcp_reads),
             readiness_probe=lambda: True,
             settings=settings,
         )
@@ -72,9 +80,34 @@ def build_container(settings: Settings) -> ApplicationContainer:
         audit=audit_writer,
         conversations=ConversationWorkflow(conversation_repository),
         mcp_reads=mcp_reads,
+        agent=_build_agent(settings, audit_writer, mcp_reads),
         readiness_probe=lambda: database_is_ready(engine),
         settings=settings,
         engine=engine,
+    )
+
+
+def _build_agent(
+    settings: Settings,
+    audit_sink: AuditSink,
+    mcp_reads: MCPReadWorkflow,
+) -> AgentReadWorkflow | None:
+    if not settings.llm_groq_enabled or settings.llm_groq_api_key_file is None:
+        return None
+    return AgentReadWorkflow(
+        # The audit decorator is applied here rather than left to the caller: an
+        # invocation that leaves no trace of its tenant and user must not be
+        # reachable, and the only way to guarantee that is for the unwrapped
+        # provider never to enter the container.
+        provider=AuditedLLMProvider(
+            provider=GroqLLMProvider(
+                api_key_file=settings.llm_groq_api_key_file,
+                model=settings.llm_groq_model,
+                max_completion_tokens=settings.llm_groq_max_completion_tokens,
+            ),
+            audit_sink=audit_sink,
+        ),
+        reads=mcp_reads,
     )
 
 
