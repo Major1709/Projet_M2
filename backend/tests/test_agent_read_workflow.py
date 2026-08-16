@@ -329,3 +329,18 @@ def test_the_system_prompt_frames_read_content_as_data() -> None:
     system = provider.requests[0].messages[0]
     assert system["role"] == "system"
     assert "DONNEE" in system["content"]
+
+
+def test_the_system_prompt_asks_for_a_read_before_a_named_claim() -> None:
+    # A search produces a source without a link, correctly. The instruction exists so
+    # an answer that names a resource has a source the reader can open. It is a
+    # mitigation, not a control: a live run kept the instruction and repeated a
+    # search anyway, which is why a deterministic guard sits behind it.
+    provider = ScriptedProvider(answered("Fait."))
+    agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
+
+    ask(agent)
+
+    prompt = provider.requests[0].messages[0]["content"]
+    assert "Une recherche est un point de depart" in prompt
+    assert "lis-le avec l'outil qui le designe" in prompt

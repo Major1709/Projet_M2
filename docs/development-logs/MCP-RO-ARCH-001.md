@@ -742,6 +742,44 @@ Source   : getJiraIssue -> https://andrianalyfanny.atlassian.net/browse/KAN-1, t
 Une lecture indépendante de KAN-1 confirme `key: "KAN-1"` et `summary: "test"` : la citation
 désigne bien la ressource que la réponse décrit.
 
+## Découverte : ce que le modèle fait sans qu'on le lui dise — 2026-08-16
+
+Le registre expose des points d'entrée sans argument obligatoire du côté Atlassian —
+`getVisibleJiraProjects`, `getConfluenceSpaces`, `searchJiraIssuesUsingJql`,
+`searchConfluenceUsingCql` — et aucun du côté Figma, où les quatre outils exigent un `fileKey`
+fourni par l'appelant. La boucle n'avait jamais été éprouvée sur une question ne nommant aucune
+ressource.
+
+Une sonde l'a fait : « Sur quoi porte le travail suivi dans Jira en ce moment ? » Réponse correcte
+en deux étapes, le modèle écrivant directement du JQL sans même énumérer les projets. **La
+découverte Atlassian est donc acquise sans index et sans fournisseur d'embeddings.** Elle ne
+manque que pour Figma.
+
+Mais la sonde a révélé un défaut que le code seul ne montrait pas. La source était une recherche,
+donc sans lien — conforme à la conception, une recherche ne désigne rien. Sauf que la réponse,
+elle, **nommait KAN-1**. Le lecteur reçoit une affirmation sur une ressource identifiable en face
+d'une source qu'il ne peut pas ouvrir.
+
+Deux issues, et une seule est acceptable. Dériver les liens des résultats de recherche est facile
+et casse l'invariant : la référence viendrait de la réponse du fournisseur au lieu d'un argument
+public obligatoire, ce qui est précisément ce qui empêche aujourd'hui un serveur compromis de
+rediriger une citation. Écartée. L'autre est d'amener le modèle à relire ce qu'il cite.
+
+## Consigne de relecture : une mitigation, pas un contrôle — 2026-08-16
+
+Le prompt système demande désormais explicitement de lire une ressource par son identifiant avant
+d'affirmer quoi que ce soit à son sujet, et de ne pas relancer deux fois la même recherche.
+
+**Elle a été mesurée insuffisante.** Sur la même question, quatre exécutions ont produit trois
+entrées différentes : recherche puis lecture, recherche répétée à l'identique, énumération des
+projets. Une exécution menée *après* l'ajout de la consigne a répété la recherche malgré elle, sur
+un appel abouti — donc non imputable au quota.
+
+La consigne est conservée, car elle oriente sans rien coûter, mais elle est doublée d'un garde-fou
+déterministe. Ce qu'il faut retenir pour la suite : un prompt ne rend aucun comportement
+impossible, et rien qui repose sur lui ne peut porter une garantie. La boucle reste sûre dans tous
+les cas — ce qui varie est la citabilité d'une réponse, jamais ce qui peut être lu.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`
