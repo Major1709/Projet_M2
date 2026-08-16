@@ -204,12 +204,18 @@ l'environnement :
 |---|---|---|
 | Jira | `https://mcp.atlassian.com/v1/mcp` | `https://andrianalyfanny-1786296714755.atlassian.net` et son `cloudId` |
 | Confluence | `https://mcp.atlassian.com/v1/mcp` | `https://andrianalyfanny.atlassian.net` et son `cloudId` distinct |
-| Figma | `https://mcp.figma.com/mcp` | fichier `Ie3SsqL1KetjinTDHcNm2D`, noeud `36:114` |
+| Figma | `https://api.figma.com` (REST, pas MCP) | `https://www.figma.com`, tout fichier couvert par le jeton |
 
 Jira et Confluence partagent le serveur Atlassian, mais leurs bindings, `cloudId`
-et kill switches restent distincts. Aucun endpoint, domaine source, file key ou
-node ID fourni par une requete, un contenu recupere ou une variable d'environnement
-ne doit les remplacer.
+et kill switches restent distincts. Aucun endpoint, domaine source ni `cloudId`
+fourni par une requete, un contenu recupere ou une variable d'environnement ne
+doit les remplacer.
+
+Le `fileKey` Figma fait exception et n'est pas epingle : il est fourni par
+l'appelant et valide sur sa forme seule, parce que l'assistant doit lire les
+fichiers de process de tout l'espace couvert par le jeton. Ce jeton est donc la
+frontiere : pour restreindre ce qui est lisible, restreindre le compte qui le
+porte, pas la configuration.
 
 Le demarrage par defaut injecte les gardes suivantes :
 

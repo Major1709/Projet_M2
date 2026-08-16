@@ -40,7 +40,12 @@ FIGMA_SOURCE_ORIGIN = "https://www.figma.com"
 # The Figma file this deployment was validated against. Kept as a documented
 # reference and used by tests; it is no longer a binding, because the assistant
 # has to read process files across the user's whole Figma space.
-FIGMA_REFERENCE_FILE_KEY = "Ie3SsqL1KetjinTDHcNm2D"
+#
+# Points at the Education-plan board because the previous file sat in a Starter
+# team, and a Starter plan caps content reads on the *file* at roughly six a
+# month regardless of who asks. A reference that cannot actually be read is a
+# reference that documents nothing.
+FIGMA_REFERENCE_FILE_KEY = "UVQmgXGaZC5vrtaQRU5nvo"
 MCP_POLICY_VERSION = "SPEC-MCP-RO-001-r2"
 # Pinned deliberately: a remote server negotiates down to whatever the client
 # accepts, so every entry added here widens what a provider can force on us.

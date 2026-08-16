@@ -445,6 +445,67 @@ le périmètre de `feature/mcp-readonly-connectors`, dont le nom ne les couvre p
 Groq reste dans l'historique de la branche MCP : elle est publiée, et la réécrire pour corriger
 le périmètre d'un seul commit coûterait plus que ça ne rapporte.
 
+## Figma : validation réelle et levée du quota — 2026-08-16
+
+Le dernier critère d'acceptation encore ouvert de la tranche est levé. `extractFigmaProcess`
+n'avait jamais vu une réponse de contenu réelle : il n'était éprouvé que contre des refus de
+quota, c'est-à-dire contre des chemins d'erreur.
+
+### Ce qui débloquait
+
+Le plafond Figma suit **le fichier**, non le siège de l'appelant. Un fichier hébergé dans une
+équipe au plan Starter est plafonné à environ six lectures de contenu par mois, quel que soit le
+plan de qui le lit. La vérification Education obtenue le 2026-08-16 ne suffisait donc pas :
+elle ouvre des droits sur une équipe, pas sur un fichier resté ailleurs.
+
+La sortie n'a pas demandé de migration. Un fichier neuf créé dans l'équipe Education — une carte
+FigJam `PROCESS`, clé `UVQmgXGaZC5vrtaQRU5nvo` — n'hérite d'aucun plafond Starter. Six appels
+consécutifs sont passés là où l'ancien fichier refusait dès le premier, ce qui confirme par
+l'expérience que la limite est portée par le fichier et non par le compte.
+
+### Ce que la lecture réelle a prouvé
+
+Les quatre outils répondent en 200 : `getFigmaFile` (1615 o), `getFigmaNode` (1327 o),
+`renderFigmaNode` (URL d'image signée), `extractFigmaProcess`. Aucune ligne de code n'a été
+modifiée pour y parvenir — le `fileKey` étant un argument d'appel depuis la refonte REST, un
+fichier inconnu passe sans configuration. C'est la contrepartie recherchée de ce choix, et elle
+est ici vérifiée plutôt que supposée.
+
+L'extraction rend deux étapes et une transition :
+
+```
+START  ELLIPSE  kind=start   section=Section 1
+LOGIN  SQUARE   kind=step    section=Section 1
+1:3 → 1:13
+```
+
+L'invariant qui comptait est celui-là : `START` est classé point d'entrée **par connectivité** —
+rien n'y arrive — et non parce qu'il porte ce nom. La règle était écrite depuis le début sans
+avoir jamais été confrontée à un dessin réel. Elle tient.
+
+Une réserve de conception subsiste, sans conséquence ici : `LOGIN` est classé `step` bien que
+rien n'en sorte, la règle ne déclarant `end` que pour une forme arrondie. Un flux terminé par un
+rectangle serait donc mal qualifié. À trancher quand une carte réelle présentera le cas.
+
+### Correctifs d'accompagnement
+
+`FIGMA_REFERENCE_FILE_KEY` pointe désormais vers la carte Education. Une référence documentaire
+qui désigne un fichier devenu illisible ne documente rien.
+
+Les deux README décrivaient encore Figma comme lu par son serveur MCP, et le `fileKey` comme une
+constante non surchargeable — deux affirmations fausses depuis la bascule REST. L'écart était
+plus grave qu'une simple péremption : il annonçait un contrôle qui n'existe pas. Les deux
+fichiers énoncent maintenant la règle réelle, à savoir que la portée du jeton délégué est la
+seule frontière de ce qui est lisible.
+
+### Ce que cela laisse ouvert
+
+La frontière étant à la maille du compte et non de l'équipe, restreindre le corpus suppose de
+restreindre le compte porteur du jeton, pas la configuration. Par ailleurs les quatre outils
+exigent tous une `fileKey` fournie : l'assistant ne sait pas énumérer ce qui existe. Un corpus
+réduit à quelques fichiers de process s'en accommode ; un corpus défini comme « une équipe
+entière » demandera un outil de découverte.
+
 ## Outillage
 
 `scripts/mcp-smoke.sh` sonde les trois surfaces — identité seule, puis Jira et Confluence qui

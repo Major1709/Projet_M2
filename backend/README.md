@@ -147,17 +147,22 @@ conséquence, chaque outil exige actuellement que `tools/list.outputSchema` et
 `structuredContent` soient tous deux absents. Leur présence place la réponse en
 quarantaine ; aucun schéma générique permissif n'est utilisé.
 
-Les endpoints MCP, les origines source et la cible Figma sont des constantes de
-code non configurables :
+Les endpoints et les origines source sont des constantes de code non
+configurables :
 
 ```text
 Atlassian MCP  https://mcp.atlassian.com/v1/mcp
-Figma MCP      https://mcp.figma.com/mcp
-Jira           https://andrianalyfanny-1786296714755.atlassian.net
+Figma REST     https://api.figma.com
+Jira           https://andrianalyfanny.atlassian.net
 Confluence     https://andrianalyfanny.atlassian.net
-Figma file     Ie3SsqL1KetjinTDHcNm2D
-Figma node     36:114
 ```
+
+Le `fileKey` et le `nodeId` Figma, en revanche, ne sont **pas** epingles : ce sont
+des arguments d'appel, contraints par forme et non par valeur. Un cloud ID
+Atlassian choisit quel *tenant* est lu et ne peut donc jamais venir de l'appelant ;
+une cle de fichier Figma ne fait que designer un document a l'interieur de l'espace
+que le jeton delegue couvre deja. La portee du jeton reste la frontiere reelle.
+`FIGMA_REFERENCE_FILE_KEY` n'existe que comme reference documentaire et de test.
 
 Le transport utilise le SDK Python MCP `2.0.0` épinglé et Streamable HTTP. Les redirections,
 le proxy issu de l'environnement, les retries et le cache de découverte sont

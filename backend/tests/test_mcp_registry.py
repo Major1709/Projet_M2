@@ -90,7 +90,7 @@ def test_endpoints_origins_and_figma_target_are_fixed_not_configurable() -> None
     # these are asserted rather than derived from configuration.
     assert JIRA_SOURCE_ORIGIN == "https://andrianalyfanny.atlassian.net"
     assert CONFLUENCE_SOURCE_ORIGIN == "https://andrianalyfanny.atlassian.net"
-    assert FIGMA_REFERENCE_FILE_KEY == "Ie3SsqL1KetjinTDHcNm2D"
+    assert FIGMA_REFERENCE_FILE_KEY == "UVQmgXGaZC5vrtaQRU5nvo"
     for forbidden_field in (
         "mcp_atlassian_endpoint",
         "mcp_figma_endpoint",
