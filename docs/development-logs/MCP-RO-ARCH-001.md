@@ -891,6 +891,41 @@ Le modèle est **prévenu** plutôt que coupé : il reçoit une observation lui 
 avec ce qu'il a et de dire ce qui lui manque. `AGENT_TOOL_CALL_SKIPPED` porte maintenant
 `reason=read_limit` à côté de `reason=duplicate`.
 
+### Un nom d'outil inventé ne tue plus la question
+
+L'adaptateur levait `LLMInvalidResponse` dès qu'un nom proposé ne figurait pas dans le catalogue,
+ce qui remontait en **502** et perdait toute la question. Or inventer un nom d'outil est la faute
+la plus banale d'un modèle, et c'est exactement la classe d'erreur que cette boucle existe pour
+absorber. Le chemin de repli était d'ailleurs déjà écrit dans `_observe`, mais inatteignable.
+
+L'autorité est désormais unique : **le registre**. L'appel traverse l'adaptateur — borné et
+restreint aux caractères imprimables comme n'importe quel nom — puis la boucle le refuse contre le
+registre, l'inscrit à l'audit sous `reason=unknown_tool` et rend une observation au modèle.
+
+Rien n'est élargi : un nom non autorisé n'atteint aucun transport, il obtient seulement une phrase
+lui demandant de choisir un outil réel. Cette phrase **ne répète pas le nom** : il vient du
+fournisseur, et le recopier dans la transcription laisserait un fournisseur compromis placer le
+texte de son choix dans nos propres mots. La trace d'audit, elle, le conserve — c'est là qu'un
+appel rejeté doit vivre.
+
+### Le plancher de `max_completion_tokens` est celui qu'on a mesuré
+
+Le minimum du schéma passe de 64 à 768. Sur un modèle à raisonnement, un plafond bas ne produit pas
+une réponse courte : il n'en produit **aucune**, avec `finish_reason == "length"`, pour le même
+budget consommé. Échec observé à 64 et à 450, succès à 700. Accepter 64 revenait à promettre par
+contrat un appel qui ne peut pas fonctionner.
+
+### Un puits d'audit en panne n'efface plus la cause
+
+Sur les deux chemins de refus, l'écriture d'audit précédait la journalisation. Si le puits tombait,
+`MCPAuditUnavailable` remplaçait l'erreur d'origine **avant** qu'elle soit journalisée : un
+`MCPToolDenied` devenait un 503 générique et disparaissait aussi des journaux.
+
+La journalisation vient désormais en premier. L'échec du puits lui-même est journalisé à son tour,
+avec le **type** de l'exception seulement — un message de puits peut porter une chaîne de connexion
+ou un fragment de la ligne qu'il écrivait. Le comportement fail-closed est inchangé ; seule la
+perte de diagnostic est corrigée.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`
