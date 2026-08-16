@@ -56,20 +56,33 @@ DEFAULT_MAX_STEPS = 4
 #
 # The step count does not bound this on its own: a single turn may carry several
 # tool calls -- the adapter accepts up to eight -- so eight steps of eight calls
-# would be sixty-four reads, each with its own transport budget. A question could
-# then hold the process for minutes and spend a source's quota far beyond what
-# ``max_steps`` suggests to whoever set it.
+# would be sixty-four reads, each with its own transport budget.
 #
-# Not a field on the question: a caller-chosen ceiling is one the caller raises.
-# Twelve leaves room for a search followed by several reads, and stops well short
-# of the arithmetic above.
-MAX_READS_PER_QUESTION = 12
+# Four, because that is what a real question costs: search then read, on each of
+# two sources. Higher figures are not merely generous, they are unaffordable --
+# twelve reads at the thirty-second transport budget is six minutes on one
+# question, and enough to pass some Figma endpoints' ten-a-minute allowance.
+DEFAULT_MAX_READS_PER_QUESTION = 4
+# The ceiling a deployment may raise the previous one to, and no further. Kept
+# separate so the knob has a bound of its own: a limit that can be set to any
+# value is not a limit.
+ABSOLUTE_MAX_READS_PER_QUESTION = 12
 
 # Handed back when the ceiling is reached, so the model stops proposing reads and
 # answers with what it already has rather than being cut off mid-question.
 READ_LIMIT_NOTICE = (
     "Lecture ignoree : le nombre de lectures autorisees pour cette question est "
     "atteint. Reponds avec ce que tu as deja lu, et dis ce qui te manque."
+)
+
+# Substituted when the loop stops on its step limit while the model's last turn
+# carried only tool calls, whose text is empty. Without it the API answers 200
+# with an empty body: a caller displays a blank answer and the reader never learns
+# the assistant was interrupted rather than silent.
+STEP_LIMIT_MESSAGE = (
+    "Je n'ai pas pu terminer : le nombre d'etapes autorisees pour cette question a "
+    "ete atteint avant que je puisse repondre. Les sources deja consultees sont "
+    "listees ci-dessous."
 )
 
 # The paragraph on searching is there for a measured reason. A search read carries
@@ -208,9 +221,19 @@ class AgentReadWorkflow:
         reads: MCPReadWorkflow,
         audit_sink: AuditSink,
         registry: MCPToolRegistry | None = None,
+        max_reads_per_question: int = DEFAULT_MAX_READS_PER_QUESTION,
     ) -> None:
         self._provider = provider
         self._reads = reads
+        # A deployment knob, never a request field: a ceiling the caller chooses is
+        # a ceiling the caller raises. Clamped rather than validated, so a
+        # misconfigured deployment reads less than it asked for instead of failing
+        # to start -- the wrong direction is the safe one here.
+        if max_reads_per_question < 1:
+            raise ValueError("A question must be allowed at least one read")
+        self._max_reads_per_question = min(
+            max_reads_per_question, ABSOLUTE_MAX_READS_PER_QUESTION
+        )
         # Required rather than optional. An audit sink that may be omitted is one
         # that will be, and a deployment missing it would suppress calls with no
         # record that anything was suppressed.
@@ -252,7 +275,11 @@ class AgentReadWorkflow:
                 ),
                 context=context,
             )
-            last_text = response.text
+            # Only a non-empty turn is kept: a turn that proposes tools usually
+            # carries no text, and letting it overwrite the last real sentence is
+            # how the loop ended up able to return nothing at all.
+            if response.text:
+                last_text = response.text
 
             if not response.tool_calls:
                 return AgentAnswer(
@@ -268,7 +295,7 @@ class AgentReadWorkflow:
             # never looked at.
             messages.append(self._assistant_turn(response.text, response.tool_calls))
             for call in response.tool_calls:
-                if attempted_reads >= MAX_READS_PER_QUESTION:
+                if attempted_reads >= self._max_reads_per_question:
                     await self._record_skip(
                         call=call,
                         question=question,
@@ -298,7 +325,9 @@ class AgentReadWorkflow:
             },
         )
         return AgentAnswer(
-            text=last_text,
+            # Never empty: an interruption the caller cannot see is indistinguishable
+            # from an assistant that had nothing to say.
+            text=last_text or STEP_LIMIT_MESSAGE,
             stop_reason=AgentStopReason.STEP_LIMIT_REACHED,
             steps_used=question.max_steps,
             sources=sources_from(tuple(records)),
@@ -485,11 +514,13 @@ class AgentReadWorkflow:
 
 
 __all__ = [
+    "ABSOLUTE_MAX_READS_PER_QUESTION",
+    "DEFAULT_MAX_READS_PER_QUESTION",
     "DEFAULT_MAX_STEPS",
     "MAX_OBSERVATION_CHARACTERS",
-    "MAX_READS_PER_QUESTION",
     "READ_LIMIT_NOTICE",
     "REPEATED_READ_NOTICE",
+    "STEP_LIMIT_MESSAGE",
     "SYSTEM_PROMPT",
     "AgentAnswer",
     "AgentQuestion",

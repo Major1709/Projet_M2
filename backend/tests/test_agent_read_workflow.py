@@ -7,10 +7,12 @@ import pytest
 from app.agent.domain import LLMRequest, LLMResponse, ProposedToolCall
 from app.agent.errors import AgentAuditUnavailable, LLMRateLimited
 from app.agent.read_workflow import (
+    ABSOLUTE_MAX_READS_PER_QUESTION,
+    DEFAULT_MAX_READS_PER_QUESTION,
     MAX_OBSERVATION_CHARACTERS,
-    MAX_READS_PER_QUESTION,
     READ_LIMIT_NOTICE,
     REPEATED_READ_NOTICE,
+    STEP_LIMIT_MESSAGE,
     AgentQuestion,
     AgentReadWorkflow,
     AgentStopReason,
@@ -197,6 +199,34 @@ def test_the_step_limit_stops_a_model_that_keeps_calling_tools() -> None:
     # Three reads of the same ticket are one source: a model that loops does not
     # thereby cite the same page three times.
     assert len(answer.sources) == 1
+
+
+def test_a_step_limited_answer_is_never_empty() -> None:
+    # A turn proposing tools carries no text. Returning it as the answer means a
+    # 200 with an empty body: the caller shows a blank reply and the reader never
+    # learns the assistant was interrupted rather than silent.
+    provider = ScriptedProvider(*[proposing() for _ in range(2)])
+    agent = agent_for(provider, jira_reads())
+
+    answer = ask(agent, max_steps=2)
+
+    assert answer.text == STEP_LIMIT_MESSAGE
+    assert answer.stop_reason == AgentStopReason.STEP_LIMIT_REACHED
+
+
+def test_the_last_real_sentence_survives_a_later_silent_turn() -> None:
+    # A tool-calling turn must not erase what the model actually said before it.
+    spoke = LLMResponse(
+        text="Je regarde le ticket.",
+        model_name=MODEL,
+        tool_calls=proposing().tool_calls,
+    )
+    provider = ScriptedProvider(spoke, proposing(arguments={"issueIdOrKey": "KAN-2"}))
+    agent = agent_for(provider, jira_reads())
+
+    answer = ask(agent, max_steps=2)
+
+    assert answer.text == "Je regarde le ticket."
 
 
 @pytest.mark.parametrize(
@@ -477,7 +507,8 @@ def test_several_calls_in_one_turn_each_get_their_own_result_message() -> None:
 
 def test_a_question_cannot_perform_more_reads_than_the_ceiling() -> None:
     # Steps alone do not bound this: eight steps of eight calls would be sixty-four
-    # reads, each with its own transport budget.
+    # reads, each with its own transport budget. Four is what a real question
+    # costs -- search then read, on each of two sources.
     reads, session = jira_reads_with_session()
     provider = ScriptedProvider(
         proposing_many(8),
@@ -488,8 +519,33 @@ def test_a_question_cannot_perform_more_reads_than_the_ceiling() -> None:
 
     answer = ask(agent, max_steps=3)
 
-    assert session.call_count == MAX_READS_PER_QUESTION
+    assert DEFAULT_MAX_READS_PER_QUESTION == 4
+    assert session.call_count == DEFAULT_MAX_READS_PER_QUESTION
     assert answer.stop_reason == AgentStopReason.ANSWERED
+
+
+def test_a_deployment_may_raise_the_ceiling_but_not_past_the_absolute_one() -> None:
+    # A limit that can be set to any value is not a limit. The knob belongs to the
+    # deployment, never to the question: a caller-chosen ceiling is one the caller
+    # raises.
+    reads, session = jira_reads_with_session()
+    provider = ScriptedProvider(
+        *[proposing_many(8, first=100 * index) for index in range(4)],
+        answered("Fait."),
+    )
+    agent = agent_for(provider, reads, max_reads_per_question=999)
+
+    ask(agent, max_steps=5)
+
+    assert session.call_count == ABSOLUTE_MAX_READS_PER_QUESTION
+    assert "max_reads_per_question" not in AgentQuestion.model_fields
+
+
+def test_a_ceiling_below_one_is_refused_at_construction() -> None:
+    reads, _ = jira_reads_with_session()
+
+    with pytest.raises(ValueError, match="at least one read"):
+        agent_for(ScriptedProvider(), reads, max_reads_per_question=0)
 
 
 def test_the_model_is_told_when_the_read_ceiling_is_reached() -> None:
@@ -509,7 +565,8 @@ def test_the_model_is_told_when_the_read_ceiling_is_reached() -> None:
         for message in provider.requests[2].messages
         if message["role"] == "tool" and message["content"] == READ_LIMIT_NOTICE
     ]
-    assert len(refused) == 4
+    # Quatre appels du premier tour au-dela du plafond, puis les huit du second.
+    assert len(refused) == 12
 
 
 def test_a_call_refused_by_the_ceiling_is_audited_with_its_reason() -> None:
@@ -529,7 +586,7 @@ def test_a_call_refused_by_the_ceiling_is_audited_with_its_reason() -> None:
         for event in sink.snapshot()
         if event.event_type == AuditEventType.AGENT_TOOL_CALL_SKIPPED
     ]
-    assert reasons == ["read_limit"] * 4
+    assert reasons == ["read_limit"] * 12
 
 
 def test_a_declined_duplicate_does_not_consume_the_read_budget() -> None:
