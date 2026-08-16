@@ -19,6 +19,7 @@ from app.mcp.adapters.http_guard import (
     CONNECT_TIMEOUT_SECONDS,
     HTTPS_PORT,
     EndpointResolver,
+    PinnedAddressTransport,
     SystemEndpointResolver,
     is_approved_public_address,
     reject_oversized_response,
@@ -305,6 +306,9 @@ class SDKRemoteMCPTransport:
             not is_approved_public_address(address) for address in addresses
         ):
             raise MCPDNSRejected()
+        # Every answer had to be approved; this is the one actually contacted, so
+        # the connection cannot land on a later resolution nobody validated.
+        pinned_address = addresses[0]
         grant = await self._grant_broker.acquire(
             provider=provider, binding=binding, context=context
         )
@@ -324,6 +328,7 @@ class SDKRemoteMCPTransport:
             follow_redirects=False,
             trust_env=False,
             event_hooks={"response": [reject_oversized_response]},
+            transport=PinnedAddressTransport(hostname=hostname, address=pinned_address),
         )
         transport = streamable_http_client(
             endpoint,

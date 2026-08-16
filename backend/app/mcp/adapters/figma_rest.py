@@ -38,6 +38,7 @@ from app.mcp.adapters.http_guard import (
     CONNECT_TIMEOUT_SECONDS,
     HTTPS_PORT,
     EndpointResolver,
+    PinnedAddressTransport,
     SystemEndpointResolver,
     is_approved_public_address,
     reject_oversized_response,
@@ -504,6 +505,9 @@ class FigmaRESTTransport:
             not is_approved_public_address(address) for address in addresses
         ):
             raise MCPDNSRejected()
+        # The address actually contacted, so no later resolution can substitute one
+        # nobody validated.
+        pinned_address = addresses[0]
 
         grant = await self._grant_broker.acquire(
             provider=provider, binding=binding, context=context
@@ -530,6 +534,7 @@ class FigmaRESTTransport:
             follow_redirects=False,
             trust_env=False,
             event_hooks={"response": [reject_oversized_response]},
+            transport=PinnedAddressTransport(hostname=hostname, address=pinned_address),
         )
         async with client:
             yield FigmaRESTSession(client=client)

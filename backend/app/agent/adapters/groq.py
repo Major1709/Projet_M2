@@ -42,6 +42,7 @@ from app.mcp.adapters.http_guard import (
     CONNECT_TIMEOUT_SECONDS,
     HTTPS_PORT,
     EndpointResolver,
+    PinnedAddressTransport,
     SystemEndpointResolver,
     bounded_response_hook,
     is_approved_public_address,
@@ -56,6 +57,9 @@ GROQ_ENDPOINT: Final = "https://api.groq.com/openai/v1"
 # Checked at import so a malformed destination fails the process at start-up rather
 # than on the first inference.
 validate_fixed_endpoint(GROQ_ENDPOINT)
+# Derived once, and asserted non-empty by the check above: the pinned connection
+# needs it for ``Host`` and for the TLS handshake name.
+GROQ_HOSTNAME: Final = urlsplit(GROQ_ENDPOINT).hostname or ""
 
 # An inference can legitimately take far longer than a document read, so the call
 # ceiling is its own value rather than the MCP one. The connect ceiling is not:
@@ -151,10 +155,11 @@ def _tool_calls_of(
 ) -> tuple[ProposedToolCall, ...]:
     """Rebuild the model's tool calls, treating every field as untrusted input.
 
-    ``allowed_tool_names`` is enforced here when the caller supplies one. It does not
-    replace the registry allowlist further down -- that one stays the authority -- but
-    a name that was never offered is a malformed answer, and saying so at the boundary
-    beats carrying it deeper to be refused with less context.
+    ``allowed_tool_names`` is a signal here, not a gate: a name that was never
+    offered is noted and passed on, because the registry further down is the
+    authority and refusing at this boundary destroyed the whole question over the
+    most ordinary mistake a model makes. Everything else is a gate -- shape, size,
+    identifier charset -- because those cannot be recovered from downstream.
     """
 
     raw_calls = message.get("tool_calls")
@@ -280,7 +285,7 @@ class GroqLLMProvider:
         request: LLMRequest,
         context: SecurityContext,
     ) -> LLMResponse:
-        await self._reject_unapproved_address()
+        pinned_address = await self._reject_unapproved_address()
         api_key = await self._api_key()
 
         payload: dict[str, Any] = {
@@ -325,18 +330,27 @@ class GroqLLMProvider:
             # header with it, against a destination we never approved.
             follow_redirects=False,
             trust_env=False,
-            transport=self._transport,
+            # An injected transport wins, because that is how the tests drive this
+            # adapter without a network. Otherwise the connection is pinned to the
+            # address that was just approved.
+            transport=self._transport
+            or PinnedAddressTransport(
+                hostname=GROQ_HOSTNAME,
+                address=pinned_address,
+            ),
             event_hooks={"response": [bounded_response_hook(MAX_RESPONSE_BYTES)]},
         )
         async with client:
             document = await self._post(client, payload, request.correlation_id)
         return self._normalize(document, request.allowed_tool_names)
 
-    async def _reject_unapproved_address(self) -> None:
-        """Resolve the pinned host and refuse anything that is not publicly routable.
+    async def _reject_unapproved_address(self) -> str:
+        """Resolve the pinned host, refuse what is not publicly routable, return the rest.
 
         Done before the key is read, so a hijacked resolver never reaches a process
-        that is holding the credential in memory.
+        that is holding the credential in memory. The approved address is returned
+        rather than discarded: connecting by hostname would resolve a second time,
+        and it is that second answer which would be contacted.
         """
 
         hostname = urlsplit(GROQ_ENDPOINT).hostname
@@ -348,6 +362,7 @@ class GroqLLMProvider:
             raise LLMDNSRejected() from error
         if not addresses or any(not is_approved_public_address(address) for address in addresses):
             raise LLMDNSRejected()
+        return addresses[0]
 
     async def _api_key(self) -> str:
         try:

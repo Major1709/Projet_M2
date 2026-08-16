@@ -90,6 +90,44 @@ def is_approved_public_address(address: str) -> bool:
     return parsed.is_global
 
 
+class PinnedAddressTransport(httpx2.AsyncBaseTransport):
+    """Connect to the address that was approved, not to whatever DNS says next.
+
+    Validating a resolution and then handing the *hostname* to the client leaves a
+    gap: the client resolves a second time, and it is that second answer which is
+    contacted. A resolver that replies publicly to the check and privately to the
+    connection defeats the control entirely.
+
+    So the request is rewritten to the approved address, while the identity of the
+    destination is preserved -- ``Host`` for the server's routing, and the SNI name
+    for the handshake. Certificate verification therefore still runs against the
+    hostname: pinning the address must not become a way to accept a certificate
+    that was never valid for it.
+    """
+
+    def __init__(
+        self,
+        *,
+        hostname: str,
+        address: str,
+        inner: httpx2.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._hostname = hostname
+        self._address = address
+        self._inner = inner or httpx2.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        # Only the host changes. Scheme, port, path and query are left as the caller
+        # built them, so this cannot redirect a request to a different resource.
+        request.url = request.url.copy_with(host=self._address)
+        request.headers["Host"] = self._hostname
+        request.extensions = {**request.extensions, "sni_hostname": self._hostname}
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 class LimitedAsyncByteStream(httpx2.AsyncByteStream):
     """Stops a response body at a byte ceiling as it streams, before it is buffered."""
 
