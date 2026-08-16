@@ -233,6 +233,17 @@ class GroqLLMProvider:
         self._resolver = resolver or SystemEndpointResolver()
         self._transport = transport
 
+    @property
+    def model_name(self) -> str:
+        """The model this provider asks for, as opposed to the one served.
+
+        Exposed so the audit decorator reads it from the provider instead of being
+        told it separately: two configured copies of the same fact drift, and a
+        trail naming a model the adapter never requested is worse than none.
+        """
+
+        return self._model
+
     async def generate(
         self,
         *,

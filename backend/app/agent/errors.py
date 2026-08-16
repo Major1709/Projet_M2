@@ -15,6 +15,19 @@ class LLMError(Exception):
         super().__init__(self.safe_message)
 
 
+class LLMAuditUnavailable(LLMError):
+    """The invocation could not be recorded, so it must not happen.
+
+    Fail-closed for the same reason the MCP reads are: a model call that leaves no
+    trace of which tenant and which user caused it cannot be reconstructed after
+    the fact, and an assistant that reads a company's data without that trace is
+    indefensible whatever its answers are worth.
+    """
+
+    code = "LLM_AUDIT_UNAVAILABLE"
+    safe_message = "The language model audit trail is unavailable"
+
+
 class LLMCredentialUnavailable(LLMError):
     code = "LLM_CREDENTIAL_UNAVAILABLE"
     safe_message = "No usable language model credential is available"

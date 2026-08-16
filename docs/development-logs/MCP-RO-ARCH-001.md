@@ -506,6 +506,64 @@ exigent tous une `fileKey` fournie : l'assistant ne sait pas énumérer ce qui e
 réduit à quelques fichiers de process s'en accommode ; un corpus défini comme « une équipe
 entière » demandera un outil de découverte.
 
+## Audit des appels au modèle — 2026-08-16
+
+Livre la réserve H5 laissée ouverte par l'audit de sécurité : l'adaptateur ne devait pas être
+câblé dans une boucle tant qu'un appel au modèle ne serait pas traçable. `generate` recevait un
+`SecurityContext` sans jamais s'en servir.
+
+### Un décorateur, pas du code dans l'adaptateur
+
+`AuditedLLMProvider` enveloppe le port `LLMProvider` au lieu d'écrire la trace dans l'adaptateur
+Groq. Un audit que chaque nouveau fournisseur doit penser à écrire est un audit qu'un nouveau
+fournisseur finira par omettre ; envelopper le port le rend vrai pour toutes les implémentations,
+y compris celles qui n'existent pas encore.
+
+Le modèle demandé est lu sur le fournisseur — nouvelle propriété `model_name` — et non passé au
+décorateur à la construction. Deux copies configurées du même fait divergent, et une trace
+nommant un modèle que l'adaptateur n'a jamais demandé serait pire que pas de trace.
+
+### Quatre événements, et l'ordre compte
+
+`LLM_INVOCATION_AUTHORIZED` est écrit **avant** l'appel, comme `MCP_READ_AUTHORIZED` l'est avant
+le transport. C'est ce qui rend un appel non enregistré impossible : un plantage entre les deux
+laisse une invocation visiblement inachevée plutôt qu'aucune invocation. Si le puits d'audit
+refuse cette écriture, le fournisseur n'est jamais atteint — échec en `LLM_AUDIT_UNAVAILABLE`.
+
+Trois verdicts ensuite. `COMPLETED`. `REFUSED` quand le fournisseur écarte l'appel — identifiant
+indisponible, DNS refusé, transport, quota, réponse invalide. `BOUNDED`, distinct, quand ce sont
+**nos propres plafonds** qui ont arrêté l'appel : `LLM_REQUEST_TOO_LARGE`, `LLM_RESPONSE_TOO_LARGE`.
+La distinction n'est pas cosmétique — un appel borné peut avoir produit une réponse partielle que
+notre plafond a tronquée. C'est un fait sur le contenu, pas sur le fournisseur, et le confondre
+avec un refus masquerait la troncature.
+
+Une exception inattendue échappant à un adaptateur est un défaut, et le cas où la trace importe
+le plus : elle est enregistrée sous `LLM_UNEXPECTED_FAILURE` avec le seul nom de son type, jamais
+son message, qui peut transporter du texte fournisseur non borné.
+
+### Ce qui n'entre pas dans la trace
+
+Aucun texte de prompt ni de complétion. Les messages portent ce qui a été lu dans Jira,
+Confluence ou Figma ; le recopier dans la table d'audit dupliquerait le corpus dans un support à
+la rétention et au public différents. Sont enregistrés des comptes, les plafonds demandés, les
+noms d'outils proposés avec leur `action_class`, et une empreinte `prompt_sha256` qui permet de
+reconnaître deux prompts identiques sans en restituer le contenu. L'empreinte tolère une valeur
+non sérialisable : échouer à empreindre ne doit jamais être la raison d'un refus d'appel.
+
+### Corrélation de bout en bout
+
+Le `correlation_id` de la requête est celui que portent les lectures MCP. Un test le vérifie sur
+une trace complète : `LLM_INVOCATION_AUTHORIZED`, `LLM_INVOCATION_COMPLETED`, puis
+`MCP_READ_AUTHORIZED` et `MCP_READ_COMPLETED`, tous sous le même identifiant. Une réponse de
+l'assistant est donc reconstituable depuis la trace seule.
+
+### Ce qui reste ouvert
+
+Le décorateur n'est pas encore câblé dans `bootstrap.py`, faute de consommateur : le fournisseur
+n'entre dans le conteneur qu'avec la boucle d'orchestration. Le câblage relève de cette tranche,
+et c'est là que la réserve H5 se vérifiera en pratique. Un verdict `BOUNDED` pour un
+`max_steps` épuisé n'existe pas non plus, la boucle qui pourrait l'atteindre n'existant pas.
+
 ## Outillage
 
 `scripts/mcp-smoke.sh` sonde les trois surfaces — identité seule, puis Jira et Confluence qui

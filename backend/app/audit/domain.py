@@ -17,6 +17,16 @@ class AuditEventType(StrEnum):
     MCP_READ_AUTHORIZED = "MCP_READ_AUTHORIZED"
     MCP_READ_COMPLETED = "MCP_READ_COMPLETED"
     MCP_READ_FAILED = "MCP_READ_FAILED"
+    # Four types rather than one with a verdict field, to match the MCP reads: an
+    # authorization written before the call is what makes an unrecorded call
+    # impossible, and a verdict field on a single event cannot express that.
+    LLM_INVOCATION_AUTHORIZED = "LLM_INVOCATION_AUTHORIZED"
+    LLM_INVOCATION_COMPLETED = "LLM_INVOCATION_COMPLETED"
+    LLM_INVOCATION_REFUSED = "LLM_INVOCATION_REFUSED"
+    # Separate from REFUSED because a bounded call may have produced a partial
+    # answer that our own ceiling cut short. That is a fact about the content, not
+    # about the provider, and collapsing it into a refusal would hide truncation.
+    LLM_INVOCATION_BOUNDED = "LLM_INVOCATION_BOUNDED"
 
 
 class AuditEvent(BaseModel):

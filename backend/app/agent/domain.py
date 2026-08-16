@@ -53,4 +53,7 @@ class LLMProvider(Protocol):
     starving every other request in the process.
     """
 
+    @property
+    def model_name(self) -> str: ...
+
     async def generate(self, *, request: LLMRequest, context: SecurityContext) -> LLMResponse: ...
