@@ -21,9 +21,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.agent.citations import AgentSource, ReadRecord, sources_from
 from app.agent.domain import LLMProvider, LLMRequest, ProposedToolCall
 from app.core.identity import SecurityContext
-from app.mcp.domain import MCPReadProvenance, MCPReadToolCall, ToolActionClass
+from app.mcp.domain import MCPReadToolCall, ToolActionClass
 from app.mcp.errors import (
     MCPInputRejected,
     MCPReadError,
@@ -96,9 +97,10 @@ class AgentAnswer(BaseModel):
     text: str
     stop_reason: AgentStopReason
     steps_used: int
-    # Kept in call order so a citation layer can render them without re-reading
-    # anything. The provenance is the workflow's, never the model's account of it.
-    reads: tuple[MCPReadProvenance, ...] = ()
+    # Deduplicated, in the order they were first consulted. Derived from the read
+    # workflow's provenance, never from the model's account of what it read -- a
+    # model that hallucinates a citation cannot make one appear here.
+    sources: tuple[AgentSource, ...] = ()
 
 
 def tool_catalogue(registry: MCPToolRegistry) -> tuple[dict[str, Any], ...]:
@@ -167,7 +169,7 @@ class AgentReadWorkflow:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": question.question},
         ]
-        provenance: list[MCPReadProvenance] = []
+        records: list[ReadRecord] = []
         last_text = ""
 
         for step in range(1, question.max_steps + 1):
@@ -189,7 +191,7 @@ class AgentReadWorkflow:
                     text=response.text,
                     stop_reason=AgentStopReason.ANSWERED,
                     steps_used=step,
-                    reads=tuple(provenance),
+                    sources=sources_from(tuple(records)),
                 )
 
             # Rebuilt from the validated calls rather than replayed from the raw
@@ -198,13 +200,13 @@ class AgentReadWorkflow:
             # never looked at.
             messages.append(self._assistant_turn(response.text, response.tool_calls))
             for call in response.tool_calls:
-                observation, read_provenance = await self._observe(
+                observation, record = await self._observe(
                     call=call,
                     question=question,
                     context=context,
                 )
-                if read_provenance is not None:
-                    provenance.append(read_provenance)
+                if record is not None:
+                    records.append(record)
                 messages.append(
                     {
                         "role": "tool",
@@ -219,14 +221,14 @@ class AgentReadWorkflow:
             extra={
                 "correlation_id": question.correlation_id,
                 "max_steps": question.max_steps,
-                "read_count": len(provenance),
+                "read_count": len(records),
             },
         )
         return AgentAnswer(
             text=last_text,
             stop_reason=AgentStopReason.STEP_LIMIT_REACHED,
             steps_used=question.max_steps,
-            reads=tuple(provenance),
+            sources=sources_from(tuple(records)),
         )
 
     @staticmethod
@@ -256,7 +258,7 @@ class AgentReadWorkflow:
         call: ProposedToolCall,
         question: AgentQuestion,
         context: SecurityContext,
-    ) -> tuple[str, MCPReadProvenance | None]:
+    ) -> tuple[str, ReadRecord | None]:
         contract = self._contracts.get(call.tool_name)
         if contract is None:
             # Unreachable while ``allowed_tool_names`` covers the catalogue, kept
@@ -286,10 +288,11 @@ class AgentReadWorkflow:
             # provider wrote reaches the transcript through an error path.
             return (f"Lecture echouee ({error.code}) : {error.safe_message}.", None)
 
-        return (self._render(result.content), result.provenance)
+        observation, truncated = self._render(result.content)
+        return (observation, ReadRecord(provenance=result.provenance, truncated=truncated))
 
     @staticmethod
-    def _render(blocks: Sequence[Any]) -> str:
+    def _render(blocks: Sequence[Any]) -> tuple[str, bool]:
         rendered: list[str] = []
         for block in blocks:
             if block.text is None:
@@ -307,9 +310,10 @@ class AgentReadWorkflow:
         if len(observation) > MAX_OBSERVATION_CHARACTERS:
             return (
                 observation[:MAX_OBSERVATION_CHARACTERS]
-                + "\n[lecture tronquee : demande une portion plus petite si besoin]"
+                + "\n[lecture tronquee : demande une portion plus petite si besoin]",
+                True,
             )
-        return observation
+        return (observation, False)
 
 
 __all__ = [
@@ -319,6 +323,7 @@ __all__ = [
     "AgentAnswer",
     "AgentQuestion",
     "AgentReadWorkflow",
+    "AgentSource",
     "AgentStopReason",
     "tool_catalogue",
 ]

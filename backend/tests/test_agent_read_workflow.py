@@ -121,7 +121,7 @@ def test_an_answer_without_tool_calls_ends_the_loop() -> None:
     assert answer.text == "Jira suit les tickets."
     assert answer.stop_reason == AgentStopReason.ANSWERED
     assert answer.steps_used == 1
-    assert answer.reads == ()
+    assert answer.sources == ()
 
 
 def test_a_read_is_performed_and_its_result_returned_to_the_model() -> None:
@@ -138,17 +138,17 @@ def test_a_read_is_performed_and_its_result_returned_to_the_model() -> None:
     assert '"key": "KAN-1"' in second_turn[-1]["content"]
 
 
-def test_the_provenance_of_each_read_is_carried_out_of_the_loop() -> None:
+def test_each_read_becomes_a_source_the_model_could_not_have_invented() -> None:
     provider = ScriptedProvider(proposing(), answered("Fait."))
     agent = AgentReadWorkflow(provider=provider, reads=jira_reads())
 
     answer = ask(agent)
 
-    assert len(answer.reads) == 1
-    # The citation layer will render this; it comes from the workflow, never from
-    # the model's account of what it read.
-    assert answer.reads[0].tool_name == "getJiraIssue"
-    assert answer.reads[0].correlation_id == "corr-agent-1"
+    assert len(answer.sources) == 1
+    # Derived from the read workflow's provenance, never from the model's account
+    # of what it read.
+    assert answer.sources[0].tool_name == "getJiraIssue"
+    assert answer.sources[0].url == "https://andrianalyfanny.atlassian.net/browse/KAN-1"
 
 
 def test_the_assistant_turn_is_rebuilt_from_validated_fields() -> None:
@@ -171,7 +171,9 @@ def test_the_step_limit_stops_a_model_that_keeps_calling_tools() -> None:
 
     assert answer.stop_reason == AgentStopReason.STEP_LIMIT_REACHED
     assert answer.steps_used == 3
-    assert len(answer.reads) == 3
+    # Three reads of the same ticket are one source: a model that loops does not
+    # thereby cite the same page three times.
+    assert len(answer.sources) == 1
 
 
 @pytest.mark.parametrize(
@@ -188,7 +190,7 @@ def test_a_recoverable_read_failure_is_handed_back_to_the_model(error: Exception
     observation = provider.requests[1].messages[-1]["content"]
     assert error.code in observation
     # A failed read is not a source, so it must not appear as one.
-    assert answer.reads == ()
+    assert answer.sources == ()
 
 
 @pytest.mark.parametrize(

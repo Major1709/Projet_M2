@@ -689,6 +689,74 @@ tenir compte des surcharges par binding. Un déploiement qui ne renseignerait qu
 l'amorçage fonctionnerait. Sans danger — le défaut va vers le refus — mais plus strict que
 nécessaire. Non corrigé ici.
 
+## Citations — 2026-08-16
+
+`AgentAnswer` ne transporte plus la provenance brute mais une liste de sources dédupliquées.
+
+### Un lien seulement quand il en existe un
+
+Une source ne porte d'URL que si la lecture a produit un `resource_reference`. Celui-ci est
+dérivé par le registre d'un **argument public obligatoire**, jamais relu depuis la réponse du
+fournisseur : une citation ne peut donc pas être redirigée par un serveur compromis.
+
+Un outil qui énumère au lieu de désigner — `getVisibleJiraProjects`, une recherche JQL — n'obtient
+aucun lien. La source existe et nomme l'outil, mais son URL vaut `None`. Fabriquer un lien
+plausible reviendrait à citer une page que personne n'a lue.
+
+### Deux identités pour dédupliquer
+
+Une ressource est identifiée par sa référence seule : le même ticket lu deux fois avec des champs
+différents est **une** source, pas deux — ce n'est pas deux choses qu'un lecteur peut ouvrir. Une
+collection, sans référence, est identifiée par la requête qui l'a produite : l'outil et l'empreinte
+de ses arguments. Deux recherches différentes restent deux sources ; la répétition de la même se
+replie.
+
+L'ordre est celui de la première consultation, et une répétition ne peut qu'ajouter un drapeau,
+jamais en retirer.
+
+### Ce qui n'est pas exposé, et pourquoi
+
+La provenance complète porte les empreintes de schéma et le `binding_fingerprint` : des faits sur
+la manière dont la lecture a été faite et contre quel tenant. Ils appartiennent à la trace
+d'audit, pas à une réponse remise à un appelant. Un test verrouille la liste exacte des champs
+d'une source.
+
+`source_complete` n'est **pas** remonté non plus, alors qu'il aurait été tentant de le faire. Le
+workflow de lecture le laisse toujours à faux, faute de schéma de sortie authentifié attestant
+qu'un corps est entier. Un champ constant ne porte aucune information mais se lit comme un signal,
+et « toutes les sources sont incomplètes » est une affirmation pire que le silence. Il y reviendra
+le jour où un fournisseur donnera de quoi le dériver.
+
+En revanche `truncated` est exposé, et varie : il dit que **notre** plafond d'observation a coupé
+le contenu avant que le modèle ne le voie. Distinct de `source_complete` — la lecture a réussi
+entièrement, la perte est la nôtre, et c'est autre chose à dire à un lecteur.
+
+### Sonde réelle
+
+```
+Question : « Que contient le ticket KAN-1 ? Resume-le en une phrase. »
+Reponse  : « un bug de priorite moyenne intitule "test", statut "A faire", sans description »
+Source   : getJiraIssue -> https://andrianalyfanny.atlassian.net/browse/KAN-1, tronquee=False
+```
+
+Une lecture indépendante de KAN-1 confirme `key: "KAN-1"` et `summary: "test"` : la citation
+désigne bien la ressource que la réponse décrit.
+
+## Dette technique
+
+- **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`
+  contient `atlassian_jira_bearer_token` et `atlassian_confluence_bearer_token` sous forme de
+  dossiers, créés comme points de montage par Docker. Sans conséquence — le déploiement passe par
+  le document OAuth renouvelable — mais un `MCP_GRANT_UNAVAILABLE` trompeur attend quiconque
+  pointera une configuration vers ces chemins.
+- **`validate_runtime_adapters` est plus strict que nécessaire sur Atlassian.** Elle exige le
+  fichier de jeton au niveau du provider sans tenir compte des surcharges par binding, donc un
+  déploiement ne renseignant que les fichiers Jira et Confluence serait refusé alors que
+  l'amorçage fonctionnerait. Le défaut va vers le refus, donc sans danger.
+- **Une réponse à `max_completion_tokens` trop bas échoue sans rien produire.** Le raisonnement
+  consomme le budget avant que la réponse ne commence ; observé à 400 jetons, résolu à 1 200. Le
+  plancher utile est très au-dessus du minimum accepté par le schéma, qui ne le reflète pas.
+
 ## Outillage
 
 `scripts/mcp-smoke.sh` sonde les trois surfaces — identité seule, puis Jira et Confluence qui
