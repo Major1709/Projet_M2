@@ -31,6 +31,10 @@ class LLMRequest(BaseModel):
 class ProposedToolCall(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    # The provider's handle for this call, echoed back on the result message so the
+    # model can tell which answer belongs to which request. Provider-supplied, so
+    # bounded and character-constrained by the adapter that reads it.
+    call_id: str = Field(min_length=1, max_length=128)
     tool_name: str
     action_class: ToolActionClass
     arguments: dict[str, Any]

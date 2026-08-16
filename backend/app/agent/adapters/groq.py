@@ -78,6 +78,11 @@ MAX_TEXT_CHARACTERS: Final = 200_000
 MAX_TOOL_CALLS: Final = 8
 MAX_TOOL_ARGUMENTS_CHARACTERS: Final = 20_000
 MAX_TOOL_NAME_CHARACTERS: Final = 200
+# The provider's own handle for a proposed call. An OpenAI-shaped endpoint requires
+# it back on the result message, so the orchestration loop cannot answer a call
+# without it -- which is why a tool call arriving without one is a malformed answer
+# rather than something to paper over with a generated identifier.
+MAX_TOOL_CALL_ID_CHARACTERS: Final = 128
 
 MIN_API_KEY_BYTES: Final = 16
 MAX_API_KEY_BYTES: Final = 4096
@@ -168,6 +173,18 @@ def _tool_calls_of(
         if not isinstance(function, dict):
             raise LLMInvalidResponse()
 
+        # Echoed back verbatim on the result message, so it is constrained to
+        # printable ASCII rather than merely bounded: a value carrying a newline or
+        # a control character would be replayed into the next request body.
+        call_id = raw_call.get("id")
+        if (
+            not isinstance(call_id, str)
+            or not call_id
+            or len(call_id) > MAX_TOOL_CALL_ID_CHARACTERS
+            or not all("\x21" <= character <= "\x7e" for character in call_id)
+        ):
+            raise LLMInvalidResponse()
+
         name = function.get("name")
         if not isinstance(name, str) or not name or len(name) > MAX_TOOL_NAME_CHARACTERS:
             raise LLMInvalidResponse()
@@ -197,6 +214,7 @@ def _tool_calls_of(
 
         calls.append(
             ProposedToolCall(
+                call_id=call_id,
                 tool_name=name,
                 # Imposed, never parsed. The provider has no say in the action class:
                 # this release performs reads only, and a model that returned

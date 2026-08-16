@@ -564,6 +564,67 @@ n'entre dans le conteneur qu'avec la boucle d'orchestration. Le câblage relève
 et c'est là que la réserve H5 se vérifiera en pratique. Un verdict `BOUNDED` pour un
 `max_steps` épuisé n'existe pas non plus, la boucle qui pourrait l'atteindre n'existant pas.
 
+## Boucle d'orchestration — 2026-08-16
+
+Le chaînon manquant : l'adaptateur Groq et le pipeline MCP existaient des deux côtés sans rien
+entre eux. `AgentReadWorkflow` enchaîne les tours — le modèle propose, le registre décide, le
+résultat repart au modèle — jusqu'à réponse ou épuisement de `max_steps`.
+
+### Ce que la boucle n'ajoute pas
+
+Aucune autorité. La propriété à préserver est que **supprimer ce module n'élargirait rien** : le
+catalogue montré au modèle est dérivé des schémas *publics* du registre, et chaque appel proposé
+repasse par `MCPReadWorkflow`, qui le ré-autorise et injecte les liaisons côté serveur. Deux tests
+le verrouillent — le catalogue est comparé champ à champ aux `public_input_schema`, et aucun
+argument de liaison (`cloudId`, `siteUrl`, `accessToken`) ne doit y apparaître, faute de quoi le
+modèle pourrait choisir un tenant, la seule chose qu'il ne doit jamais pouvoir faire.
+
+Le prompt système énonce que le contenu lu est de la donnée, jamais des instructions. C'est une
+atténuation, pas le contrôle : le contrôle est qu'un appel proposé ne peut être qu'une lecture
+d'une source déjà couverte par le jeton délégué.
+
+### Deux familles de refus
+
+C'est la décision structurante. Un refus **récupérable** retourne au modèle sous forme
+d'observation, et il se corrige : arguments hors schéma (`MCP_INPUT_REJECTED`), lecture refusée
+par la source (`MCP_REMOTE_TOOL_FAILURE`), réponse trop grosse (`MCP_RESPONSE_TOO_LARGE`).
+
+Tout le reste **arrête la boucle** : kill switch, outil non approuvé, grant absent, audit
+indisponible, DNS, schéma, quota, transport. Réessayer contre une porte fermée brûle le budget de
+jetons et masque le refus derrière une réponse vague.
+
+Le défaut est l'arrêt, et c'est le point : une erreur ajoutée plus tard à la taxonomie est fatale
+tant que personne n'a décidé du contraire, plutôt que confiée en silence à un modèle pour qu'il
+la contourne. Seuls le code et le `safe_message` — tous deux les nôtres — entrent dans
+l'observation, si bien qu'aucun texte fournisseur ne rejoint la transcription par un chemin
+d'erreur.
+
+### Un identifiant d'appel manquait
+
+`ProposedToolCall` ne portait pas le `tool_call_id` du fournisseur, qu'un endpoint compatible
+OpenAI exige sur chaque message de résultat. Ajouté et contraint aux ASCII imprimables plutôt que
+seulement borné : la valeur est réémise telle quelle dans le corps de la requête suivante, donc un
+retour à la ligne ou un caractère de contrôle y serait rejoué. Un appel sans identifiant est une
+réponse malformée, pas quelque chose à rattraper par un identifiant fabriqué.
+
+Le tour assistant réinjecté est **reconstruit** depuis les champs validés, non rejoué depuis le
+message brut : la transcription ne contient alors que ce qui a passé les contrôles de
+l'adaptateur, et rien que le fournisseur aurait envoyé sans qu'on le regarde.
+
+### Le budget dicte la forme
+
+Chaque tour renvoie la transcription entière, donc le coût croît avec le carré du nombre
+d'étapes. `max_steps` vaut 4 par défaut et les observations sont tronquées à 6 000 caractères. La
+troncature est **annoncée** dans l'observation : un modèle incapable de voir qu'il a reçu un
+fragment répondra comme s'il avait tout reçu. Les octets d'image ne repartent jamais — seule une
+référence, taille et empreinte.
+
+### Ce qui reste pour la tranche B
+
+Le câblage dans `bootstrap.py`, la route API et une sonde réelle. Rien de tout cela n'est encore
+branché : la boucle est éprouvée contre un fournisseur simulé, sans réseau. C'est au câblage que
+la réserve H5 se vérifiera en pratique, et que le plafond de jetons par minute se manifestera.
+
 ## Outillage
 
 `scripts/mcp-smoke.sh` sonde les trois surfaces — identité seule, puis Jira et Confluence qui

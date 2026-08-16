@@ -222,6 +222,7 @@ def test_proposed_tool_calls_are_recorded_with_their_action_class() -> None:
         response=a_response(
             tool_calls=(
                 ProposedToolCall(
+                    call_id="call_1",
                     tool_name="getJiraIssue",
                     action_class=ToolActionClass.READ,
                     arguments={"issueIdOrKey": "KAN-1"},
@@ -324,6 +325,7 @@ def test_one_correlation_id_ties_the_model_call_to_the_reads_it_caused() -> None
             response=a_response(
                 tool_calls=(
                     ProposedToolCall(
+                        call_id="call_1",
                         tool_name="getJiraIssue",
                         action_class=ToolActionClass.READ,
                         arguments={"issueIdOrKey": "KAN-1"},

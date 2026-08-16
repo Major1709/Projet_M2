@@ -14,6 +14,7 @@ from app.agent.adapters.groq import (
     MAX_RESPONSE_BYTES,
     MAX_TEXT_CHARACTERS,
     MAX_TOOL_ARGUMENTS_CHARACTERS,
+    MAX_TOOL_CALL_ID_CHARACTERS,
     MAX_TOOL_CALLS,
     MAX_TOOL_NAME_CHARACTERS,
     GroqLLMProvider,
@@ -374,6 +375,7 @@ async def test_a_mutation_returned_by_the_model_cannot_widen_its_authority(
             text="",
             tool_calls=[
                 {
+                    "id": "call_1",
                     "type": "function",
                     "function": {"name": "createJiraIssue", "arguments": "{}"},
                     # Whatever the provider claims here is ignored.
@@ -404,7 +406,11 @@ async def test_tool_arguments_that_are_not_an_object_are_refused(
         completion(
             text="",
             tool_calls=[
-                {"type": "function", "function": {"name": "getJiraIssue", "arguments": arguments}}
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "getJiraIssue", "arguments": arguments},
+                }
             ],
         )
     )
@@ -509,7 +515,11 @@ async def test_deeply_nested_tool_arguments_stay_inside_the_taxonomy(tmp_path: P
         completion(
             text="",
             tool_calls=[
-                {"type": "function", "function": {"name": "getJiraIssue", "arguments": nested}}
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "getJiraIssue", "arguments": nested},
+                }
             ],
         )
     )
@@ -536,7 +546,11 @@ async def test_a_tool_name_that_was_never_offered_is_refused(tmp_path: Path) -> 
         completion(
             text="",
             tool_calls=[
-                {"type": "function", "function": {"name": "createJiraIssue", "arguments": "{}"}}
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "createJiraIssue", "arguments": "{}"},
+                }
             ],
         )
     )
@@ -554,7 +568,11 @@ async def test_an_offered_tool_name_passes_the_boundary_check(tmp_path: Path) ->
         completion(
             text="",
             tool_calls=[
-                {"type": "function", "function": {"name": "getJiraIssue", "arguments": "{}"}}
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "getJiraIssue", "arguments": "{}"},
+                }
             ],
         )
     )
@@ -566,6 +584,56 @@ async def test_an_offered_tool_name_passes_the_boundary_check(tmp_path: Path) ->
     )
 
     assert response.tool_calls[0].tool_name == "getJiraIssue"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "call_id",
+    [
+        # Absent: the orchestration loop has to echo this back on the result
+        # message, so a call without one cannot be answered at all.
+        None,
+        "",
+        "c" * (MAX_TOOL_CALL_ID_CHARACTERS + 1),
+        # Replayed verbatim into the next request body, so a value carrying a
+        # newline or a control character is refused rather than merely bounded.
+        "call_1\ncall_2",
+        "call\x00_1",
+        "call 1",
+    ],
+)
+async def test_an_unusable_tool_call_id_is_refused(tmp_path: Path, call_id: Any) -> None:
+    call: dict[str, Any] = {
+        "type": "function",
+        "function": {"name": "getJiraIssue", "arguments": "{}"},
+    }
+    if call_id is not None:
+        call["id"] = call_id
+    provider = provider_for(tmp_path, json_handler(completion(text="", tool_calls=[call])))
+
+    with pytest.raises(LLMInvalidResponse):
+        await provider.generate(request=REQUEST, context=CONTEXT)
+
+
+@pytest.mark.anyio
+async def test_the_tool_call_id_is_carried_through(tmp_path: Path) -> None:
+    handler = json_handler(
+        completion(
+            text="",
+            tool_calls=[
+                {
+                    "id": "call_abc123",
+                    "type": "function",
+                    "function": {"name": "getJiraIssue", "arguments": "{}"},
+                }
+            ],
+        )
+    )
+    provider = provider_for(tmp_path, handler)
+
+    response = await provider.generate(request=REQUEST, context=CONTEXT)
+
+    assert response.tool_calls[0].call_id == "call_abc123"
 
 
 @pytest.mark.anyio
@@ -610,18 +678,32 @@ async def test_each_declared_tool_bound_is_enforced(
     value: None,
     anyio_backend: str,
 ) -> None:
-    call = {"type": "function", "function": {"name": "getJiraIssue", "arguments": "{}"}}
+    call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "getJiraIssue", "arguments": "{}"},
+    }
     if field == "too_many_calls":
         calls = [call] * (MAX_TOOL_CALLS + 1)
         expected: type[Exception] = LLMResponseTooLarge
     elif field == "name_too_long":
         long_name = "g" * (MAX_TOOL_NAME_CHARACTERS + 1)
-        calls = [{"type": "function", "function": {"name": long_name, "arguments": "{}"}}]
+        calls = [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": long_name, "arguments": "{}"},
+            }
+        ]
         expected = LLMInvalidResponse
     else:
         long_arguments = '{"k":"' + "v" * MAX_TOOL_ARGUMENTS_CHARACTERS + '"}'
         calls = [
-            {"type": "function", "function": {"name": "getJiraIssue", "arguments": long_arguments}}
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "getJiraIssue", "arguments": long_arguments},
+            }
         ]
         expected = LLMResponseTooLarge
 
