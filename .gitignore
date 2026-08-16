@@ -25,6 +25,10 @@ secrets/
 infra/secrets/
 infra/backups/
 
+# Agent tooling scratch state. Run files describe a session, not the project:
+# versioned, they read as current status long after the branch they name is gone.
+.codex-temp/
+
 # Editors and operating systems
 .vscode/
 .idea/
