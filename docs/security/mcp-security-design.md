@@ -1,8 +1,8 @@
 # Conception securite MCP, IAM et RAG
 
-**Statut :** proposition Sprint 0  
-**Perimetre :** plateforme web conversationnelle, orchestrateur, Groq, Jira MCP, Confluence MCP, Figma MCP et Knowledge MCP  
-**Date de reference :** 2026-08-03
+**Statut :** decisions Sprint 0 et contrat du pilote MCP en lecture seule
+**Perimetre :** plateforme web conversationnelle, orchestrateur, Groq, Jira MCP, Confluence MCP, Figma MCP et Knowledge MCP
+**Date de reference :** 2026-08-12
 
 ## 1. Objectif et invariants
 
@@ -115,7 +115,7 @@ Le `grant_handle` est opaque et ne contient pas le jeton. Un utilisateur ne peut
 
 ### 4.3 Flux OAuth
 
-**Decision D-IAM-01 :** utiliser Authorization Code avec PKCE, `state` et, pour OIDC, `nonce`. Valider exactement les URI de redirection. Refuser l'Implicit Grant et le Resource Owner Password Credentials Grant.
+**Decision D-IAM-01 :** utiliser Authorization Code avec PKCE `S256`, `state` et, pour OIDC, `nonce`. Valider exactement les URI de redirection et l'issuer attendu avant d'echanger le code. Refuser l'Implicit Grant et le Resource Owner Password Credentials Grant.
 
 **Decision D-IAM-02 :** demander les scopes minimaux, par fournisseur et par fonction. Les scopes d'ecriture sont obtenus uniquement quand une fonction d'ecriture est activee ; un scope ne remplace jamais la permission metier courante dans Jira, Confluence ou Figma.
 
@@ -123,7 +123,7 @@ Le `grant_handle` est opaque et ne contient pas le jeton. Un utilisateur ne peut
 
 ### 4.4 Jetons MCP et non-propagation naive
 
-Pour chaque MCP distant, le client MCP obtient un access token dont l'audience est l'URI canonique de ce serveur. Le serveur MCP valide `iss`, `aud`, `exp`, `nbf`, signature et scopes. Le client inclut le parametre OAuth `resource` dans les requetes d'autorisation et de token quand le profil MCP le requiert.
+Pour chaque MCP distant, le client MCP obtient un access token dont l'audience est l'URI canonique de ce serveur. Le serveur MCP valide `iss`, `aud`, `exp`, `nbf`, signature et scopes. Conformement a MCP `2026-07-28`, le client inclut toujours le parametre OAuth `resource`, identique a l'URI canonique du serveur MCP, dans les requetes d'autorisation et de token.
 
 Si un MCP appelle Jira, Confluence ou Figma, il agit comme client OAuth distinct de cette API. Il utilise un access token aval distinct, emis pour l'audience du fournisseur et rattache au grant du meme utilisateur.
 
@@ -143,9 +143,10 @@ Jeton utilisateur A != jeton utilisateur B
 
 ### 5.1 Allowlist et registre
 
-Le registre versionne de chaque outil contient :
+Le registre versionne de chaque outil est materialise par un paquet de contrat immutable. Il contient :
 
-- identifiant canonique, MCP, version et empreinte du schema ;
+- identifiant du serveur, editeur, endpoint canonique, transport et versions MCP autorisees ;
+- identifiant canonique de l'outil, version et empreintes SHA-256 des schemas d'entree et de sortie ;
 - description statique approuvee ;
 - categorie de risque ;
 - scopes et permissions sources requis ;
@@ -154,7 +155,13 @@ Le registre versionne de chaque outil contient :
 - politique d'approbation et de reauthentification ;
 - volume maximal, delai, taux et taille de resultat ;
 - caractere reversible, preconditions et mecanisme d'idempotence ;
-- proprietaire, date de revue et kill switch.
+- proprietaire, date de revue, version de politique et kill switch.
+
+Le catalogue renvoye par `tools/list` est compare au paquet de contrat mais ne le
+modifie jamais. Un outil inconnu est ignore et audite. Un outil attendu absent,
+renomme ou dont un schema differe est bloque jusqu'a une nouvelle qualification
+humaine. Les annotations MCP, notamment `readOnlyHint`, sont des indications non
+fiables et ne remplacent jamais la classification locale.
 
 **Decision D-TOOL-01 :** politique `default deny`. La decouverte dynamique MCP ne rend jamais automatiquement un nouvel outil accessible au LLM. Toute apparition, disparition ou modification de schema bloque l'outil jusqu'a revue et tests.
 
@@ -176,6 +183,161 @@ L'indexation RAG declenchee par le bouton de selection est une ecriture interne.
 ### 5.3 Exposition minimale au modele
 
 Le LLM ne voit, a chaque tour, que les outils necessaires a l'intention courante et deja permis pour le tenant. Les outils administratifs, de gestion des droits, de secrets, de configuration MCP et de purge globale ne sont jamais exposes au modele.
+
+### 5.4 Profil qualifie du pilote en lecture seule
+
+Le premier pilote utilise uniquement les serveurs distants officiels suivants :
+
+| Serveur | Endpoint canonique | Mode d'identite | Statut |
+|---|---|---|---|
+| Atlassian Rovo MCP GA | `https://mcp.atlassian.com/v1/mcp` | OAuth 2.1 par utilisateur | retenu pour Jira et Confluence Cloud |
+| Figma Remote MCP | `https://mcp.figma.com/mcp` | OAuth par utilisateur | retenu sous reserve d'admission du client |
+
+L'endpoint Atlassian Preview, notamment
+`https://mcp.atlassian.com/v1/mcp/preview`, est interdit. Ses outils et schemas
+peuvent changer sans stabilite suffisante pour une allowlist de production. Une
+URL de site Jira, Confluence ou Figma n'est jamais un endpoint MCP.
+
+La version protocolaire de reference est MCP `2026-07-28`, version finale publiee
+le 28 juillet 2026. Le transport distant est Streamable HTTP :
+
+- chaque message est un `POST` independant ;
+- le coeur du protocole est sans session et aucun `Mcp-Session-Id` n'est cree ;
+- `MCP-Protocol-Version`, `Mcp-Method` et, lorsque requis, `Mcp-Name` sont presents ;
+- les valeurs des en-tetes et du corps sont comparees et toute divergence est refusee ;
+- les reponses JSON et SSE liees a la requete respectent le meme budget de temps et de taille ;
+- aucun abonnement, sampling, prompt, elicitation ou chargement de ressource MCP n'est active dans le pilote.
+
+Une compatibilite avec `2025-11-25` ne peut etre activee que dans un paquet de
+contrat propre au serveur, apres qualification reelle. Aucun downgrade
+heuristique ou silencieux n'est autorise.
+
+#### 5.4.1 Allowlist Atlassian
+
+Seuls les outils suivants peuvent etre inscrits comme `READ` :
+
+```text
+atlassianUserInfo
+getAccessibleAtlassianResources
+getVisibleJiraProjects
+searchJiraIssuesUsingJql
+getJiraIssue
+getJiraIssueRemoteIssueLinks
+getConfluenceSpaces
+getPagesInConfluenceSpace
+getConfluencePage
+getConfluencePageDescendants
+searchConfluenceUsingCql
+```
+
+Les scopes demandes sont limites a ceux requis par ce profil :
+
+```text
+read:jira-work
+search:jira-work
+read:page:confluence
+read:space:confluence
+read:hierarchical-content:confluence
+search:confluence
+```
+
+Dans l'administration Atlassian, `Read` et `Search` sont autorises uniquement
+pour Jira et Confluence ; `Write` reste bloque. L'option qui appliquerait
+automatiquement une permission aux futures additions reste desactivee. Les
+outils d'ecriture, commentaires non requis, recherche d'utilisateurs, Compass,
+Jira Service Management, Bitbucket, Rovo, Teamwork Graph, ainsi que les outils
+generiques `discover` et `execute`, sont refuses par defaut.
+
+Les sites fournis pour le pilote sont deux hotes Atlassian Cloud distincts : un
+site Jira et un site Confluence. Ils sont traites comme deux liaisons de source
+potentiellement differentes. Le backend appelle
+`getAccessibleAtlassianResources`, presente les sites accessibles a l'utilisateur
+hors du contenu LLM, puis persiste le `cloudId` choisi dans le binding opaque. Un
+`cloudId`, un hote ou un compte transmis dans un prompt ou des arguments d'outil
+est refuse ; le gateway reinjecte exclusivement la valeur du binding serveur.
+
+#### 5.4.2 Allowlist Figma
+
+Seuls les outils suivants peuvent etre inscrits comme `READ` :
+
+```text
+whoami
+get_metadata
+get_design_context
+get_screenshot
+get_variable_defs
+```
+
+Le binding Figma contient le sujet authentifie, la cle du fichier approuve et le
+noeud ou sous-arbre autorise. Ces valeurs sont derivees cote serveur du lien
+selectionne puis normalisees ; le LLM ne peut ni changer de fichier ni elargir le
+sous-arbre. Pour le pilote, `nodeId` est obligatoire, y compris lorsque l'outil
+Figma le rend optionnel.
+
+Tous les autres outils sont refuses. En particulier :
+
+- `use_figma` est refuse en entier car il peut inspecter, creer, modifier et supprimer ;
+- `create_new_file`, `add_code_connect_map`, `send_code_connect_mappings`,
+  `generate_diagram`, `generate_figma_design` et `upload_assets` sont des mutations ;
+- `download_assets` est refuse car il renvoie des URL temporaires qui ajouteraient
+  un chemin de telechargement et d'exfiltration ;
+- `get_libraries`, `search_design_system`, `list_shader_effects` et
+  `list_shader_fills` elargissent la lecture au-dela du fichier connecte.
+
+Le serveur Figma n'accepte actuellement que les clients presents dans son
+catalogue. L'admission du backend Project Knowledge Assistant, ou la procedure
+officielle equivalente, est donc un blocage externe avant un test reel. La
+connexion d'un plugin de developpement deja admis ne vaut pas qualification du
+client produit.
+
+#### 5.4.3 Limites, SSRF et resultats
+
+Le profil pilote applique les limites maximales suivantes :
+
+```text
+connexion reseau              3 secondes
+appel MCP complet            30 secondes
+resultat structure ou texte   2 Mio
+image Figma                   8 Mio
+appels MCP par tour           3
+retry automatique             aucun
+```
+
+Les recherches Jira et Confluence imposent une pagination et une taille maximale
+dans leur schema local. Une reponse plus grande, compressee de facon abusive,
+mal formee ou hors schema est refusee, jamais tronquee silencieusement avant le
+controle de securite.
+
+Les endpoints sont des constantes admin sans userinfo, query string ni fragment.
+HTTPS et le port attendu sont obligatoires, les redirections sont desactivees et
+la resolution DNS refuse les destinations privees, loopback, link-local et
+metadata. La decouverte OAuth part uniquement de l'endpoint MCP fixe et chaque
+issuer est valide contre la configuration approuvee. Une URL renvoyee dans le
+contenu d'un outil reste une donnee non fiable et n'est jamais telechargee
+automatiquement.
+
+Le client verifie l'identifiant JSON-RPC, le type de contenu, la version
+protocolaire, le schema de sortie, les tailles, le MIME des images et la
+correlation avec la requete. Il traduit ensuite la reponse dans un modele interne
+minimal avec provenance. Le resultat MCP brut n'est transmis ni au LLM ni au
+frontend.
+
+#### 5.4.4 Audit des lectures
+
+Chaque lecture exige une trace append-only disponible avant l'appel. Une panne de
+l'audit bloque le pilote en echec ferme. La trace contient uniquement :
+
+```text
+date UTC, tenant, utilisateur, session et conversation
+binding fournisseur opaque
+serveur, outil, version MCP, version de politique et schema hash
+hash des arguments et correlation_id genere cote serveur
+decision, duree, taille, nombre d'objets et erreur normalisee
+```
+
+Elle ne contient jamais le payload, le contenu source, les prompts, les requetes
+JQL/CQL, les URL temporaires, les cookies, les jetons ou les en-tetes
+d'autorisation.
 
 ## 6. Interception et approbation des mutations
 
@@ -461,6 +623,8 @@ Le modele couvre un utilisateur malveillant ou trop curieux, un contenu source c
 12. **Secrets** : scans des logs, traces, erreurs, snapshots, prompts et frontend avec canary tokens ; zero occurrence.
 13. **Audit** : chaque mutation reconstitue proposition, controle, approbation, appel et resultat ; tentative de modification/suppression detectee.
 14. **Compte de service** : le service voit une ressource que l'utilisateur ne voit pas ; lecture, RAG et mutation utilisateur doivent etre refusees.
+15. **Transport MCP** : version non approuvee, en-tetes absents ou differents du corps, mauvaise correlation JSON-RPC, mauvais type de contenu, reponse trop grande et downgrade silencieux ; tous sont refuses.
+16. **Profil lecture seule** : outil inconnu, schema modifie, annotation `readOnlyHint` mensongere, `use_figma`, outil Preview, `cloudId` ou fichier fourni par le LLM et resultat contenant une URL active ; aucun appel interdit ni telechargement secondaire ne se produit.
 
 ### 16.2 Tests d'integration et preproduction
 
@@ -502,6 +666,11 @@ La procedure d'incident doit permettre de :
 7. Contenus externes et sorties LLM toujours non fiables.
 8. Filtrage RAG avant recherche et ACL sur chaque noeud du graphe.
 9. Mutations via compte de service bloquees sans preuve d'autorisation utilisateur fiable.
+10. Pilote distant limite aux endpoints GA officiels Atlassian et Figma ; endpoint Atlassian Preview interdit.
+11. Outils du pilote classes localement `READ` et inscrits dans les allowlists de la section 5.4 ; toute autre capacite est refusee.
+12. OAuth interactif par utilisateur, bindings source opaques et identifiants de site/fichier reconstruits cote serveur.
+13. MCP `2026-07-28` est la reference normative ; outils et schemas sont epingles par paquet de contrat.
+14. Aucun runner ou adaptateur de mutation n'est active pendant le pilote lecture seule.
 
 ## 19. Recommandations a confirmer
 
@@ -512,28 +681,54 @@ La procedure d'incident doit permettre de :
 5. mTLS ou identites de workload entre services internes ; egress reseau strict par MCP.
 6. Audit WORM/chainage cryptographique et coffre avec KMS/HSM.
 7. Webhooks de permissions/suppression completes par verification source a TTL court.
+8. Une compatibilite MCP anterieure a `2026-07-28` isolee dans un paquet de contrat par serveur, uniquement si la qualification fournisseur l'exige.
 
-## 20. Questions ouvertes
+## 20. Qualification et questions ouvertes
 
-Les questions marquees **bloquantes** doivent etre tranchees avant d'activer les MCP concernes :
+Les faits suivants sont qualifies pour le pilote :
 
-1. **Bloquante :** Jira et Confluence sont-ils Cloud ou Data Center, et quels flux OAuth/permissions sont reellement disponibles ?
-2. **Bloquante :** quels serveurs MCP exacts, versions, editeurs, transports et outils seront retenus ?
-3. **Bloquante :** chaque MCP supporte-t-il une delegation utilisateur, ou utilise-t-il un compte de service ?
-4. **Bloquante :** le Figma MCP peut-il reellement creer, modifier et supprimer les noeuds necessaires, avec quelle identite et quel audit ?
-5. Quel fournisseur OIDC, quelle topologie de tenants et quelles exigences MFA/step-up ?
-6. L'approbateur doit-il toujours etre l'auteur, ou certaines mutations exigent-elles une separation des devoirs ?
-7. Quelles durees de session, d'approbation, de cache de permissions, d'audit et de contenu RAG ?
-8. Quelles exigences de residence, classification, chiffrement et suppression des donnees ?
-9. Quels volumes, limites d'export, SLA, RTO/RPO et contraintes de cout Groq/embeddings ?
-10. Quels mecanismes source existent pour version/ETag, idempotence, corbeille et permission-check par ressource ?
-11. L'index RAG est-il partage dans un tenant avec ACL dynamiques ou partitionne par projet/espace ?
-12. Quelles donnees peuvent etre envoyees a Groq et au fournisseur d'embeddings selon les contrats de confidentialite ?
+1. Jira et Confluence sont des sites Atlassian Cloud, sur deux hotes distincts.
+2. Le serveur retenu est Atlassian Rovo MCP GA pour Jira et Confluence, et Figma Remote MCP pour Figma.
+3. La delegation est OAuth par utilisateur ; les API tokens et comptes partages ne sont pas un mode produit acceptable.
+4. Le pilote est strictement en lecture seule ; la capacite d'ecriture Figma reste hors perimetre.
+
+Les points suivants restent bloquants avant un GO reel :
+
+1. **Bloquante lecture :** quel fournisseur OIDC authentifie les utilisateurs de la plateforme et quel domaine de callback est enregistre ?
+2. **Bloquante lecture :** les deux `cloudId` Atlassian sont-ils visibles par le meme utilisateur pilote et les permissions admin `Read`/`Search` autorisees avec `Write` bloque ?
+3. **Bloquante lecture :** le client backend Project Knowledge Assistant est-il admis par Figma pour utiliser son serveur distant ?
+4. **Bloquante lecture :** quelles versions MCP sont effectivement negociees par chaque serveur et quelles sont les empreintes revues de leurs schemas reels ?
+5. Quelles durees de session, de grant, de cache de permissions, d'audit et de contenu RAG sont retenues au-dela des limites techniques du pilote ?
+6. Quelles exigences de residence, classification, chiffrement et suppression des donnees s'appliquent ?
+7. Quels volumes, SLA, RTO/RPO et contraintes de cout Groq/embeddings sont attendus ?
+8. L'index RAG est-il partage dans un tenant avec ACL dynamiques ou partitionne par projet/espace ?
+9. Quelles donnees peuvent etre envoyees a Groq et au fournisseur d'embeddings selon les contrats de confidentialite ?
+10. Pour une phase de mutation ulterieure, quels mecanismes source existent pour version/ETag, idempotence, corbeille et permission-check par ressource ?
+11. Pour une phase de mutation ulterieure, l'approbateur doit-il toujours etre l'auteur ou certaines actions exigent-elles une separation des devoirs ?
+
+### 20.1 Conditions avant GO reel du pilote
+
+1. Remplacer l'identite `dev_headers` par OIDC, session serveur et protection CSRF.
+2. Implementer les flux OAuth utilisateur, le broker de grants opaques et la revocation sans exposer les jetons.
+3. Enregistrer le domaine/callback du client, confirmer les deux bindings Atlassian et bloquer `Write` dans l'administration Atlassian.
+4. Obtenir l'admission Figma et lier explicitement le compte, le fichier et le noeud de test.
+5. Executer `tools/list` authentifie en sandbox, revoir les schemas, construire les paquets de contrat et en approuver les empreintes.
+6. Demonstrer les tests de transport, default deny, schema change, SSRF, OAuth mix-up, isolation tenant, revocation, timeout, resultat hostile, audit et absence de secret.
+7. Conserver les kill switches coupes par defaut, les activer serveur par serveur et tenant par tenant apres verdict QA et revue Securite.
 
 ## 21. References normatives et guides
 
-- [MCP Authorization, specification 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
+- [MCP Authorization, specification 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
+- [MCP Streamable HTTP, specification 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+- [MCP Tools, specification 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)
 - [MCP Security Best Practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)
+- [Atlassian Rovo MCP overview](https://developer.atlassian.com/cloud/rovo-mcp/)
+- [Atlassian Rovo MCP supported tools](https://support.atlassian.com/atlassian-rovo-mcp-server/docs/supported-tools/)
+- [Atlassian Rovo MCP permissions](https://support.atlassian.com/security-and-access-policies/docs/Configure-Atlassian-Rovo-MCP-server-permission/)
+- [Atlassian Rovo MCP audit](https://support.atlassian.com/security-and-access-policies/docs/monitor-atlassian-rovo-mcp-server-activity/)
+- [Figma Remote MCP installation](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/)
+- [Figma MCP tools](https://developers.figma.com/docs/figma-mcp-server/tools-and-prompts/)
+- [Figma MCP rate limits and access](https://developers.figma.com/docs/figma-mcp-server/rate-limits-access/)
 - [RFC 9700 - Best Current Practice for OAuth 2.0 Security](https://www.rfc-editor.org/rfc/rfc9700.html)
 - [RFC 8707 - Resource Indicators for OAuth 2.0](https://www.rfc-editor.org/rfc/rfc8707.html)
 - [RFC 9728 - OAuth 2.0 Protected Resource Metadata](https://www.rfc-editor.org/rfc/rfc9728.html)
@@ -541,4 +736,4 @@ Les questions marquees **bloquantes** doivent etre tranchees avant d'activer les
 - [OWASP LLM Prompt Injection Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html)
 - [OWASP LLM06:2025 Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/)
 
-La version finale de la specification MCP doit etre revalidee au debut de l'implementation. La version `2025-11-25` est la derniere version finale identifiee a la date de ce document ; une release candidate publiee en juillet 2026 ne doit pas etre traitee comme normative sans decision explicite.
+MCP `2026-07-28` est une version finale, et non une release candidate. Sa compatibilite effective avec chaque endpoint fournisseur et les schemas observes reste qualifiee et epinglee par paquet de contrat avant activation.

@@ -1,0 +1,44 @@
+# Jetons Atlassian auto-renouveles, developpement uniquement.
+#
+# Remplace la saisie manuelle d'un jeton porteur par un document de credentials
+# qui porte aussi le refresh_token. Le courtier echange lui-meme un jeton expire
+# contre un jeton frais : on autorise une fois par site, plus jamais ensuite.
+#
+# Usage (remplace compose.atlassian-sites.yaml) :
+#   docker compose -f compose.yaml \
+#                  -f compose.atlassian.yaml \
+#                  -f compose.atlassian-bindings.yaml \
+#                  -f compose.atlassian-oauth.yaml up -d
+#
+# Prerequis : creer les deux documents avec le script d'import, qui lit le cache
+# de mcp-remote apres un flux de consentement et n'affiche aucune valeur :
+#
+#   python scripts/mcp_credentials_import.py \
+#          infra/secrets/dev/atlassian-credentials/jira.json
+#
+# A relancer une fois par site, apres avoir vide ~/.mcp-auth pour que l'ecran de
+# choix du site reapparaisse.
+#
+# Pourquoi un montage et non un secret `file:` : un secret est copie en lecture
+# seule a la creation du conteneur. Le renouvellement doit reecrire le document,
+# car Atlassian fait tourner le refresh_token a chaque echange -- perdre le
+# nouveau ramenerait a la re-autorisation manuelle. Un montage lecture-ecriture
+# est donc necessaire, et il evite aussi le `--force-recreate` apres rotation.
+#
+# atlassian_bearer_token reste monte par compose.atlassian.yaml et doit toujours
+# EXISTER en tant que fichier, sinon Docker cree un repertoire a sa place. Son
+# contenu n'est plus lu des lors que PKA_MCP_ATLASSIAN_CREDENTIALS_FILE est defini.
+
+services:
+  api:
+    environment:
+      # Un seul document : Jira et Confluence vivent sur le meme site, donc un
+      # jeton unique couvre les deux liaisons. Les deux surcharges par liaison
+      # heritent de cette valeur quand elles ne sont pas definies.
+      #
+      # Sur deux sites, ajouter un document par site et decommenter :
+      #   PKA_MCP_ATLASSIAN_JIRA_CREDENTIALS_FILE: /run/atlassian-credentials/jira.json
+      #   PKA_MCP_ATLASSIAN_CONFLUENCE_CREDENTIALS_FILE: /run/atlassian-credentials/confluence.json
+      PKA_MCP_ATLASSIAN_CREDENTIALS_FILE: /run/atlassian-credentials/atlassian.json
+    volumes:
+      - ${SECRETS_DIR:-./secrets/dev}/atlassian-credentials:/run/atlassian-credentials:rw

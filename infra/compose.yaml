@@ -10,44 +10,47 @@ x-backend-build: &backend-build
   context: ../backend
   dockerfile: Dockerfile
 
+x-database-environment: &database-environment
+  PKA_DATABASE_HOST: postgres
+  PKA_DATABASE_PORT: "5432"
+  PKA_DATABASE_NAME: ${POSTGRES_DB:-projet_m2}
+  PKA_DATABASE_USER: ${POSTGRES_USER:-projet_m2}
+  PKA_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+  PKA_DATABASE_POOL_SIZE: "${DATABASE_POOL_SIZE:-10}"
+  PKA_DATABASE_MAX_OVERFLOW: "${DATABASE_MAX_OVERFLOW:-20}"
+
 x-backend-environment: &backend-environment
+  <<: *database-environment
   APP_ENV: ${APP_ENV:-development}
   PKA_ENVIRONMENT: ${APP_ENV:-development}
-  PKA_REPOSITORY_BACKEND: memory
+  PKA_REPOSITORY_BACKEND: postgres
   PKA_AUTH_MODE: dev_headers
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   TZ: ${TZ:-UTC}
-  DATABASE_HOST: postgres
-  DATABASE_PORT: "5432"
-  DATABASE_NAME: ${POSTGRES_DB:-projet_m2}
-  DATABASE_USER: ${POSTGRES_USER:-projet_m2}
-  DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
-  POSTGRES_POOL_SIZE: ${POSTGRES_POOL_SIZE:-10}
-  POSTGRES_MAX_OVERFLOW: ${POSTGRES_MAX_OVERFLOW:-20}
   REDIS_HOST: redis
   REDIS_PORT: "6379"
   REDIS_DB: ${REDIS_DB:-0}
   REDIS_PASSWORD_FILE: /run/secrets/redis_password
-  GROQ_API_BASE_URL: ${GROQ_API_BASE_URL:-https://api.groq.com/openai/v1}
-  GROQ_API_KEY_FILE: /run/secrets/groq_api_key
-  GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+  # No base URL: the Groq endpoint is pinned in the adapter. A configurable
+  # destination is a lever an edited environment file can pull, and it would carry
+  # the API key to wherever it was pointed.
+  PKA_LLM_GROQ_ENABLED: ${PKA_LLM_GROQ_ENABLED:-false}
+  PKA_LLM_GROQ_API_KEY_FILE: /run/secrets/groq_api_key
+  PKA_LLM_GROQ_MODEL: ${PKA_LLM_GROQ_MODEL:-qwen/qwen3.6-27b}
   EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
   EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
   TOKEN_ENCRYPTION_KEY_FILE: /run/secrets/token_encryption_key
   SESSION_SIGNING_KEY_FILE: /run/secrets/session_signing_key
   OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-https://identity.example.invalid}
   OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-projet-m2-web}
-  JIRA_MCP_URL: ${JIRA_MCP_URL:-https://jira-mcp.example.invalid/mcp}
-  CONFLUENCE_MCP_URL: ${CONFLUENCE_MCP_URL:-https://confluence-mcp.example.invalid/mcp}
-  FIGMA_MCP_URL: ${FIGMA_MCP_URL:-https://figma-mcp.example.invalid/mcp}
-  MCP_READ_ENABLED: ${MCP_READ_ENABLED:-false}
-  MCP_MUTATIONS_ENABLED: ${MCP_MUTATIONS_ENABLED:-false}
-  JIRA_MCP_ENABLED: ${JIRA_MCP_ENABLED:-false}
-  CONFLUENCE_MCP_ENABLED: ${CONFLUENCE_MCP_ENABLED:-false}
-  FIGMA_MCP_ENABLED: ${FIGMA_MCP_ENABLED:-false}
-  FIGMA_WRITE_ENABLED: ${FIGMA_WRITE_ENABLED:-false}
+  PKA_MCP_READS_ENABLED: ${PKA_MCP_READS_ENABLED:-false}
+  PKA_MCP_MUTATIONS_ENABLED: "false"
+  PKA_MCP_ATLASSIAN_ENABLED: ${PKA_MCP_ATLASSIAN_ENABLED:-false}
+  PKA_MCP_JIRA_ENABLED: ${PKA_MCP_JIRA_ENABLED:-false}
+  PKA_MCP_CONFLUENCE_ENABLED: ${PKA_MCP_CONFLUENCE_ENABLED:-false}
+  PKA_MCP_FIGMA_ENABLED: ${PKA_MCP_FIGMA_ENABLED:-false}
+  PKA_MCP_GRANT_BACKEND: ${PKA_MCP_GRANT_BACKEND:-disabled}
   MAX_AGENT_STEPS: ${MAX_AGENT_STEPS:-12}
-  MAX_MCP_CALLS_PER_TURN: ${MAX_MCP_CALLS_PER_TURN:-8}
   OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
   OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
@@ -244,15 +247,12 @@ services:
     image: ${BACKEND_IMAGE:-projet-m2-backend:local}
     build: *backend-build
     restart: "no"
-    command: [alembic, upgrade, head]
+    command: [python, -m, alembic, upgrade, head]
     environment:
-      APP_ENV: ${APP_ENV:-development}
+      <<: *database-environment
+      PKA_ENVIRONMENT: ${APP_ENV:-development}
+      PKA_REPOSITORY_BACKEND: postgres
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_HOST: postgres
-      DATABASE_PORT: "5432"
-      DATABASE_NAME: ${POSTGRES_DB:-projet_m2}
-      DATABASE_USER: ${POSTGRES_USER:-projet_m2}
-      DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
     secrets:
       - postgres_password
     depends_on:

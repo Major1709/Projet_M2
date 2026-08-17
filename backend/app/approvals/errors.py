@@ -10,6 +10,11 @@ class ProposalNotFound(ApprovalError):
         super().__init__(f"Action proposal {proposal_id} was not found")
 
 
+class ProposalConversationNotFound(ApprovalError):
+    def __init__(self) -> None:
+        super().__init__("Conversation not found")
+
+
 class VersionConflict(ApprovalError):
     def __init__(self, *, expected: int, actual: int) -> None:
         super().__init__(f"Expected proposal version {expected}, current version is {actual}")

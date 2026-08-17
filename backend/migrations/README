@@ -1,0 +1,6 @@
+Alembic migration environment for the Project Knowledge Assistant backend.
+
+Schema upgrades must remain compatible with the previous application version.
+Data-destructive downgrades are intentionally unsupported; use an application
+rollback while the schema remains expanded, or follow the approved restore
+procedure documented in infra/README.md.

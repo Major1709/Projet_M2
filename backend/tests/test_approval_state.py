@@ -14,8 +14,14 @@ from app.approvals import (
     InvalidTransition,
     VersionConflict,
 )
-from app.approvals.adapters.memory import InMemoryActionProposalRepository
+from app.approvals.adapters.memory import (
+    InMemoryActionProposalRepository,
+    InMemoryApprovalUnitOfWork,
+)
+from app.approvals.errors import ProposalConversationNotFound
 from app.audit.adapters.memory import InMemoryAuditSink
+from app.conversations.adapters.memory import InMemoryConversationRepository
+from app.conversations.domain import Conversation
 from app.core.identity import SecurityContext
 from app.mcp import (
     MCPExecutionResult,
@@ -24,10 +30,12 @@ from app.mcp import (
     ToolActionClass,
 )
 
+CONVERSATION_ID = uuid4()
+
 
 def make_command(payload: dict[str, Any] | None = None) -> ActionProposalCreate:
     return ActionProposalCreate(
-        conversation_id=uuid4(),
+        conversation_id=CONVERSATION_ID,
         source_system=SourceSystem.CONFLUENCE,
         tool_name="confluence.create_page",
         action_class=ToolActionClass.CREATE,
@@ -49,36 +57,46 @@ def setup() -> tuple[
     InMemoryAuditSink,
     SecurityContext,
 ]:
-    repository = InMemoryActionProposalRepository()
-    audit = InMemoryAuditSink()
+    unit_of_work = InMemoryApprovalUnitOfWork()
+    repository = unit_of_work.proposals
+    audit = unit_of_work.audit
     context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
-    return ApprovalWorkflow(repository, audit), repository, audit, context
+    conversations = InMemoryConversationRepository()
+    conversations.add(
+        Conversation(
+            id=CONVERSATION_ID,
+            tenant_id=context.tenant_id,
+            owner_user_id=context.user_id,
+        )
+    )
+    return ApprovalWorkflow(unit_of_work, conversations), repository, audit, context
 
 
 def test_approval_requires_expected_version_and_consumes_token(setup: tuple) -> None:
     service, _, _, context = setup
-    proposal = service.propose(make_command(), context)
-    assert proposal.decision_token is not None
+    issued = service.propose(make_command(), context)
+    proposal = issued.proposal
+    assert proposal.decision_token_hash is not None
 
     approved = service.approve(
         proposal.id,
         ActionDecision(
             expected_version=proposal.version,
-            decision_token=proposal.decision_token,
+            decision_token=issued.decision_token,
         ),
         context,
     )
 
     assert approved.state == ActionProposalState.APPROVED
     assert approved.version == 2
-    assert approved.decision_token is None
+    assert approved.decision_token_hash is None
 
     with pytest.raises(InvalidTransition):
         service.approve(
             proposal.id,
             ActionDecision(
                 expected_version=proposal.version,
-                decision_token=proposal.decision_token,
+                decision_token=issued.decision_token,
             ),
             context,
         )
@@ -86,14 +104,14 @@ def test_approval_requires_expected_version_and_consumes_token(setup: tuple) -> 
 
 def test_optimistic_conflict_does_not_overwrite_newer_state(setup: tuple) -> None:
     service, _, _, context = setup
-    proposal = service.propose(make_command(), context)
-    assert proposal.decision_token is not None
+    issued = service.propose(make_command(), context)
+    proposal = issued.proposal
 
     service.reject(
         proposal.id,
         ActionDecision(
             expected_version=proposal.version,
-            decision_token=proposal.decision_token,
+            decision_token=issued.decision_token,
             reason="Not ready",
         ),
         context,
@@ -104,7 +122,7 @@ def test_optimistic_conflict_does_not_overwrite_newer_state(setup: tuple) -> Non
             proposal.id,
             ActionDecision(
                 expected_version=proposal.version,
-                decision_token=proposal.decision_token,
+                decision_token=issued.decision_token,
             ),
             context,
         )
@@ -112,7 +130,7 @@ def test_optimistic_conflict_does_not_overwrite_newer_state(setup: tuple) -> Non
 
 def test_repository_detects_a_stale_direct_replacement(setup: tuple) -> None:
     service, repository, _, context = setup
-    proposal = service.propose(make_command(), context)
+    proposal = service.propose(make_command(), context).proposal
     changed = proposal.model_copy(
         update={"state": ActionProposalState.REJECTED, "version": 2}
     )
@@ -125,28 +143,69 @@ def test_repository_detects_a_stale_direct_replacement(setup: tuple) -> None:
         repository.replace(proposal=stale, expected_version=1)
 
 
+def test_proposal_and_audit_roll_back_together(monkeypatch: pytest.MonkeyPatch) -> None:
+    unit_of_work = InMemoryApprovalUnitOfWork()
+    conversations = InMemoryConversationRepository()
+    context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
+    conversations.add(
+        Conversation(
+            id=CONVERSATION_ID,
+            tenant_id=context.tenant_id,
+            owner_user_id=context.user_id,
+        )
+    )
+    service = ApprovalWorkflow(unit_of_work, conversations)
+    append = unit_of_work.audit.append
+
+    def fail_after_append(event: Any) -> None:
+        append(event)
+        raise RuntimeError("simulated audit failure")
+
+    monkeypatch.setattr(unit_of_work.audit, "append", fail_after_append)
+
+    with pytest.raises(RuntimeError, match="simulated audit failure"):
+        service.propose(make_command(), context)
+
+    assert unit_of_work.proposals.snapshot() == ()
+    assert unit_of_work.audit.snapshot() == ()
+
+
+def test_proposal_requires_an_owned_conversation() -> None:
+    unit_of_work = InMemoryApprovalUnitOfWork()
+    context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
+    service = ApprovalWorkflow(unit_of_work, InMemoryConversationRepository())
+
+    with pytest.raises(ProposalConversationNotFound, match="Conversation not found"):
+        service.propose(make_command(), context)
+
+    assert unit_of_work.proposals.snapshot() == ()
+
+
 def test_revision_supersedes_snapshot_and_requires_new_approval(setup: tuple) -> None:
     service, _, _, context = setup
-    original = service.propose(make_command(), context)
-    assert original.decision_token is not None
+    original_issue = service.propose(make_command(), context)
+    original = original_issue.proposal
 
-    superseded, replacement = service.revise(
+    revision_issue = service.revise(
         original.id,
         ActionRevision(
             expected_version=1,
-            decision_token=original.decision_token,
+            decision_token=original_issue.decision_token,
             target=original.target,
             payload={"title": "Epic paiement v2", "body": "Nouveau contenu"},
             reason="Clarify the story",
         ),
         context,
     )
+    superseded = revision_issue.superseded
+    replacement = revision_issue.replacement
 
     assert superseded.state == ActionProposalState.SUPERSEDED
     assert replacement.state == ActionProposalState.PENDING_APPROVAL
     assert replacement.supersedes_id == original.id
     assert replacement.payload_hash != original.payload_hash
-    assert replacement.decision_token is not None
+    assert replacement.decision_token_hash is not None
+    assert revision_issue.decision_token != original_issue.decision_token
 
 
 class RecordingGateway:
@@ -168,7 +227,7 @@ class AllowPermissionVerifier:
 
 def test_mcp_mutation_cannot_run_before_approval(setup: tuple) -> None:
     service, repository, audit, context = setup
-    proposal = service.propose(make_command(), context)
+    proposal = service.propose(make_command(), context).proposal
     gateway = RecordingGateway()
     executor = ApprovedMutationRunner(
         repository=repository,
@@ -190,13 +249,13 @@ def test_mcp_mutation_cannot_run_before_approval(setup: tuple) -> None:
 
 def test_approved_mutation_is_reauthorized_then_executed(setup: tuple) -> None:
     service, repository, audit, context = setup
-    proposal = service.propose(make_command(), context)
-    assert proposal.decision_token is not None
+    issued = service.propose(make_command(), context)
+    proposal = issued.proposal
     approved = service.approve(
         proposal.id,
         ActionDecision(
             expected_version=proposal.version,
-            decision_token=proposal.decision_token,
+            decision_token=issued.decision_token,
         ),
         context,
     )
