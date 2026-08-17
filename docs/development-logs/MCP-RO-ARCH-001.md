@@ -1009,6 +1009,57 @@ prouvé l'est par tests — 21 côté frontend, dont la forme exacte de la requ�
 statuts et les deux refus ; 12 côté backend pour CORS. Le parcours `recherche → lecture → réponse
 citée` reste par ailleurs bloqué par le quota du palier gratuit, comme consigné plus haut.
 
+## Phase 0 : la chaîne prouvée jusqu'à l'avant-dernier appel — 2026-08-17
+
+Première exécution réelle de bout en bout, `correlation_id` `phase0-20260817T192007Z`. Six
+événements d'audit, tous sous le même identifiant :
+
+| # | Événement | Durée | Contenu |
+|---|---|---|---|
+| 1 | `LLM_INVOCATION_AUTHORIZED` | — | 15 outils exposés, empreinte du prompt |
+| 2 | `LLM_INVOCATION_COMPLETED` | 6 046 ms | Choisit `getJiraIssue`, `text_characters: 0` |
+| 3 | `MCP_READ_AUTHORIZED` | — | jira / `getJiraIssue`, `SPEC-MCP-RO-001-r2` |
+| 4 | `MCP_READ_COMPLETED` | 9 448 ms | Lecture Jira réelle, protocole `2025-11-25` |
+| 5 | `LLM_INVOCATION_AUTHORIZED` | — | Second appel, transcript à 4 messages |
+| 6 | `LLM_INVOCATION_REFUSED` | 607 ms | `LLM_RATE_LIMITED` |
+
+**Ce qui est désormais prouvé :** question → sélection d'outil → lecture Jira réelle. Le modèle est
+allé directement à `getJiraIssue` sans énumérer les projets, ce qui confirme que nommer le projet
+dans la question évite l'étape d'énumération et raccourcit la chaîne d'un appel.
+
+**Ce qui ne l'est pas :** la synthèse finale citée, refusée pour épuisement de quota au dernier
+appel — un budget, pas un défaut. Et l'aller-retour depuis un vrai navigateur : la requête a été
+émise par `curl` avec l'en-tête `Origin`, ce qui exerce la politique CORS mais pas le client.
+
+**CORS vérifié dans les deux sens.** Origine déclarée : `200` avec
+`access-control-allow-origin` et les deux en-têtes d'identité admis. Origine inconnue : `400`
+**sans** l'en-tête d'autorisation, donc bloquée par le navigateur. `allow_credentials` reste absent.
+
+### Trois variables de configuration ne servaient à rien
+
+Les settings utilisent `env_prefix="PKA_"` avec `extra="ignore"` : toute variable sans ce préfixe
+est ignorée en silence.
+
+- `BACKEND_CORS_ORIGINS` n'a jamais été lue. Le seul levier réel, `PKA_FRONTEND_ORIGINS`, était
+  **absent** du `compose` et du `.env` — donc aucun middleware CORS n'était installé.
+- `MAX_AGENT_STEPS=12` laissait croire à un plafond de douze étapes. Le vrai est
+  `DEFAULT_MAX_STEPS = 4`, en dur. Supprimée.
+- `EMBEDDING_MODEL=BAAI/bge-m3` contredisait la décision prise le même jour. Alignée sur
+  `intfloat/multilingual-e5-base`, avec la mention explicite qu'aucun code ne la lit encore.
+
+### L'image déployée avait plusieurs tranches de retard
+
+Le conteneur `api` qui tournait n'exposait ni `/api/agent/questions` ni la politique CORS : son
+image précédait toute la tranche d'orchestration. « La pile tourne » ne disait donc rien de ce
+qu'elle servait. Reconstruite avant la sonde.
+
+### Le corpus Jira est vide
+
+`getVisibleJiraProjects` retourne un seul projet, `KAN`, contenant un seul ticket, `KAN-1`, un bug
+intitulé « test ». Suffisant pour prouver une lecture et une citation ; **insuffisant pour
+démontrer un rapprochement sémantique**, qui exige des tickets décrivant des sujets voisins avec
+des formulations différentes. C'est un prérequis de la phase 3, à traiter avant elle et non pendant.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`
