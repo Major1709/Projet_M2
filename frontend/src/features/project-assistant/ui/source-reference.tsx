@@ -1,7 +1,8 @@
 import type { SourceReference as Source } from "../domain/models";
 import { LinkIcon } from "./icons";
 
-const systemLabels = {
+const systemLabels: Record<Source["system"], string> = {
+  atlassian: "Atlassian",
   jira: "Jira",
   confluence: "Confluence",
   figma: "Figma",

@@ -989,6 +989,10 @@ a.source-reference:hover {
   place-items: center;
 }
 
+.source-mark--atlassian {
+  background: #1c4f9c;
+}
+
 .source-mark--jira {
   background: #2f67bd;
 }
