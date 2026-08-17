@@ -840,10 +840,16 @@ def test_global_read_budget_covers_list_and_call(
 ) -> None:
     import app.mcp.read_workflow as read_workflow
 
-    monkeypatch.setattr(read_workflow, "MCP_READ_BUDGET_SECONDS", 0.02)
+    # The budget has to outlast the listing and expire during the call, otherwise
+    # this stops testing that one deadline covers both and starts testing that a
+    # listing can time out. The ratio is what matters, not the magnitude, so the
+    # values are large enough that scheduling noise on a loaded machine cannot
+    # reorder them: 0.02 against 0.015 left five milliseconds of margin and failed
+    # in a full-suite run.
+    monkeypatch.setattr(read_workflow, "MCP_READ_BUDGET_SECONDS", 0.6)
     workflow, _, session = workflow_for(SourceSystem.FIGMA, "getFigmaFile")
-    session.list_delay = 0.015
-    session.call_delay = 0.015
+    session.list_delay = 0.2
+    session.call_delay = 0.6
 
     with pytest.raises(MCPCallTimeout):
         run_call(workflow, source_system=SourceSystem.FIGMA, tool_name="getFigmaFile")
