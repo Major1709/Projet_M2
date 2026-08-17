@@ -948,6 +948,67 @@ Un seul exemplaire pour les trois adaptateurs, pour la raison déjà écrite en 
 deux copies d'un contrôle d'adresse font deux endroits à affaiblir, et le second est celui que
 personne ne relit.
 
+## La passerelle branchée sur le backend — 2026-08-17
+
+Le frontend parlait jusqu'ici à `demoAssistantGateway`, un adaptateur qui attend 550 ms et renvoie
+un texte fixe. La passerelle elle-même — `ProjectAssistantGateway` — est un port de trois méthodes :
+`sendMessage`, `indexRequests`, `decideAction`. **Une seule des trois a une contrepartie serveur**,
+et c'est le fait structurant de cette tranche.
+
+`createHttpAssistantGateway` appelle `POST /api/agent/questions` avec `X-Tenant-ID` et `X-User-ID`,
+et projette `AgentAnswer` en `ChatMessage`. Trois décisions valent d'être écrites :
+
+- **Le `correlation_id` devient l'identifiant du message.** Il est généré côté navigateur, envoyé
+  dans le corps, et conservé comme `id`. C'est lui qui relie une réponse affichée à ses lectures
+  dans la trace d'audit : un `Date.now()` aurait été unique sans être retrouvable.
+- **`confidence` et `inferred` restent vides.** Le modèle `SourceReference` les déclare, la maquette
+  les affiche sous la forme « IA · 87 % », et le backend ne produit ni l'un ni l'autre — ses
+  citations viennent de la provenance des lectures réellement effectuées. Les remplir d'une valeur
+  plausible aurait affiché une mesure que rien ne mesure. Même raisonnement que pour
+  `source_complete`, écarté d'`AgentSource` pour la même raison.
+- **`truncated` est affiché**, dans `location`, parce que c'est la seule information qu'un lecteur ne
+  peut pas déduire du lien : la réponse a été formée sur un fragment.
+
+`SourceSystem` gagne `"atlassian"`. Le backend l'émet lorsqu'une lecture est passée par le serveur
+MCP Atlassian sans que l'outil désigne Jira ou Confluence ; le rabattre sur l'un des deux aurait
+nommé un produit que personne n'a vérifié.
+
+**Les deux autres méthodes refusent au lieu de simuler.** `indexRequests` n'a aucune contrepartie —
+il n'existe pas d'index, les lectures sont pilotées par les recherches du modèle — et un succès
+fabriqué aurait marqué les demandes `INDEXED` dans le navigateur. `decideAction` a bien une API
+d'approbations, mais elle décide sur des propositions créées par le serveur, et ce build n'en
+produit aucune : les mutations sont désactivées. Un `APPROVED` affiché aurait montré une décision
+enregistrée nulle part.
+
+Le hook distingue désormais un `AssistantGatewayError` — un refus déjà rédigé pour le lecteur, qui
+dit quoi faire — d'une exception quelconque, dont le message est écrit pour un développeur et ne
+doit pas entrer dans la conversation. Les statuts sont traduits un par un : 429 « réessayez dans une
+minute », 413 « reformulez plus court, attendre ne changera rien », 503 « l'assistant refuse de lire
+sans pouvoir consigner ». Le `detail.message` du backend n'est jamais affiché : il est écrit pour un
+opérateur et peut citer le fournisseur.
+
+### CORS, ajouté parce que sans lui rien ne part
+
+Le navigateur refusait la requête avant de l'émettre : en-têtes personnalisés, donc préflight, donc
+CORS obligatoire. `PKA_FRONTEND_ORIGINS` est **vide par défaut**, et le middleware n'est alors pas
+installé du tout. Origines exactes uniquement, ni joker ni expression régulière — les en-têtes
+d'identité sont le locataire, donc une origine autorisée à les envoyer est une origine autorisée à
+choisir un tenant. `allow_credentials` reste faux, HTTP simple n'est toléré que sur `localhost`, et
+une valeur non conforme est refusée à la construction : un joker accepté ici ne se découvrirait
+qu'en constatant qu'une page que personne n'a déployée appelle l'API avec son propre tenant.
+
+Le point de composition est unique : `ProjectAssistantScreen` choisit l'adaptateur selon
+`NEXT_PUBLIC_ASSISTANT_API_URL`, et retombe sur la démonstration si les trois variables ne sont pas
+toutes présentes — un build sans backend ne doit pas proposer un assistant qui échoue à chaque
+message. Le tenant et l'utilisateur viennent de l'environnement parce que ce build n'authentifie
+personne : c'est le mode `dev_headers`, que les settings du backend interdisent en production. Cette
+configuration ne peut donc pas être déployée telle quelle, et la couture à remplacer est là.
+
+**Non vérifié en réel :** aucun aller-retour navigateur → backend → Groq n'a été joué. Ce qui est
+prouvé l'est par tests — 21 côté frontend, dont la forme exacte de la requête, la traduction des six
+statuts et les deux refus ; 12 côté backend pour CORS. Le parcours `recherche → lecture → réponse
+citée` reste par ailleurs bloqué par le quota du palier gratuit, comme consigné plus haut.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`
