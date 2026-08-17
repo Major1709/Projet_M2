@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -20,6 +21,14 @@ class Settings(BaseSettings):
     environment: Literal["development", "test", "production"] = "development"
     repository_backend: Literal["memory", "postgres"] = "memory"
     auth_mode: Literal["dev_headers"] = "dev_headers"
+    # Browser origins allowed to call the API cross-origin. Empty by default, which
+    # installs no CORS middleware at all: a browser then refuses the call, which is
+    # the right answer for a deployment that has not named its front end.
+    #
+    # Exact origins only -- no wildcard, no regex. The identity headers this API
+    # trusts are chosen by the caller, so an origin that can send them can pick a
+    # tenant, and "*" would hand that to any page the browser happens to load.
+    frontend_origins: tuple[str, ...] = ()
     database_host: str | None = Field(default=None, min_length=1)
     database_port: int | None = Field(default=None, ge=1, le=65_535)
     database_name: str | None = Field(default=None, min_length=1)
@@ -165,6 +174,19 @@ class Settings(BaseSettings):
 
         if self.llm_groq_enabled and self.llm_groq_api_key_file is None:
             raise ValueError("The Groq provider requires PKA_LLM_GROQ_API_KEY_FILE")
+
+        for origin in self.frontend_origins:
+            parsed = urlsplit(origin)
+            if (
+                origin != f"{parsed.scheme}://{parsed.netloc}"
+                or parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+            ):
+                raise ValueError(f"A frontend origin must be scheme://host[:port], got: {origin}")
+            # Plain HTTP is tolerated only for a developer's own machine: elsewhere
+            # it invites the browser to send the identity headers in clear.
+            if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+                raise ValueError(f"A non-local frontend origin must use HTTPS: {origin}")
         return self
 
     @property
