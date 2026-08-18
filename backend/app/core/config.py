@@ -25,6 +25,18 @@ class Settings(BaseSettings):
     # flow exists, and it makes the identity headers inert.
     auth_mode: Literal["dev_headers", "session"] = "dev_headers"
     session_lifetime_hours: int = Field(default=12, ge=1, le=24 * 30)
+
+    # Atlassian 3LO. Off by default: a deployment that has not registered an OAuth
+    # app must not expose a sign-in route that can only fail.
+    atlassian_oauth_enabled: bool = False
+    atlassian_oauth_client_id: str | None = Field(default=None, min_length=1, max_length=200)
+    atlassian_oauth_client_secret_file: Path | None = None
+    # Must match the app registration exactly. Not derived from the request, because
+    # a redirect target taken from a Host header is a redirect an attacker can aim.
+    atlassian_oauth_redirect_uri: str | None = Field(default=None, min_length=1, max_length=500)
+    # Where the browser lands once signed in. A path, never a full URL and never a
+    # caller-supplied "next": an open redirect is the classic hole in this flow.
+    atlassian_oauth_post_login_path: str = Field(default="/", min_length=1, max_length=200)
     # Browser origins allowed to call the API cross-origin. Empty by default, which
     # installs no CORS middleware at all: a browser then refuses the call, which is
     # the right answer for a deployment that has not named its front end.
@@ -102,6 +114,30 @@ class Settings(BaseSettings):
                 raise ValueError("The in-memory repository is forbidden in production")
             if self.auth_mode == "dev_headers":
                 raise ValueError("Development header identity is forbidden in production")
+
+        if self.atlassian_oauth_enabled:
+            missing = [
+                name
+                for name, value in (
+                    ("client id", self.atlassian_oauth_client_id),
+                    ("client secret file", self.atlassian_oauth_client_secret_file),
+                    ("redirect URI", self.atlassian_oauth_redirect_uri),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValueError(
+                    "Atlassian sign-in requires its " + ", ".join(missing)
+                )
+            # A redirect target that is not HTTPS would carry an authorization code
+            # in clear, and localhost is the only place that is acceptable.
+            redirect = str(self.atlassian_oauth_redirect_uri)
+            if not redirect.startswith("https://") and not redirect.startswith(
+                ("http://localhost", "http://127.0.0.1")
+            ):
+                raise ValueError("The Atlassian redirect URI must use HTTPS outside localhost")
+            if not self.atlassian_oauth_post_login_path.startswith("/"):
+                raise ValueError("The post sign-in target must be a path, not a URL")
 
         if self.mcp_jira_enabled and not self.mcp_atlassian_enabled:
             raise ValueError("The Jira MCP binding requires the Atlassian provider")

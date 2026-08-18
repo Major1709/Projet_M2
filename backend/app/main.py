@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.api import router as agent_router
 from app.approvals.api import router as approvals_router
+from app.auth.api import router as auth_router
 from app.bootstrap import ApplicationContainer, build_container
 from app.conversations.api import router as conversations_router
 from app.core.config import Settings, get_settings
@@ -53,6 +54,7 @@ def create_app(
     app.include_router(approvals_router)
     app.include_router(mcp_router)
     app.include_router(agent_router)
+    app.include_router(auth_router)
     return app
 
 
