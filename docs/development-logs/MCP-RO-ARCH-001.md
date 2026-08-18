@@ -1218,6 +1218,74 @@ est donc utilisable en test mais inutile en deploiement — personne ne peut ent
 fail-closed mais sterile. La suite de la phase 2 est le flux Atlassian 3LO, la table des
 habilitations deleguees et le verrou partage du renouvellement.
 
+## Phase 2.3 : le flux Atlassian, du consentement a la session — 2026-08-18
+
+Le mode session existait sans moyen d'ouvrir une session. Trois routes le remplissent :
+`/api/auth/atlassian/start`, `/callback` et `/signout`.
+
+### Le tenant est derive, jamais declare
+
+C'est le seul point qui compte vraiment. Un jeton delegue Atlassian couvre **exactement le site
+choisi sur l'ecran de consentement**, et rien dans le jeton ne dit lequel : `accessible-resources`
+est le seul moyen de l'apprendre. Ce projet l'avait deja appris a ses depens, c'est la raison
+d'etre de l'option `--attendu` du script d'import.
+
+Le `cloudId` devient donc le tenant et l'`account_id` devient l'utilisateur, tous deux relus chez
+le fournisseur. C'est toute la difference avec le mode en-tetes qu'il remplace, ou l'appelant
+choisissait les deux.
+
+### Ce qui n'est pas negociable dans ce flux
+
+**PKCE en S256 seulement.** Le verifieur n'apparait jamais dans l'URL d'autorisation : l'y mettre
+defait la seule chose que PKCE apporte. Un test verifie que le defi publie a la premiere etape est
+bien l'empreinte du verifieur envoye a la seconde — sans quoi l'appariement ne prouve rien.
+
+**`prompt=consent` est explicite.** Sans lui Atlassian peut reutiliser un octroi anterieur en
+silence, et l'utilisateur ne voit jamais le selecteur de site — l'ecran qui decide quel site le
+jeton couvrira. **`offline_access` de meme** : sans refresh token, retour au consentement dans
+l'heure.
+
+**L'etat est a usage unique par construction.** Il est *retire* du magasin, pas lu. Un callback
+rejoue frapperait sinon une seconde session dans un seul consentement.
+
+**Les trois appels sortants suivent la discipline du projet** : HTTPS valide a l'import, port fixe,
+redirections refusees, `trust_env` ignore, adresse resolue puis epinglee avec le nom conserve pour
+SNI, reponse bornee a 256 Ko. Un code d'autorisation et un refresh token le meritent au moins
+autant qu'une lecture MCP.
+
+**Le corps du fournisseur n'est jamais reexpedie.** Il peut renvoyer le code en echo, nommer le
+client, ou decrire l'echec dans des termes ecrits pour un operateur.
+
+**`DelegatedCredentials` ne se represente pas.** Son `repr` ne montre que le tenant et
+l'utilisateur : un refresh token dans un `repr` finit dans la premiere trace d'appel qui le touche,
+puis dans un journal, puis dans une sauvegarde.
+
+**Le cookie** porte `httponly`, `secure` partout sauf sur localhost en clair, `samesite=lax` et le
+chemin racine. La deconnexion **revoque cote serveur avant** de vider le cookie : vider seulement
+le cookie laisserait une session vivante pour quiconque a deja copie le jeton, ce qui est
+precisement le cas auquel une deconnexion doit repondre.
+
+### Trois refus a la construction
+
+Un sign-in active sans son enregistrement, une cible de redirection en HTTP clair hors localhost,
+ou une cible post-connexion qui est une URL complete plutot qu'un chemin — cette derniere etant la
+definition d'une redirection ouverte. Echouer au demarrage vaut mieux qu'echouer au callback, ou
+l'utilisateur est deja a mi-chemin d'un ecran de consentement.
+
+### Ce qui reste
+
+Les identifiants delegues vont dans un **port**, pas dans une table. L'implementation persistante et
+chiffree est la tranche 2.4 ; en attendant ils vivent en memoire de processus et **jamais sur
+disque**, ce qui force un nouveau consentement au redemarrage plutot que de laisser un refresh token
+dans un fichier que personne ne fait tourner.
+
+Consequence a ne pas oublier : le courtier d'habilitations que les lectures MCP utilisent lit
+encore des fichiers designes par la configuration. Tant que 2.4 n'est pas livree, se connecter
+donne une session mais pas une habilitation par utilisateur.
+
+Rien de ce flux n'a ete joue contre le vrai Atlassian : il n'y a pas d'application OAuth
+enregistree. Les 17 tests passent par un transport injecte.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`
