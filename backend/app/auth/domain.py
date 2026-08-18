@@ -16,6 +16,15 @@ ATLASSIAN_ACCESSIBLE_RESOURCES: Final = (
 )
 ATLASSIAN_ME_ENDPOINT: Final = "https://api.atlassian.com/me"
 
+# The classic scopes, which Atlassian recommends where they exist, kept to the
+# minimum this build reads. No write scope: mutations are refused at construction,
+# and a granted scope is a scope a stolen token can use.
+#
+# Scopes are not the grant type, and the two are easy to conflate. Adding the Jira
+# and Confluence APIs in the developer console selects *permissions*; restricting a
+# grant to one site is a separate choice made at authorisation time, and this build
+# also enforces it server-side through ``atlassian_expected_cloud_id``.
+#
 # offline_access is what makes the grant renewable. Without it the deployment holds
 # an access token for about an hour and then has to send the user back through
 # consent, which is not a product.

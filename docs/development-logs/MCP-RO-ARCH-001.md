@@ -1,3 +1,42 @@
+### Ce que la configuration refuse a la construction
+
+Echouer au demarrage vaut mieux qu'echouer au callback, ou l'utilisateur est deja a mi-chemin d'un
+ecran de consentement.
+
+| Refus | Raison |
+|---|---|
+| Sign-in active sans `client_id`, secret ou URI de retour | La route ne pourrait qu'echouer |
+| URI de retour en HTTP clair **hors `development`** | Un code d'autorisation en clair est un code redimable par qui est sur le chemin |
+| URI de retour en HTTP clair **hors boucle locale** | Les deux conditions valent ensemble, aucune seule ne suffit |
+| Cible post-connexion qui n'est pas un chemin | Redirection ouverte |
+| Cible post-connexion protocole-relative | Idem, et plus discrete |
+
+**Deux failles corrigees a cette occasion**, l'une et l'autre nees d'une comparaison par prefixe :
+
+`redirect.startswith("http://localhost")` acceptait **`http://localhost.evil.test/callback`** — un
+hote qui commence par `localhost`, resout ou son proprietaire veut, et aurait recu le code
+d'autorisation en clair. L'hote est desormais compare exactement, ou reconnu comme adresse de
+boucle par `ipaddress`.
+
+`target.startswith("/")` acceptait **`//elsewhere.example`**, une URL protocole-relative que le
+navigateur suit hors du site. Le controle du slash initial, cense fermer la redirection ouverte,
+la laissait donc grande ouverte. Le backslash est refuse aussi, certains navigateurs le repliant
+sur un slash.
+
+### Type d'autorisation et portees, a ne pas confondre
+
+Ce sont deux choix distincts, et les confondre a failli passer dans ce journal.
+
+**Le type d'autorisation** — `resource-level grant` si la console Atlassian le propose — restreint
+l'octroi a un site. **Les portees** sont les permissions demandees. Ajouter les API Jira et
+Confluence dans la console selectionne des *permissions* ; cela ne restreint rien a un site.
+
+Portees classiques minimales, aucune ecriture : `offline_access`, `read:jira-work`,
+`read:jira-user`, `read:confluence-content.all`, `read:confluence-space.summary`.
+
+La restriction au site est en outre appliquee cote serveur par `PKA_ATLASSIAN_EXPECTED_CLOUD_ID`,
+independamment de ce que la console permet.
+
 # MCP-RO-ARCH-001 — Connecteurs MCP en lecture seule
 
 ## Exécution
@@ -1262,10 +1301,10 @@ une seule fois, et un cookie que le navigateur ne remet pas au script.
 Le test qui verifie l'appariement defi/verifieur atteste **notre propre coherence**, pas une
 garantie du fournisseur, et son nom le dit desormais.
 
-**Procedure pour trancher**, une fois l'application enregistree : jouer un consentement, puis
-echanger le code en substituant un verifieur different de celui qui a produit le defi. Si
-l'echange reussit, Atlassian ignore PKCE et le flux ne repose que sur `state` et le secret. S'il
-echoue en `invalid_grant`, PKCE est actif et peut alors etre revendique.
+**Procedure pour trancher**, differee volontairement : le flux normal sera valide d'abord. Le test
+negatif — echanger un code avec un verifieur different de celui qui a produit le defi — ne sera
+joue qu'ensuite et seulement si necessaire, avec revocation immediate de tout jeton delivre. Un
+echange reussi signifierait qu'Atlassian ignore PKCE ; un `invalid_grant` qu'il l'applique.
 
 **`prompt=consent` est explicite.** Sans lui Atlassian peut reutiliser un octroi anterieur en
 silence, et l'utilisateur ne voit jamais le selecteur de site — l'ecran qui decide quel site le
@@ -1311,7 +1350,14 @@ encore des fichiers designes par la configuration. Tant que 2.4 n'est pas livree
 donne une session mais pas une habilitation par utilisateur.
 
 Rien de ce flux n'a ete joue contre le vrai Atlassian : il n'y a pas d'application OAuth
-enregistree. Les 17 tests passent par un transport injecte.
+enregistree. Les tests passent par un transport injecte.
+
+**Le comportement du cookie `Secure` reste a verifier dans un vrai navigateur** lors du test OAuth
+reel. Les tests le prouvent au niveau du client HTTP — l'attribut est pose, et le client refuse de
+le renvoyer en clair — mais un navigateur applique aussi ses propres regles de site et de port.
+
+**La production exigera HTTPS de bout en bout.** Le callback en `http://localhost:8000` n'existe
+que pour la machine de developpement et la configuration le refuse partout ailleurs.
 
 ## Dette technique
 

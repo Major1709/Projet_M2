@@ -1,3 +1,4 @@
+import ipaddress
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -6,6 +7,62 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _is_loopback(hostname: str | None) -> bool:
+    """True only for the local machine, by name or by address.
+
+    ``localhost`` is compared exactly rather than by prefix: ``localhost.evil.test``
+    starts with it, resolves wherever its owner points it, and would otherwise have
+    passed as local -- carrying an authorization code to a third party over plain
+    HTTP.
+    """
+
+    if not hostname:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_redirect_uri(redirect: str, *, environment: str) -> None:
+    """HTTPS everywhere, with one narrow exception for a developer machine.
+
+    An authorization code travelling over plain HTTP is a code anyone on the path
+    can redeem, so the exception is fenced on both sides: the environment has to be
+    ``development`` **and** the host has to be the local machine. Either alone is not
+    enough.
+    """
+
+    parsed = urlsplit(redirect)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme != "http":
+        raise ValueError("The Atlassian redirect URI must use HTTPS")
+    if environment != "development":
+        raise ValueError(
+            "A plain HTTP redirect URI is only allowed in the development environment"
+        )
+    if not _is_loopback(parsed.hostname):
+        raise ValueError("A plain HTTP redirect URI is only allowed on the loopback host")
+
+
+def _validate_post_login_path(target: str) -> None:
+    """A same-origin path, and nothing that a browser would read as elsewhere.
+
+    ``//elsewhere.example`` starts with a slash and is a protocol-relative URL that
+    browsers follow off-site, so the leading-slash check alone leaves the open
+    redirect it was meant to close. A backslash is folded to a slash by some
+    browsers, which reopens it a second way.
+    """
+
+    if not target.startswith("/"):
+        raise ValueError("The post sign-in target must be a path, not a URL")
+    if target.startswith(("//", "/\\")):
+        raise ValueError("The post sign-in target must not be a protocol-relative URL")
 
 
 class Settings(BaseSettings):
@@ -132,15 +189,11 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Atlassian sign-in requires its " + ", ".join(missing)
                 )
-            # A redirect target that is not HTTPS would carry an authorization code
-            # in clear, and localhost is the only place that is acceptable.
-            redirect = str(self.atlassian_oauth_redirect_uri)
-            if not redirect.startswith("https://") and not redirect.startswith(
-                ("http://localhost", "http://127.0.0.1")
-            ):
-                raise ValueError("The Atlassian redirect URI must use HTTPS outside localhost")
-            if not self.atlassian_oauth_post_login_path.startswith("/"):
-                raise ValueError("The post sign-in target must be a path, not a URL")
+            _validate_redirect_uri(
+                str(self.atlassian_oauth_redirect_uri),
+                environment=self.environment,
+            )
+            _validate_post_login_path(self.atlassian_oauth_post_login_path)
 
         if self.mcp_jira_enabled and not self.mcp_atlassian_enabled:
             raise ValueError("The Jira MCP binding requires the Atlassian provider")

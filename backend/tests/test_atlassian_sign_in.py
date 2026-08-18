@@ -395,30 +395,66 @@ def test_an_enabled_sign_in_without_its_registration_is_refused_at_construction(
         Settings(environment="test", atlassian_oauth_enabled=True)
 
 
-def test_a_plain_http_redirect_target_is_refused_outside_localhost() -> None:
-    # An authorization code delivered over plain HTTP is an authorization code
-    # anyone on the path can redeem.
-    with pytest.raises(ValueError, match="HTTPS"):
-        Settings(
-            environment="test",
-            atlassian_oauth_enabled=True,
-            atlassian_oauth_client_id="client-abc",
-            atlassian_oauth_client_secret_file=Path("secret"),
-            atlassian_oauth_redirect_uri="http://app.example/callback",
+def registered(**changes: object) -> Settings:
+    values: dict[str, object] = {
+        "environment": "development",
+        "atlassian_oauth_enabled": True,
+        "atlassian_oauth_client_id": "client-abc",
+        "atlassian_oauth_client_secret_file": Path("secret"),
+        "atlassian_oauth_redirect_uri": "https://app.example/callback",
+    }
+    values.update(changes)
+    return Settings(**values)  # type: ignore[arg-type]
+
+
+def test_the_development_callback_over_plain_http_is_accepted_on_loopback() -> None:
+    # The one exception, and it is what the PFE actually runs.
+    settings = registered(
+        atlassian_oauth_redirect_uri="http://localhost:8000/api/auth/atlassian/callback"
+    )
+
+    assert settings.atlassian_oauth_redirect_uri.endswith("/api/auth/atlassian/callback")
+
+
+@pytest.mark.parametrize(
+    "redirect",
+    [
+        "http://app.example/callback",
+        # Starts with "http://localhost" and is not local at all: prefix matching
+        # would have let this through, and the code would have gone to its owner.
+        "http://localhost.evil.test/callback",
+        "http://192.168.1.10:8000/callback",
+    ],
+)
+def test_a_plain_http_callback_is_refused_off_the_loopback_host(redirect: str) -> None:
+    with pytest.raises(ValueError, match="loopback"):
+        registered(atlassian_oauth_redirect_uri=redirect)
+
+
+@pytest.mark.parametrize("environment", ["test", "production"])
+def test_a_plain_http_callback_is_refused_outside_development(environment: str) -> None:
+    # Loopback alone is not enough. Both sides of the fence have to hold.
+    with pytest.raises(ValueError, match="development environment"):
+        registered(
+            environment=environment,
+            repository_backend="postgres" if environment == "production" else "memory",
+            auth_mode="session",
+            atlassian_oauth_redirect_uri="http://localhost:8000/callback",
         )
 
 
 def test_the_post_sign_in_target_must_be_a_path() -> None:
     # A full URL there is an open redirect, the classic hole in this flow.
     with pytest.raises(ValueError, match="path"):
-        Settings(
-            environment="test",
-            atlassian_oauth_enabled=True,
-            atlassian_oauth_client_id="client-abc",
-            atlassian_oauth_client_secret_file=Path("secret"),
-            atlassian_oauth_redirect_uri="https://app.example/callback",
-            atlassian_oauth_post_login_path="https://elsewhere.example/",
-        )
+        registered(atlassian_oauth_post_login_path="https://elsewhere.example/")
+
+
+@pytest.mark.parametrize("target", ["//elsewhere.example", "/\\elsewhere.example"])
+def test_a_protocol_relative_post_sign_in_target_is_refused(target: str) -> None:
+    # It starts with a slash, so a leading-slash check passes it -- and the browser
+    # leaves the site anyway. Backslash because some browsers fold it to a slash.
+    with pytest.raises(ValueError, match="protocol-relative"):
+        registered(atlassian_oauth_post_login_path=target)
 
 
 def test_the_callback_body_never_carries_a_token() -> None:
