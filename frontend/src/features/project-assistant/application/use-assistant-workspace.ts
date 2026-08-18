@@ -120,7 +120,7 @@ export function useAssistantWorkspace(
         {
           id: `assistant-error-${Date.now()}`,
           role: "assistant",
-          author: "Nexus",
+          author: "NEXIA",
           content: reason,
           createdAt: formatTime(new Date()),
           status: "error",

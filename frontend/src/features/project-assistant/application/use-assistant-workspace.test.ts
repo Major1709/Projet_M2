@@ -35,7 +35,7 @@ function buildGateway(): ProjectAssistantGateway {
       requestIds,
     })),
     sendMessage: vi.fn<ProjectAssistantGateway["sendMessage"]>(async (content) => ({
-      author: "Nexus",
+      author: "NEXIA",
       content: `Response: ${content}`,
       createdAt: "12:00",
       id: "assistant-test",

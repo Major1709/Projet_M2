@@ -37,7 +37,7 @@ export function ChatConversation({ messages, isResponding, onSend }: ChatConvers
               <i />
               <i />
             </span>
-            <span className="sr-only">Nexus prépare une réponse</span>
+            <span className="sr-only">NEXIA prépare une réponse</span>
           </div>
         ) : null}
       </div>
