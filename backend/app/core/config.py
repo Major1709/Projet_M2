@@ -20,7 +20,11 @@ class Settings(BaseSettings):
     app_name: str = "Project Knowledge Assistant API"
     environment: Literal["development", "test", "production"] = "development"
     repository_backend: Literal["memory", "postgres"] = "memory"
-    auth_mode: Literal["dev_headers"] = "dev_headers"
+    # Two modes now. ``dev_headers`` remains the default so an existing front end
+    # keeps working; ``session`` is what a deployment switches to once a sign-in
+    # flow exists, and it makes the identity headers inert.
+    auth_mode: Literal["dev_headers", "session"] = "dev_headers"
+    session_lifetime_hours: int = Field(default=12, ge=1, le=24 * 30)
     # Browser origins allowed to call the API cross-origin. Empty by default, which
     # installs no CORS middleware at all: a browser then refuses the call, which is
     # the right answer for a deployment that has not named its front end.

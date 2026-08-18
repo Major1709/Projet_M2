@@ -41,6 +41,9 @@ from app.mcp.registry import (
     FIGMA_TOKEN_ENDPOINT,
     MCPToolRegistry,
 )
+from app.sessions.adapters.memory import InMemorySessionStore
+from app.sessions.adapters.postgres import PostgresSessionStore
+from app.sessions.ports import SessionStore
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,8 @@ class ApplicationContainer:
     conversations: ConversationWorkflow
     mcp_reads: MCPReadWorkflow
     readiness_probe: Callable[[], bool]
+    # Consulted on every request in session mode, and never in dev_headers mode.
+    sessions: SessionStore
     settings: Settings
     # Absent when no language model provider is configured. The MCP reads stay
     # available in that case: the assistant is the optional layer, not the
@@ -64,6 +69,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
     if settings.repository_backend == "memory":
         conversation_repository = InMemoryConversationRepository()
         message_repository = InMemoryConversationMessageRepository()
+        session_store: SessionStore = InMemorySessionStore()
         approval_uow_factory = InMemoryApprovalUnitOfWork()
         mcp_reads = _build_mcp_read_workflow(settings, approval_uow_factory.audit)
         return ApplicationContainer(
@@ -73,6 +79,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
             mcp_reads=mcp_reads,
             agent=_build_agent(settings, approval_uow_factory.audit, mcp_reads),
             readiness_probe=lambda: True,
+            sessions=session_store,
             settings=settings,
         )
 
@@ -80,6 +87,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
     session_factory = create_session_factory(engine)
     conversation_repository = PostgresConversationRepository(session_factory)
     message_repository = PostgresConversationMessageRepository(session_factory)
+    session_store = PostgresSessionStore(session_factory)
     approval_uow_factory = PostgresApprovalUnitOfWorkFactory(session_factory)
     audit_writer = PostgresAppendOnlyAuditWriter(session_factory)
     mcp_reads = _build_mcp_read_workflow(settings, audit_writer)
@@ -90,6 +98,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
         mcp_reads=mcp_reads,
         agent=_build_agent(settings, audit_writer, mcp_reads),
         readiness_probe=lambda: database_is_ready(engine),
+        sessions=session_store,
         settings=settings,
         engine=engine,
     )

@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.bootstrap import build_container
 from app.core.config import Settings
-from app.core.identity import SUPPORTED_AUTH_MODE
+from app.core.identity import DEV_HEADERS_MODE
 from app.main import create_app
 
 SOME_CONVERSATION = "/api/conversations/11111111-1111-4111-8111-111111111111"
@@ -28,7 +28,7 @@ def test_the_declared_mode_lets_the_derived_identity_through() -> None:
     # Asserting "not 500" would pass on a 404 and prove nothing. The identity has
     # to be shown reaching the workflow: the owner sees the conversation, and a
     # different user under the same tenant does not.
-    client = client_for(SUPPORTED_AUTH_MODE)
+    client = client_for(DEV_HEADERS_MODE)
     owner = {"X-Tenant-ID": "tenant-a", "X-User-ID": "owner"}
 
     created = client.post("/api/conversations", headers=owner, json={"title": "Suivi Jira"})
@@ -51,7 +51,7 @@ def test_an_unimplemented_identity_mode_refuses_the_request() -> None:
     # constructible while every route kept trusting the headers, and the audit
     # trail would then record a tenant the caller chose. The request path has to
     # refuse on its own.
-    response = client_for("oidc").get(SOME_CONVERSATION)
+    response = client_for("kerberos").get(SOME_CONVERSATION)
 
     assert response.status_code == 500
     assert response.json()["detail"]["code"] == "IDENTITY_MODE_UNSUPPORTED"
@@ -59,7 +59,7 @@ def test_an_unimplemented_identity_mode_refuses_the_request() -> None:
 
 def test_the_refusal_does_not_depend_on_the_headers_sent() -> None:
     # Otherwise a caller could reach the fallback by omitting or forging them.
-    response = client_for("oidc").get(
+    response = client_for("kerberos").get(
         SOME_CONVERSATION,
         headers={"X-Tenant-ID": "tenant-victime", "X-User-ID": "admin"},
     )

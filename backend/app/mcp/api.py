@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.core.identity import SecurityContext, get_development_security_context
+from app.core.identity import SecurityContext, get_security_context
 from app.mcp.domain import MCPReadBatch, MCPReadBatchResult
 from app.mcp.errors import (
     MCPAuditUnavailable,
@@ -72,7 +72,7 @@ def translate_read_error(error: MCPReadError) -> HTTPException:
 @router.post("/reads", response_model=MCPReadBatchResult)
 async def execute_mcp_reads(
     batch: MCPReadBatch,
-    context: Annotated[SecurityContext, Depends(get_development_security_context)],
+    context: Annotated[SecurityContext, Depends(get_security_context)],
     workflow: Annotated[MCPReadWorkflow, Depends(get_read_workflow)],
 ) -> MCPReadBatchResult:
     try:

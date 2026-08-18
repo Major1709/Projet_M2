@@ -20,7 +20,7 @@ from app.approvals.errors import (
     VersionConflict,
 )
 from app.approvals.workflow import ApprovalWorkflow
-from app.core.identity import SecurityContext, get_development_security_context
+from app.core.identity import SecurityContext, get_security_context
 
 router = APIRouter(prefix="/api/actions", tags=["actions"])
 
@@ -42,7 +42,7 @@ def translate_domain_error(error: ApprovalError) -> HTTPException:
 @router.post("", response_model=ActionProposalCreatedView, status_code=status.HTTP_201_CREATED)
 def create_action_proposal(
     command: ActionProposalCreate,
-    context: Annotated[SecurityContext, Depends(get_development_security_context)],
+    context: Annotated[SecurityContext, Depends(get_security_context)],
     workflow: Annotated[ApprovalWorkflow, Depends(get_workflow)],
 ) -> ActionProposalCreatedView:
     try:
@@ -58,7 +58,7 @@ def create_action_proposal(
 @router.get("/{proposal_id}", response_model=ActionProposalView)
 def get_action_proposal(
     proposal_id: UUID,
-    context: Annotated[SecurityContext, Depends(get_development_security_context)],
+    context: Annotated[SecurityContext, Depends(get_security_context)],
     workflow: Annotated[ApprovalWorkflow, Depends(get_workflow)],
 ) -> ActionProposalView:
     try:
@@ -71,7 +71,7 @@ def get_action_proposal(
 def approve_action_proposal(
     proposal_id: UUID,
     decision: ActionDecision,
-    context: Annotated[SecurityContext, Depends(get_development_security_context)],
+    context: Annotated[SecurityContext, Depends(get_security_context)],
     workflow: Annotated[ApprovalWorkflow, Depends(get_workflow)],
 ) -> ActionProposalView:
     try:
@@ -84,7 +84,7 @@ def approve_action_proposal(
 def reject_action_proposal(
     proposal_id: UUID,
     decision: ActionDecision,
-    context: Annotated[SecurityContext, Depends(get_development_security_context)],
+    context: Annotated[SecurityContext, Depends(get_security_context)],
     workflow: Annotated[ApprovalWorkflow, Depends(get_workflow)],
 ) -> ActionProposalView:
     try:
@@ -97,7 +97,7 @@ def reject_action_proposal(
 def revise_action_proposal(
     proposal_id: UUID,
     revision: ActionRevision,
-    context: Annotated[SecurityContext, Depends(get_development_security_context)],
+    context: Annotated[SecurityContext, Depends(get_security_context)],
     workflow: Annotated[ApprovalWorkflow, Depends(get_workflow)],
 ) -> ActionRevisionView:
     try:
