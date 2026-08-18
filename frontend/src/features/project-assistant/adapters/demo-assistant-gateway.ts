@@ -25,7 +25,7 @@ export const demoAssistantGateway: ProjectAssistantGateway = {
     return {
       id: `demo-assistant-${Date.now()}`,
       role: "assistant",
-      author: "Nexus",
+      author: "NEXIA",
       content: `Mode démonstration : j’ai bien reçu « ${content} ». La réponse réelle sera diffusée par le backend avec ses sources autorisées et son identifiant de corrélation.`,
       createdAt: new Intl.DateTimeFormat("fr-FR", {
         hour: "2-digit",

@@ -20,12 +20,12 @@ export function AssistantWorkspace({ gateway, initial }: AssistantWorkspaceProps
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#main-workspace" aria-label="Nexus, aller au contenu principal">
+        <a className="brand" href="#main-workspace" aria-label="NEXIA, aller au contenu principal">
           <span className="brand-mark" aria-hidden="true">
             <SparklesIcon width={21} height={21} />
           </span>
           <span>
-            <strong>Nexus</strong>
+            <strong>NEXIA</strong>
             <small>Project intelligence</small>
           </span>
         </a>
