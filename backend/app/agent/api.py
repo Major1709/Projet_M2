@@ -1,4 +1,6 @@
+import logging
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
@@ -17,11 +19,16 @@ from app.agent.errors import (
     LLMTransportFailure,
 )
 from app.agent.read_workflow import AgentAnswer, AgentQuestion, AgentReadWorkflow
+from app.conversations.domain import CitedSource, MessageRole, MessageStatus
+from app.conversations.errors import ConversationNotFound
+from app.conversations.workflow import ConversationWorkflow
 from app.core.identity import SecurityContext, get_development_security_context
 from app.mcp.api import translate_read_error
 from app.mcp.errors import MCPReadError
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
+
+logger = logging.getLogger(__name__)
 
 
 def get_agent(request: Request) -> AgentReadWorkflow:
@@ -38,6 +45,64 @@ def get_agent(request: Request) -> AgentReadWorkflow:
             },
         )
     return agent
+
+
+def get_conversations(request: Request) -> ConversationWorkflow:
+    return request.app.state.container.conversations
+
+
+def _cited(answer: AgentAnswer) -> tuple[CitedSource, ...]:
+    return tuple(
+        CitedSource(
+            source_system=source.source_system.value,
+            tool_name=source.tool_name,
+            resource_reference=source.url,
+            retrieved_at=source.retrieved_at,
+            truncated=source.truncated,
+        )
+        for source in answer.sources
+    )
+
+
+def _record(
+    conversations: ConversationWorkflow,
+    *,
+    conversation_id: UUID,
+    context: SecurityContext,
+    role: MessageRole,
+    content: str,
+    correlation_id: str,
+    status_: MessageStatus = MessageStatus.COMPLETE,
+    sources: tuple[CitedSource, ...] = (),
+) -> None:
+    """Record one turn, and never let that recording sink the exchange.
+
+    Deliberately not fail-closed, unlike the audit trail, because the two protect
+    different things: an unrecorded read is a governance hole, while an unsaved line
+    of conversation is an inconvenience. Refusing an answer that already cost a
+    model call and a real read, because history could not be written, would destroy
+    more than it protects -- and the audit trail still holds the full account.
+    """
+
+    try:
+        conversations.append_message(
+            conversation_id=conversation_id,
+            context=context,
+            role=role,
+            content=content,
+            correlation_id=correlation_id,
+            status=status_,
+            sources=sources,
+        )
+    except Exception as error:  # noqa: BLE001 - history must never fail the answer
+        logger.warning(
+            "conversation turn not recorded",
+            extra={
+                "correlation_id": correlation_id,
+                "role": role.value,
+                "error_type": type(error).__name__,
+            },
+        )
 
 
 def translate_llm_error(error: LLMError) -> HTTPException:
@@ -79,9 +144,33 @@ async def answer_question(
     question: AgentQuestion,
     context: Annotated[SecurityContext, Depends(get_development_security_context)],
     agent: Annotated[AgentReadWorkflow, Depends(get_agent)],
+    conversations: Annotated[ConversationWorkflow, Depends(get_conversations)],
 ) -> AgentAnswer:
+    thread = question.conversation_id
+    if thread is not None:
+        # Proven before the model is called, not after: spending a call to then
+        # discover the thread is someone else's would waste a real budget, and the
+        # 404 is the honest answer either way.
+        try:
+            conversations.get(thread, context)
+        except ConversationNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation not found",
+            ) from error
+        # Written first, so a question survives a provider refusal. A turn with no
+        # answer beside it describes exactly what happened.
+        _record(
+            conversations,
+            conversation_id=thread,
+            context=context,
+            role=MessageRole.USER,
+            content=question.question,
+            correlation_id=question.correlation_id,
+        )
+
     try:
-        return await agent.answer(question=question, context=context)
+        answer = await agent.answer(question=question, context=context)
     except LLMError as error:
         raise translate_llm_error(error) from error
     except MCPReadError as error:
@@ -89,3 +178,15 @@ async def answer_question(
         # table so one cause keeps one status code whether it is reached directly
         # or through the assistant.
         raise translate_read_error(error) from error
+
+    if thread is not None:
+        _record(
+            conversations,
+            conversation_id=thread,
+            context=context,
+            role=MessageRole.ASSISTANT,
+            content=answer.text,
+            correlation_id=question.correlation_id,
+            sources=_cited(answer),
+        )
+    return answer

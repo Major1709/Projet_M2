@@ -1,5 +1,6 @@
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -96,5 +97,79 @@ audit_events = Table(
         ["tenant_id", "action_proposal_id"],
         ["action_proposals.tenant_id", "action_proposals.id"],
         name="fk_audit_events_tenant_action_proposal",
+    ),
+)
+
+conversation_messages = Table(
+    "conversation_messages",
+    metadata,
+    Column("tenant_id", String(255), primary_key=True),
+    Column("id", Uuid(as_uuid=True), primary_key=True),
+    Column("conversation_id", Uuid(as_uuid=True), nullable=False),
+    Column("author_user_id", String(255), nullable=False),
+    # Explicit rank within the thread. Ordering on the timestamp alone is not
+    # reliable: both turns of one exchange are written inside a single clock
+    # tick on some platforms, and the tie then falls to a random identifier --
+    # a conversation that displays backwards now and then, irreproducibly.
+    Column("sequence", Integer, nullable=False),
+    Column("role", String(20), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("correlation_id", String(200), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("sequence >= 0", name="sequence_not_negative"),
+    CheckConstraint("role in ('user', 'assistant')", name="role_known"),
+    CheckConstraint("status in ('complete', 'error')", name="status_known"),
+    UniqueConstraint(
+        "tenant_id",
+        "conversation_id",
+        "sequence",
+        name="uq_conversation_messages_tenant_id_conversation_id_sequence",
+    ),
+    # Same composite reference as the proposals: pointing at the owner column too
+    # makes "only the owner writes into this conversation" a database invariant
+    # rather than a check some future caller can forget.
+    ForeignKeyConstraint(
+        ["tenant_id", "conversation_id", "author_user_id"],
+        [
+            "conversations.tenant_id",
+            "conversations.id",
+            "conversations.owner_user_id",
+        ],
+        name="fk_conversation_messages_tenant_conversation_owner",
+    ),
+)
+
+message_sources = Table(
+    "message_sources",
+    metadata,
+    Column("tenant_id", String(255), primary_key=True),
+    Column("id", Uuid(as_uuid=True), primary_key=True),
+    Column("message_id", Uuid(as_uuid=True), nullable=False),
+    # The order the reads were first consulted in. Stored rather than recomputed:
+    # a citation list whose order changes between two readings of the same answer
+    # would look like the answer changed.
+    Column("position", Integer, nullable=False),
+    Column("source_system", String(50), nullable=False),
+    Column("tool_name", String(200), nullable=False),
+    # Null for a read that enumerates rather than designates -- a project list, a
+    # search. There is no column for a confidence score or an inferred flag, and
+    # that is deliberate: the backend derives citations from the provenance of
+    # performed reads, so it has nothing to put in them, and a column invites a
+    # value.
+    Column("resource_reference", String(2_000), nullable=True),
+    Column("retrieved_at", DateTime(timezone=True), nullable=False),
+    Column("truncated", Boolean, nullable=False),
+    CheckConstraint("position >= 0", name="position_not_negative"),
+    UniqueConstraint(
+        "tenant_id",
+        "message_id",
+        "position",
+        name="uq_message_sources_tenant_id_message_id_position",
+    ),
+    ForeignKeyConstraint(
+        ["tenant_id", "message_id"],
+        ["conversation_messages.tenant_id", "conversation_messages.id"],
+        name="fk_message_sources_tenant_message",
     ),
 )

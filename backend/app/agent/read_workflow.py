@@ -19,6 +19,7 @@ import logging
 from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any
+from uuid import UUID
 
 import anyio.to_thread
 from pydantic import BaseModel, ConfigDict, Field
@@ -176,6 +177,11 @@ class AgentQuestion(BaseModel):
 
     question: str = Field(min_length=1, max_length=4_000)
     correlation_id: str = Field(min_length=1, max_length=200)
+    # Optional on purpose. Absent, the exchange is answered and not stored, which
+    # is the behaviour every caller had before history existed; present, both turns
+    # are recorded. Making it required would have broken the front end the day it
+    # shipped, for a feature it had not asked for yet.
+    conversation_id: UUID | None = None
     max_steps: int = Field(default=DEFAULT_MAX_STEPS, ge=1, le=8)
     # The floor is measured, not conventional. On a reasoning model the thinking
     # spends the ceiling before the answer begins, so a low value does not produce
