@@ -1060,6 +1060,54 @@ intitulé « test ». Suffisant pour prouver une lecture et une citation ; **ins
 démontrer un rapprochement sémantique**, qui exige des tickets décrivant des sujets voisins avec
 des formulations différentes. C'est un prérequis de la phase 3, à traiter avant elle et non pendant.
 
+## Phase 0 close : le parcours complet depuis le navigateur — 2026-08-18
+
+Rejeu depuis un vrai navigateur, une seule tentative, sans appel Groq preparatoire.
+`correlation_id` `327bda05-88de-49db-b2f6-5d7edf87bd73`, genere cote navigateur et repris tel quel
+comme identifiant du message.
+
+Question posee dans l'interface : « Dans le projet Jira KAN, quel est le resume et le statut du
+ticket KAN-1 ? »
+
+| # | Evenement | Duree | Contenu |
+|---|---|---|---|
+| 1 | `LLM_INVOCATION_AUTHORIZED` | — | 15 outils exposes |
+| 2 | `LLM_INVOCATION_COMPLETED` | 2 266 ms | 0 caractere, choisit `getJiraIssue` |
+| 3 | `MCP_READ_AUTHORIZED` | — | jira / `getJiraIssue` |
+| 4 | `MCP_READ_COMPLETED` | 15 159 ms | Lecture Jira reelle |
+| 5 | `LLM_INVOCATION_AUTHORIZED` | — | Second appel |
+| 6 | `LLM_INVOCATION_COMPLETED` | 1 468 ms | 84 caracteres, aucun outil : la synthese |
+
+Reponse rendue : « Pour le ticket **KAN-1** : **Resume (Summary)** : test — **Statut** : A faire ».
+Elle correspond exactement a ce que `getVisibleJiraProjects` et `searchJiraIssuesUsingJql` avaient
+montre en lecture directe. **Aucun `LLM_INVOCATION_BOUNDED`** : la reponse n'est pas tronquee.
+
+La citation affichee pointe vers `https://andrianalyfanny.atlassian.net/browse/KAN-1`, verifie dans
+le DOM. C'est le seul lien Jira de la page hors fixtures.
+
+**Le parcours navigateur -> frontend -> backend -> Groq -> MCP Jira -> synthese -> citation est
+donc prouve de bout en bout.** Le dernier ecart de la tranche est leve.
+
+Deux observations que seule l'execution reelle pouvait donner :
+
+- **La source reelle ne porte aucun pourcentage**, la fixture de demonstration juste au-dessus
+  affiche « IA · 86 % ». C'est le champ `confidence` laisse vide faute de contrepartie backend, et
+  le contraste est visible a l'ecran.
+- **La lecture MCP domine le temps de reponse** : 15,2 s sur 19,0 s au total, contre 3,7 s cumules
+  pour les deux appels au modele. L'optimisation eventuelle est du cote de la source, pas du LLM.
+
+### Deux libelles de l'interface mentent desormais
+
+Herites de l'ere demonstration, ils etaient exacts tant que la passerelle etait factice :
+
+- `message-composer.tsx` affiche « Reponse simulee · aucune connexion MCP » sous la zone de saisie.
+- `assistant-workspace.tsx` affiche « Aucune donnee n'est envoyee a une source externe. »
+
+Les deux sont faux des lors que l'adaptateur HTTP est actif : la reponse est reelle, une lecture MCP
+a eu lieu, et la question part vers Groq. A conditionner sur l'adaptateur reellement utilise, ou a
+retirer. Consigne en dette, non corrige dans cette tranche pour ne pas melanger la preuve et un
+changement d'interface.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`
