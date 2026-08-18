@@ -1162,6 +1162,62 @@ que réduite en silence. Reste à faire : le branchement dans l'interface, qui a
 chantier de rhabillage, et le sort d'`indexRequests` dans le port — repoussé pour ne pas déplacer
 le sol sous ce chantier.
 
+## Phase 2, premiere tranche : la session cote serveur — 2026-08-18
+
+Le defaut le plus grave du systeme est traite : l'appelant ne choisit plus son locataire.
+
+### Additif, et c'est le point
+
+`auth_mode` accepte desormais `session` en plus de `dev_headers`, et **garde `dev_headers` par
+defaut**. Le chantier de rhabillage tourne en parallele et envoie encore les en-tetes d'identite ;
+basculer le mode maintenant l'aurait casse pour une fonctionnalite qu'il n'a pas demandee.
+
+C'est exactement l'extension que le controle de mode sur le chemin de requete avait prevue :
+ajouter un mode n'accorde pas silencieusement un chemin qui continue de faire confiance a ce
+qu'il faisait confiance avant.
+
+### Les cinq proprietes qui comptent
+
+**Les en-tetes deviennent inertes en mode session** — pas meme un repli en dernier recours. Un
+repli rendrait a l'appelant precisement ce qu'on vient de lui retirer. Un test le prouve par ce
+qu'un appelant peut lire, pas en inspectant le contexte : une session valide plus des en-tetes
+usurpes donne l'identite de la session, et l'identite usurpee ne peut pas atteindre la
+conversation creee.
+
+**Un magasin injoignable repond 503.** Fail-closed : une identite qu'on ne peut pas verifier ne
+doit pas etre affirmee, et les en-tetes attendent juste a cote comme solution de facilite.
+
+**Le jeton n'est jamais stocke.** 256 bits d'urandom remis une fois au navigateur, seule
+l'empreinte SHA-256 vit en base. Un vidage de base ne rend aucune session utilisable. SHA-256 nu
+plutot qu'un hachage de mot de passe, faute d'entree devinable a ralentir et parce que le cout se
+paierait sur chaque requete authentifiee.
+
+**L'expiration est absolue, pas glissante.** Une session qui se renouvelle a chaque requete ne se
+termine jamais pour qui detient le jeton — le cas meme contre lequel l'expiration existe. Une
+session expiree repond comme une session absente, pour ne rien dire d'un jeton dont l'appelant
+n'est peut-etre pas proprietaire.
+
+**La table `sessions` n'est pas clef-par-locataire**, contrairement a toutes les autres. C'est
+elle qui etablit le locataire : elle ne peut pas en dependre.
+
+### Un choix qui contredit la feuille de route
+
+Elle annoncait Redis, deja lance dans le `compose` sans consommateur. C'est PostgreSQL qui a ete
+retenu : la consultation de session est sur le chemin de **chaque requete authentifiee**, et y
+placer un second magasin ajouterait une bibliotheque cliente, un identifiant et un mode de panne a
+un code dont toute la discipline est une surface sortante etroite. Les sessions sont peu
+nombreuses, courtes, et balayees par l'expiration.
+
+Redis reste donc sans consommateur. C'est un point de menage du `compose`, pas une raison
+d'ecrire du code.
+
+### Ce qui manque encore
+
+Il n'existe **aucun moyen d'ouvrir une session** : ni page de connexion, ni flux OAuth. Le mode
+est donc utilisable en test mais inutile en deploiement — personne ne peut entrer, ce qui est
+fail-closed mais sterile. La suite de la phase 2 est le flux Atlassian 3LO, la table des
+habilitations deleguees et le verrou partage du renouvellement.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`
