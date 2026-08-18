@@ -18,7 +18,13 @@ from app.auth.domain import (
     new_code_verifier,
     utc_now,
 )
-from app.auth.errors import AuthorizationExpired, NoSiteGranted, ProviderRefused
+from app.auth.errors import (
+    AmbiguousSiteGrant,
+    AuthorizationExpired,
+    NoSiteGranted,
+    ProviderRefused,
+    UnexpectedSiteGranted,
+)
 from app.auth.workflow import AtlassianSignIn
 from app.bootstrap import build_container
 from app.core.config import Settings
@@ -105,23 +111,37 @@ def redeem(sign_in: AtlassianSignIn) -> tuple[str, str]:
     return url, state
 
 
-def test_the_authorization_url_carries_pkce_and_asks_for_offline_access() -> None:
+def test_the_authorization_url_asks_for_offline_access_and_a_fresh_consent() -> None:
     sign_in = sign_in_for(Recorder())
 
     url, _ = redeem(sign_in)
     query = parse_qs(urlsplit(url).query)
 
     assert urlsplit(url).netloc == "auth.atlassian.com"
-    assert query["code_challenge_method"] == ["S256"]
-    # The verifier itself must never appear in the URL: sending it would defeat the
-    # only thing PKCE is for.
-    assert "code_verifier" not in query
     # Without offline_access the deployment is back at consent within the hour.
     assert "offline_access" in query["scope"][0]
     # Without prompt=consent Atlassian may reuse an earlier grant silently, and the
     # user never sees the site chooser that decides which site the token covers.
     assert query["prompt"] == ["consent"]
     assert query["audience"] == ["api.atlassian.com"]
+    # An unguessable state is what actually ties the callback to this attempt.
+    assert len(query["state"][0]) >= 32
+
+
+def test_the_challenge_pair_is_well_formed_which_says_nothing_about_the_provider() -> None:
+    # This asserts our own construction, not a guarantee from Atlassian: its 3LO
+    # documentation does not describe code_challenge, and nothing here has observed
+    # the provider rejecting a mismatched verifier. Treated as inert until seen to
+    # work -- see docs/development-logs for the procedure that would settle it.
+    sign_in = sign_in_for(Recorder())
+
+    url, _ = redeem(sign_in)
+    query = parse_qs(urlsplit(url).query)
+
+    assert query["code_challenge_method"] == ["S256"]
+    # Whatever the provider does with it, the verifier itself has no business being
+    # in a URL that lands in browser history and server logs.
+    assert "code_verifier" not in query
 
 
 @pytest.mark.anyio
@@ -142,19 +162,21 @@ async def test_a_completed_sign_in_derives_the_tenant_from_the_provider() -> Non
 
 
 @pytest.mark.anyio
-async def test_the_verifier_is_sent_only_when_redeeming_the_code() -> None:
+async def test_the_exchange_carries_the_secret_and_the_matching_verifier() -> None:
     recorder = Recorder()
     sign_in = sign_in_for(recorder)
     url, state = redeem(sign_in)
 
     await sign_in.complete(code="code-1", state=state)
 
-    sent = recorder.token_form["code_verifier"][0]
-    challenge = parse_qs(urlsplit(url).query)["code_challenge"][0]
-    # The challenge published in the first leg has to be the digest of the verifier
-    # produced in the second, or the pairing proves nothing.
-    assert code_challenge_for(sent) == challenge
     assert recorder.token_form["grant_type"] == ["authorization_code"]
+    # The client secret is what Atlassian's documented flow actually authenticates
+    # the exchange with, and it never leaves the server.
+    assert recorder.token_form["client_secret"] == ["secret-xyz"]
+    # The verifier we send matches the challenge we published. Our own consistency,
+    # not a provider guarantee: see the note on code_challenge_for.
+    sent = recorder.token_form["code_verifier"][0]
+    assert code_challenge_for(sent) == parse_qs(urlsplit(url).query)["code_challenge"][0]
 
 
 @pytest.mark.anyio
@@ -202,6 +224,67 @@ async def test_a_grant_covering_no_site_is_refused() -> None:
 
     with pytest.raises(NoSiteGranted):
         await sign_in.complete(code="code-1", state=state)
+
+
+SECOND_SITE = {"id": "b0000000-0000-4000-8000-000000000000", "url": "https://other.atlassian.net"}
+
+
+@pytest.mark.anyio
+async def test_a_grant_covering_several_sites_is_refused_rather_than_guessed() -> None:
+    # The list order is not part of any contract. Taking the first would make the
+    # tenant -- and every permission boundary resting on it -- depend on an ordering
+    # that can differ between two sign-ins of the same user.
+    sign_in = sign_in_for(
+        Recorder(resources=[{"id": CLOUD_ID, "url": SITE_URL}, SECOND_SITE])
+    )
+    _, state = redeem(sign_in)
+
+    with pytest.raises(AmbiguousSiteGrant):
+        await sign_in.complete(code="code-1", state=state)
+
+
+@pytest.mark.anyio
+async def test_a_pinned_site_is_selected_out_of_several() -> None:
+    sessions = InMemorySessionStore()
+    sign_in = sign_in_for(
+        Recorder(resources=[SECOND_SITE, {"id": CLOUD_ID, "url": SITE_URL}]),
+        sessions=sessions,
+    )
+    sign_in._expected_cloud_id = CLOUD_ID  # noqa: SLF001 - the deployment's pin
+    _, state = redeem(sign_in)
+
+    token = await sign_in.complete(code="code-1", state=state)
+
+    session = sessions.get_by_token_hash(session_token_hash(token))
+    assert session is not None
+    # Chosen by name, not by position: the pinned site is second in the payload.
+    assert session.tenant_id == CLOUD_ID
+
+
+@pytest.mark.anyio
+async def test_a_pinned_site_that_was_not_granted_is_refused() -> None:
+    # The same failure the credentials import script guards with --attendu. Without
+    # it the mistake surfaces much later, as a tool refusing for no visible reason.
+    sign_in = sign_in_for(Recorder(resources=[SECOND_SITE]))
+    sign_in._expected_cloud_id = CLOUD_ID  # noqa: SLF001 - the deployment's pin
+    _, state = redeem(sign_in)
+
+    with pytest.raises(UnexpectedSiteGranted):
+        await sign_in.complete(code="code-1", state=state)
+
+
+@pytest.mark.anyio
+async def test_a_single_site_still_derives_the_tenant_without_a_pin() -> None:
+    # The ordinary case must stay ordinary: one site, no configuration needed.
+    sessions = InMemorySessionStore()
+    sign_in = sign_in_for(Recorder(), sessions=sessions)
+    _, state = redeem(sign_in)
+
+    token = await sign_in.complete(code="code-1", state=state)
+
+    session = sessions.get_by_token_hash(session_token_hash(token))
+    assert session is not None
+    assert session.tenant_id == CLOUD_ID
 
 
 @pytest.mark.anyio

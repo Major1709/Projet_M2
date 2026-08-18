@@ -41,6 +41,7 @@ class AtlassianSignIn:
         client_id: str,
         redirect_uri: str,
         session_lifetime: timedelta,
+        expected_cloud_id: str | None = None,
     ) -> None:
         self._client = client
         self._pending = pending
@@ -49,6 +50,7 @@ class AtlassianSignIn:
         self._client_id = client_id
         self._redirect_uri = redirect_uri
         self._session_lifetime = session_lifetime
+        self._expected_cloud_id = expected_cloud_id
 
     def begin(self) -> str:
         """Remember the verifier, then hand back the URL to send the browser to."""
@@ -83,7 +85,10 @@ class AtlassianSignIn:
             verifier=pending.code_verifier,
         )
         access_token = str(document["access_token"])
-        site = await self._client.granted_site(access_token)
+        site = await self._client.granted_site(
+            access_token,
+            expected_cloud_id=self._expected_cloud_id,
+        )
         account_id = await self._client.account_id(access_token)
 
         expires_in = document.get("expires_in")

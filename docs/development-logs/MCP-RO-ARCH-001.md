@@ -1234,11 +1234,38 @@ Le `cloudId` devient donc le tenant et l'`account_id` devient l'utilisateur, tou
 le fournisseur. C'est toute la difference avec le mode en-tetes qu'il remplace, ou l'appelant
 choisissait les deux.
 
+**Mais un octroi peut couvrir plusieurs sites**, et les trois cas sont traites separement :
+
+| Sites couverts | Comportement |
+|---|---|
+| aucun | Refus. Toute lecture ulterieure echouerait avec une erreur sans rapport apparent. |
+| un | Le tenant en est derive, apres verification contre `PKA_ATLASSIAN_EXPECTED_CLOUD_ID` si un site est epingle. |
+| plusieurs | Refus explicite, sauf si l'epinglage en designe un. |
+
+**Jamais le premier element par defaut.** L'ordre de cette liste ne fait partie d'aucun contrat :
+choisir en silence ferait dependre le tenant -- et avec lui chaque frontiere de permission du
+systeme -- d'un ordre arbitraire qui peut changer entre deux connexions du meme utilisateur. Une
+premiere version du code prenait `payload[0]` ; c'etait un defaut, corrige avant toute fusion.
+
 ### Ce qui n'est pas negociable dans ce flux
 
-**PKCE en S256 seulement.** Le verifieur n'apparait jamais dans l'URL d'autorisation : l'y mettre
-defait la seule chose que PKCE apporte. Un test verifie que le defi publie a la premiere etape est
-bien l'empreinte du verifieur envoye a la seconde — sans quoi l'appariement ne prouve rien.
+**PKCE est envoye, pas garanti.** Rectification de ce qui a ete ecrit plus haut dans cette meme
+section : la documentation 3LO d'Atlassian decrit un flux `authorization_code` authentifie par
+`client_secret` et **ne documente ni `code_challenge` ni `code_verifier`**. Rien ici n'a observe le
+fournisseur enregistrer le defi ni refuser un verifieur qui ne correspond pas.
+
+Les parametres restent envoyes -- ils ne coutent rien et agissent d'eux-memes si le fournisseur les
+honore -- mais ils sont traites comme inertes. Ce qui protege reellement ce flux aujourd'hui :
+un `state` imprevisible a usage unique, le `client_secret` detenu cote serveur, un code redimable
+une seule fois, et un cookie que le navigateur ne remet pas au script.
+
+Le test qui verifie l'appariement defi/verifieur atteste **notre propre coherence**, pas une
+garantie du fournisseur, et son nom le dit desormais.
+
+**Procedure pour trancher**, une fois l'application enregistree : jouer un consentement, puis
+echanger le code en substituant un verifieur different de celui qui a produit le defi. Si
+l'echange reussit, Atlassian ignore PKCE et le flux ne repose que sur `state` et le secret. S'il
+echoue en `invalid_grant`, PKCE est actif et peut alors etre revendique.
 
 **`prompt=consent` est explicite.** Sans lui Atlassian peut reutiliser un octroi anterieur en
 silence, et l'utilisateur ne voit jamais le selecteur de site — l'ecran qui decide quel site le

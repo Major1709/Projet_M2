@@ -31,3 +31,26 @@ class NoSiteGranted(SignInError):
 
     code = "NO_SITE_GRANTED"
     safe_message = "No Atlassian site was granted. Choose a site on the consent screen."
+
+
+class AmbiguousSiteGrant(SignInError):
+    """Consent covers several sites and nothing says which one is the tenant.
+
+    Refused rather than resolved by taking the first: the order of that list is not
+    part of any contract, and the tenant is the boundary every permission in this
+    system rests on. A deployment that legitimately faces several sites pins one
+    with ``PKA_ATLASSIAN_EXPECTED_CLOUD_ID``.
+    """
+
+    code = "AMBIGUOUS_SITE_GRANT"
+    safe_message = (
+        "This grant covers several Atlassian sites. "
+        "Authorise a single site, or ask an administrator to pin the expected one."
+    )
+
+
+class UnexpectedSiteGranted(SignInError):
+    """The deployment pinned a site and consent produced a different one."""
+
+    code = "UNEXPECTED_SITE_GRANTED"
+    safe_message = "The authorised Atlassian site is not the one this deployment expects."

@@ -143,6 +143,7 @@ def _build_sign_in(
         client_id=settings.atlassian_oauth_client_id,
         redirect_uri=settings.atlassian_oauth_redirect_uri,
         session_lifetime=timedelta(hours=settings.session_lifetime_hours),
+        expected_cloud_id=settings.atlassian_expected_cloud_id,
     )
 
 

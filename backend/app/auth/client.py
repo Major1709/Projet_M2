@@ -13,7 +13,12 @@ from app.auth.domain import (
     AtlassianSite,
     code_challenge_for,
 )
-from app.auth.errors import NoSiteGranted, ProviderRefused
+from app.auth.errors import (
+    AmbiguousSiteGrant,
+    NoSiteGranted,
+    ProviderRefused,
+    UnexpectedSiteGranted,
+)
 from app.mcp.adapters.http_guard import (
     EndpointResolver,
     PinnedAddressTransport,
@@ -46,6 +51,11 @@ def authorization_url(*, client_id: str, redirect_uri: str, state: str, verifier
     ``prompt=consent`` on purpose: without it Atlassian may silently reuse an earlier
     grant, and the user never sees the site chooser -- which is the one screen that
     decides which site the resulting token covers.
+
+    The ``code_challenge`` pair is sent but **not counted on**: Atlassian's 3LO
+    documentation does not describe it, and nothing here has observed the provider
+    enforcing it. See ``code_challenge_for``. The protection that does hold is the
+    unguessable single-use ``state`` paired with a server-held ``client_secret``.
     """
 
     query = urlencode(
@@ -107,21 +117,54 @@ class AtlassianOAuthClient:
                 raise ProviderRefused()
         return document
 
-    async def granted_site(self, access_token: str) -> AtlassianSite:
-        """The single site this token covers.
+    async def granted_site(
+        self,
+        access_token: str,
+        *,
+        expected_cloud_id: str | None = None,
+    ) -> AtlassianSite:
+        """The site whose cloud id becomes the tenant, or a refusal.
 
-        A delegated Atlassian token covers exactly the site chosen on the consent
-        screen, and nothing in the token says which. This call is the only way to
-        learn it -- and the reason the tenant can be derived rather than declared.
+        Nothing in a delegated Atlassian token says which site it covers, so this
+        call is the only way to learn it -- and the reason the tenant can be derived
+        rather than declared. But a grant may cover **several** sites, and the three
+        cases are handled apart on purpose:
+
+        * none: refuse, because every later read would fail with an unrelated-looking
+          error;
+        * one: derive the tenant from it, after checking it against
+          ``expected_cloud_id`` when a deployment pinned one;
+        * several: refuse, unless ``expected_cloud_id`` names one of them.
+
+        **Never the first element by default.** The order of this list is not part of
+        any contract, so picking silently would make the tenant -- and with it every
+        permission boundary in this system -- depend on an arbitrary ordering that can
+        change between two sign-ins of the same user.
         """
 
         payload = await self._get(ATLASSIAN_ACCESSIBLE_RESOURCES, access_token)
-        if not isinstance(payload, list) or not payload:
+        if not isinstance(payload, list):
+            raise ProviderRefused()
+        sites = [
+            AtlassianSite(cloud_id=str(entry["id"]), url=str(entry["url"]))
+            for entry in payload
+            if isinstance(entry, dict) and entry.get("id") and entry.get("url")
+        ]
+        if not sites:
             raise NoSiteGranted()
-        first = payload[0]
-        if not isinstance(first, dict) or not first.get("id") or not first.get("url"):
-            raise NoSiteGranted()
-        return AtlassianSite(cloud_id=str(first["id"]), url=str(first["url"]))
+
+        if expected_cloud_id is not None:
+            for site in sites:
+                if site.cloud_id == expected_cloud_id:
+                    return site
+            # Pinned and absent. The same failure the credentials import script
+            # guards with --attendu: without this check the mistake only surfaces
+            # much later, as a tool that refuses for no visible reason.
+            raise UnexpectedSiteGranted()
+
+        if len(sites) > 1:
+            raise AmbiguousSiteGrant()
+        return sites[0]
 
     async def account_id(self, access_token: str) -> str:
         payload = await self._get(ATLASSIAN_ME_ENDPOINT, access_token)

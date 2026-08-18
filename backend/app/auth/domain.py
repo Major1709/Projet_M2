@@ -43,11 +43,19 @@ def new_code_verifier() -> str:
 
 
 def code_challenge_for(verifier: str) -> str:
-    """S256, the only method worth offering.
+    """S256 challenge for a verifier.
 
-    The ``plain`` method sends the verifier itself, which defeats the purpose: PKCE
-    exists so that intercepting the authorization request does not yield what is
-    needed to redeem the code.
+    **Sent, not relied upon.** Atlassian's 3LO documentation describes an
+    authorization code flow secured by a ``client_secret``; it does not document
+    ``code_challenge`` or ``code_verifier``, and this deployment has not observed
+    whether the provider records the challenge and rejects a mismatched verifier.
+    Until an exchange with a deliberately wrong verifier is seen to fail, these
+    parameters must be treated as inert.
+
+    They are still sent: they cost nothing, and they take effect on their own if the
+    provider does honour them. What actually protects this flow today is the
+    unguessable single-use ``state``, the server-held ``client_secret``, the code
+    being redeemable once, and a cookie the browser will not hand to script.
     """
 
     digest = hashlib.sha256(verifier.encode("ascii")).digest()

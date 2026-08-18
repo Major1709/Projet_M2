@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Where the browser lands once signed in. A path, never a full URL and never a
     # caller-supplied "next": an open redirect is the classic hole in this flow.
     atlassian_oauth_post_login_path: str = Field(default="/", min_length=1, max_length=200)
+    # Pins which site becomes the tenant when a grant covers several. Absent, a
+    # multi-site grant is refused rather than resolved by picking one.
+    atlassian_expected_cloud_id: str | None = Field(default=None, min_length=1, max_length=200)
     # Browser origins allowed to call the API cross-origin. Empty by default, which
     # installs no CORS middleware at all: a browser then refuses the call, which is
     # the right answer for a deployment that has not named its front end.
