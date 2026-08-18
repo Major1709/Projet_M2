@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ProjectAssistantGateway } from "./assistant-gateway";
+import { AssistantGatewayError, type ProjectAssistantGateway } from "./assistant-gateway";
 import { useAssistantWorkspace } from "./use-assistant-workspace";
 import type { ProjectAssistantSnapshot } from "../domain/models";
 import {
@@ -100,5 +100,34 @@ describe("useAssistantWorkspace", () => {
 
     expect(result.current.action.state).toBe(snapshot.action.state);
     expect(result.current.error).toContain("reste non exécutée");
+  });
+
+  it("shows a gateway refusal as written, since it says what to do next", async () => {
+    const snapshot = buildSnapshot();
+    const gateway = buildGateway();
+    vi.mocked(gateway.sendMessage).mockRejectedValueOnce(
+      new AssistantGatewayError("RATE_LIMITED", "Le quota du modèle est épuisé."),
+    );
+    const { result } = renderHook(() => useAssistantWorkspace(snapshot, gateway));
+
+    await act(() => result.current.sendMessage("Où en est ABM-12 ?"));
+
+    expect(result.current.messages.at(-1)?.status).toBe("error");
+    expect(result.current.messages.at(-1)?.content).toBe("Le quota du modèle est épuisé.");
+    expect(result.current.error).toBe("Le quota du modèle est épuisé.");
+  });
+
+  it("keeps an arbitrary failure generic, so transport detail stays out of the chat", async () => {
+    const snapshot = buildSnapshot();
+    const gateway = buildGateway();
+    vi.mocked(gateway.sendMessage).mockRejectedValueOnce(
+      new Error("ECONNREFUSED 127.0.0.1:8000"),
+    );
+    const { result } = renderHook(() => useAssistantWorkspace(snapshot, gateway));
+
+    await act(() => result.current.sendMessage("Où en est ABM-12 ?"));
+
+    expect(result.current.messages.at(-1)?.content).not.toContain("ECONNREFUSED");
+    expect(result.current.error).toContain("Aucune action externe");
   });
 });

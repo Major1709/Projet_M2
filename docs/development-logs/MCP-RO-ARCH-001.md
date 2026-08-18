@@ -948,6 +948,166 @@ Un seul exemplaire pour les trois adaptateurs, pour la raison déjà écrite en 
 deux copies d'un contrôle d'adresse font deux endroits à affaiblir, et le second est celui que
 personne ne relit.
 
+## La passerelle branchée sur le backend — 2026-08-17
+
+Le frontend parlait jusqu'ici à `demoAssistantGateway`, un adaptateur qui attend 550 ms et renvoie
+un texte fixe. La passerelle elle-même — `ProjectAssistantGateway` — est un port de trois méthodes :
+`sendMessage`, `indexRequests`, `decideAction`. **Une seule des trois a une contrepartie serveur**,
+et c'est le fait structurant de cette tranche.
+
+`createHttpAssistantGateway` appelle `POST /api/agent/questions` avec `X-Tenant-ID` et `X-User-ID`,
+et projette `AgentAnswer` en `ChatMessage`. Trois décisions valent d'être écrites :
+
+- **Le `correlation_id` devient l'identifiant du message.** Il est généré côté navigateur, envoyé
+  dans le corps, et conservé comme `id`. C'est lui qui relie une réponse affichée à ses lectures
+  dans la trace d'audit : un `Date.now()` aurait été unique sans être retrouvable.
+- **`confidence` et `inferred` restent vides.** Le modèle `SourceReference` les déclare, la maquette
+  les affiche sous la forme « IA · 87 % », et le backend ne produit ni l'un ni l'autre — ses
+  citations viennent de la provenance des lectures réellement effectuées. Les remplir d'une valeur
+  plausible aurait affiché une mesure que rien ne mesure. Même raisonnement que pour
+  `source_complete`, écarté d'`AgentSource` pour la même raison.
+- **`truncated` est affiché**, dans `location`, parce que c'est la seule information qu'un lecteur ne
+  peut pas déduire du lien : la réponse a été formée sur un fragment.
+
+`SourceSystem` gagne `"atlassian"`. Le backend l'émet lorsqu'une lecture est passée par le serveur
+MCP Atlassian sans que l'outil désigne Jira ou Confluence ; le rabattre sur l'un des deux aurait
+nommé un produit que personne n'a vérifié.
+
+**Les deux autres méthodes refusent au lieu de simuler.** `indexRequests` n'a aucune contrepartie —
+il n'existe pas d'index, les lectures sont pilotées par les recherches du modèle — et un succès
+fabriqué aurait marqué les demandes `INDEXED` dans le navigateur. `decideAction` a bien une API
+d'approbations, mais elle décide sur des propositions créées par le serveur, et ce build n'en
+produit aucune : les mutations sont désactivées. Un `APPROVED` affiché aurait montré une décision
+enregistrée nulle part.
+
+Le hook distingue désormais un `AssistantGatewayError` — un refus déjà rédigé pour le lecteur, qui
+dit quoi faire — d'une exception quelconque, dont le message est écrit pour un développeur et ne
+doit pas entrer dans la conversation. Les statuts sont traduits un par un : 429 « réessayez dans une
+minute », 413 « reformulez plus court, attendre ne changera rien », 503 « l'assistant refuse de lire
+sans pouvoir consigner ». Le `detail.message` du backend n'est jamais affiché : il est écrit pour un
+opérateur et peut citer le fournisseur.
+
+### CORS, ajouté parce que sans lui rien ne part
+
+Le navigateur refusait la requête avant de l'émettre : en-têtes personnalisés, donc préflight, donc
+CORS obligatoire. `PKA_FRONTEND_ORIGINS` est **vide par défaut**, et le middleware n'est alors pas
+installé du tout. Origines exactes uniquement, ni joker ni expression régulière — les en-têtes
+d'identité sont le locataire, donc une origine autorisée à les envoyer est une origine autorisée à
+choisir un tenant. `allow_credentials` reste faux, HTTP simple n'est toléré que sur `localhost`, et
+une valeur non conforme est refusée à la construction : un joker accepté ici ne se découvrirait
+qu'en constatant qu'une page que personne n'a déployée appelle l'API avec son propre tenant.
+
+Le point de composition est unique : `ProjectAssistantScreen` choisit l'adaptateur selon
+`NEXT_PUBLIC_ASSISTANT_API_URL`, et retombe sur la démonstration si les trois variables ne sont pas
+toutes présentes — un build sans backend ne doit pas proposer un assistant qui échoue à chaque
+message. Le tenant et l'utilisateur viennent de l'environnement parce que ce build n'authentifie
+personne : c'est le mode `dev_headers`, que les settings du backend interdisent en production. Cette
+configuration ne peut donc pas être déployée telle quelle, et la couture à remplacer est là.
+
+**Non vérifié en réel :** aucun aller-retour navigateur → backend → Groq n'a été joué. Ce qui est
+prouvé l'est par tests — 21 côté frontend, dont la forme exacte de la requête, la traduction des six
+statuts et les deux refus ; 12 côté backend pour CORS. Le parcours `recherche → lecture → réponse
+citée` reste par ailleurs bloqué par le quota du palier gratuit, comme consigné plus haut.
+
+## Phase 0 : la chaîne prouvée jusqu'à l'avant-dernier appel — 2026-08-17
+
+Première exécution réelle de bout en bout, `correlation_id` `phase0-20260817T192007Z`. Six
+événements d'audit, tous sous le même identifiant :
+
+| # | Événement | Durée | Contenu |
+|---|---|---|---|
+| 1 | `LLM_INVOCATION_AUTHORIZED` | — | 15 outils exposés, empreinte du prompt |
+| 2 | `LLM_INVOCATION_COMPLETED` | 6 046 ms | Choisit `getJiraIssue`, `text_characters: 0` |
+| 3 | `MCP_READ_AUTHORIZED` | — | jira / `getJiraIssue`, `SPEC-MCP-RO-001-r2` |
+| 4 | `MCP_READ_COMPLETED` | 9 448 ms | Lecture Jira réelle, protocole `2025-11-25` |
+| 5 | `LLM_INVOCATION_AUTHORIZED` | — | Second appel, transcript à 4 messages |
+| 6 | `LLM_INVOCATION_REFUSED` | 607 ms | `LLM_RATE_LIMITED` |
+
+**Ce qui est désormais prouvé :** question → sélection d'outil → lecture Jira réelle. Le modèle est
+allé directement à `getJiraIssue` sans énumérer les projets, ce qui confirme que nommer le projet
+dans la question évite l'étape d'énumération et raccourcit la chaîne d'un appel.
+
+**Ce qui ne l'est pas :** la synthèse finale citée, refusée pour épuisement de quota au dernier
+appel — un budget, pas un défaut. Et l'aller-retour depuis un vrai navigateur : la requête a été
+émise par `curl` avec l'en-tête `Origin`, ce qui exerce la politique CORS mais pas le client.
+
+**CORS vérifié dans les deux sens.** Origine déclarée : `200` avec
+`access-control-allow-origin` et les deux en-têtes d'identité admis. Origine inconnue : `400`
+**sans** l'en-tête d'autorisation, donc bloquée par le navigateur. `allow_credentials` reste absent.
+
+### Trois variables de configuration ne servaient à rien
+
+Les settings utilisent `env_prefix="PKA_"` avec `extra="ignore"` : toute variable sans ce préfixe
+est ignorée en silence.
+
+- `BACKEND_CORS_ORIGINS` n'a jamais été lue. Le seul levier réel, `PKA_FRONTEND_ORIGINS`, était
+  **absent** du `compose` et du `.env` — donc aucun middleware CORS n'était installé.
+- `MAX_AGENT_STEPS=12` laissait croire à un plafond de douze étapes. Le vrai est
+  `DEFAULT_MAX_STEPS = 4`, en dur. Supprimée.
+- `EMBEDDING_MODEL=BAAI/bge-m3` contredisait la décision prise le même jour. Alignée sur
+  `intfloat/multilingual-e5-base`, avec la mention explicite qu'aucun code ne la lit encore.
+
+### L'image déployée avait plusieurs tranches de retard
+
+Le conteneur `api` qui tournait n'exposait ni `/api/agent/questions` ni la politique CORS : son
+image précédait toute la tranche d'orchestration. « La pile tourne » ne disait donc rien de ce
+qu'elle servait. Reconstruite avant la sonde.
+
+### Le corpus Jira est vide
+
+`getVisibleJiraProjects` retourne un seul projet, `KAN`, contenant un seul ticket, `KAN-1`, un bug
+intitulé « test ». Suffisant pour prouver une lecture et une citation ; **insuffisant pour
+démontrer un rapprochement sémantique**, qui exige des tickets décrivant des sujets voisins avec
+des formulations différentes. C'est un prérequis de la phase 3, à traiter avant elle et non pendant.
+
+## Phase 0 close : le parcours complet depuis le navigateur — 2026-08-18
+
+Rejeu depuis un vrai navigateur, une seule tentative, sans appel Groq preparatoire.
+`correlation_id` `327bda05-88de-49db-b2f6-5d7edf87bd73`, genere cote navigateur et repris tel quel
+comme identifiant du message.
+
+Question posee dans l'interface : « Dans le projet Jira KAN, quel est le resume et le statut du
+ticket KAN-1 ? »
+
+| # | Evenement | Duree | Contenu |
+|---|---|---|---|
+| 1 | `LLM_INVOCATION_AUTHORIZED` | — | 15 outils exposes |
+| 2 | `LLM_INVOCATION_COMPLETED` | 2 266 ms | 0 caractere, choisit `getJiraIssue` |
+| 3 | `MCP_READ_AUTHORIZED` | — | jira / `getJiraIssue` |
+| 4 | `MCP_READ_COMPLETED` | 15 159 ms | Lecture Jira reelle |
+| 5 | `LLM_INVOCATION_AUTHORIZED` | — | Second appel |
+| 6 | `LLM_INVOCATION_COMPLETED` | 1 468 ms | 84 caracteres, aucun outil : la synthese |
+
+Reponse rendue : « Pour le ticket **KAN-1** : **Resume (Summary)** : test — **Statut** : A faire ».
+Elle correspond exactement a ce que `getVisibleJiraProjects` et `searchJiraIssuesUsingJql` avaient
+montre en lecture directe. **Aucun `LLM_INVOCATION_BOUNDED`** : la reponse n'est pas tronquee.
+
+La citation affichee pointe vers `https://andrianalyfanny.atlassian.net/browse/KAN-1`, verifie dans
+le DOM. C'est le seul lien Jira de la page hors fixtures.
+
+**Le parcours navigateur -> frontend -> backend -> Groq -> MCP Jira -> synthese -> citation est
+donc prouve de bout en bout.** Le dernier ecart de la tranche est leve.
+
+Deux observations que seule l'execution reelle pouvait donner :
+
+- **La source reelle ne porte aucun pourcentage**, la fixture de demonstration juste au-dessus
+  affiche « IA · 86 % ». C'est le champ `confidence` laisse vide faute de contrepartie backend, et
+  le contraste est visible a l'ecran.
+- **La lecture MCP domine le temps de reponse** : 15,2 s sur 19,0 s au total, contre 3,7 s cumules
+  pour les deux appels au modele. L'optimisation eventuelle est du cote de la source, pas du LLM.
+
+### Deux libelles de l'interface mentent desormais
+
+Herites de l'ere demonstration, ils etaient exacts tant que la passerelle etait factice :
+
+- `message-composer.tsx` affiche « Reponse simulee · aucune connexion MCP » sous la zone de saisie.
+- `assistant-workspace.tsx` affiche « Aucune donnee n'est envoyee a une source externe. »
+
+Les deux sont faux des lors que l'adaptateur HTTP est actif : la reponse est reelle, une lecture MCP
+a eu lieu, et la question part vers Groq. A conditionner sur l'adaptateur reellement utilise, ou a
+retirer. Consigne en dette, non corrige dans cette tranche pour ne pas melanger la preuve et un
+changement d'interface.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`

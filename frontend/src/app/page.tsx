@@ -1,5 +1,5 @@
-import { ProjectAssistantDemo } from "@/features/project-assistant";
+import { ProjectAssistantScreen } from "@/features/project-assistant";
 
 export default function HomePage() {
-  return <ProjectAssistantDemo />;
+  return <ProjectAssistantScreen />;
 }

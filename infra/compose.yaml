@@ -25,6 +25,10 @@ x-backend-environment: &backend-environment
   PKA_ENVIRONMENT: ${APP_ENV:-development}
   PKA_REPOSITORY_BACKEND: postgres
   PKA_AUTH_MODE: dev_headers
+  # Exact browser origins allowed to call the API. Empty installs no CORS middleware
+  # at all, and the browser then refuses the call before sending it -- which is why
+  # a front end that is not named here simply never reaches the backend.
+  PKA_FRONTEND_ORIGINS: ${PKA_FRONTEND_ORIGINS:-[]}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   TZ: ${TZ:-UTC}
   REDIS_HOST: redis
@@ -37,8 +41,11 @@ x-backend-environment: &backend-environment
   PKA_LLM_GROQ_ENABLED: ${PKA_LLM_GROQ_ENABLED:-false}
   PKA_LLM_GROQ_API_KEY_FILE: /run/secrets/groq_api_key
   PKA_LLM_GROQ_MODEL: ${PKA_LLM_GROQ_MODEL:-qwen/qwen3.6-27b}
+  # Decided 2026-08-17 for the retrieval phase, and not read by any code yet: no
+  # embedding provider exists. Kept aligned with the decision so the configuration
+  # does not describe a model the project has ruled out.
   EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
-  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-base}
   TOKEN_ENCRYPTION_KEY_FILE: /run/secrets/token_encryption_key
   SESSION_SIGNING_KEY_FILE: /run/secrets/session_signing_key
   OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-https://identity.example.invalid}
@@ -50,7 +57,6 @@ x-backend-environment: &backend-environment
   PKA_MCP_CONFLUENCE_ENABLED: ${PKA_MCP_CONFLUENCE_ENABLED:-false}
   PKA_MCP_FIGMA_ENABLED: ${PKA_MCP_FIGMA_ENABLED:-false}
   PKA_MCP_GRANT_BACKEND: ${PKA_MCP_GRANT_BACKEND:-disabled}
-  MAX_AGENT_STEPS: ${MAX_AGENT_STEPS:-12}
   OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
   OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
@@ -115,7 +121,6 @@ services:
     environment:
       <<: *backend-environment
       OTEL_SERVICE_NAME: projet-m2-api
-      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3000}
     secrets: *backend-secrets
     ports:
       - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"

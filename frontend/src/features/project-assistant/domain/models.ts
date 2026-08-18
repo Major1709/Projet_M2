@@ -1,4 +1,8 @@
-export type SourceSystem = "jira" | "confluence" | "figma";
+// "atlassian" is not a fourth product: it is what the backend reports when a read
+// went through the Atlassian MCP server without the tool telling which of Jira or
+// Confluence answered. Narrowing it to one of the two would name a product nobody
+// verified, so the union carries it as it comes.
+export type SourceSystem = "atlassian" | "jira" | "confluence" | "figma";
 
 export type JiraStatus = "À qualifier" | "En analyse" | "Prête" | "Bloquée";
 

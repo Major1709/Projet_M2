@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import type { ProjectAssistantGateway } from "./assistant-gateway";
+import { AssistantGatewayError, type ProjectAssistantGateway } from "./assistant-gateway";
 import type {
   ActionDecision,
   ActionProposal,
@@ -80,13 +80,15 @@ export function useAssistantWorkspace(
           result.requestIds.includes(request.id) ? { ...request, indexation: "INDEXED" } : request,
         ),
       );
-    } catch {
+    } catch (cause) {
       setRequests((current) =>
         current.map((request) =>
           requestIds.includes(request.id) ? { ...request, indexation: "FAILED" } : request,
         ),
       );
-      setError("L’indexation a échoué. Réessayez après avoir vérifié la connexion Jira.");
+      setError(
+        reasonFor(cause, "L’indexation a échoué. Réessayez après avoir vérifié la connexion Jira."),
+      );
     } finally {
       setIsIndexing(false);
     }
@@ -108,19 +110,23 @@ export function useAssistantWorkspace(
     try {
       const response = await gateway.sendMessage(content);
       setMessages((current) => [...current, response]);
-    } catch {
+    } catch (cause) {
+      const reason = reasonFor(
+        cause,
+        "La réponse n’a pas pu être générée. Aucune action externe n’a été exécutée.",
+      );
       setMessages((current) => [
         ...current,
         {
           id: `assistant-error-${Date.now()}`,
           role: "assistant",
           author: "Nexus",
-          content: "La réponse n’a pas pu être générée. Aucune action externe n’a été exécutée.",
+          content: reason,
           createdAt: formatTime(new Date()),
           status: "error",
         },
       ]);
-      setError("Le service de conversation est momentanément indisponible.");
+      setError(reason);
     } finally {
       setIsResponding(false);
     }
@@ -134,8 +140,10 @@ export function useAssistantWorkspace(
       const result = await gateway.decideAction(action, decision);
       setAction((current) => ({ ...current, state: result.state }));
       setDecisionFeedback(result.message);
-    } catch {
-      setError("La décision n’a pas été enregistrée. L’action reste non exécutée.");
+    } catch (cause) {
+      setError(
+        reasonFor(cause, "La décision n’a pas été enregistrée. L’action reste non exécutée."),
+      );
     } finally {
       setBusyDecision(null);
     }
@@ -164,6 +172,18 @@ export function useAssistantWorkspace(
     sendMessage,
     toggleRequest,
   };
+}
+
+/**
+ * A refusal the gateway phrased, or the screen's own wording.
+ *
+ * The distinction matters: an `AssistantGatewayError` says what happened and what
+ * to do about it -- quota exhausted, mutations off -- whereas an arbitrary
+ * exception carries a message written for a developer, and showing it would leak
+ * transport detail into the conversation.
+ */
+function reasonFor(cause: unknown, fallback: string) {
+  return cause instanceof AssistantGatewayError ? cause.message : fallback;
 }
 
 function formatTime(value: Date) {

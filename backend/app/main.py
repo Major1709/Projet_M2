@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.api import router as agent_router
 from app.approvals.api import router as approvals_router
@@ -35,6 +36,18 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.container = resolved_container
+    if resolved_settings.frontend_origins:
+        # Installed only when a front end has been named. Credentials stay off: this
+        # API carries no cookie, and allowing them would make the browser attach any
+        # it holds for the origin. The header list is closed for the same reason the
+        # origin list is -- the identity headers are the tenant.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(resolved_settings.frontend_origins),
+            allow_credentials=False,
+            allow_methods=["GET", "POST"],
+            allow_headers=["Content-Type", "X-Tenant-ID", "X-User-ID"],
+        )
     app.include_router(health_router)
     app.include_router(conversations_router)
     app.include_router(approvals_router)
