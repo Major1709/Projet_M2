@@ -1108,6 +1108,60 @@ a eu lieu, et la question part vers Groq. A conditionner sur l'adaptateur reelle
 retirer. Consigne en dette, non corrige dans cette tranche pour ne pas melanger la preuve et un
 changement d'interface.
 
+## Phase 1 : la conversation survit au rechargement — 2026-08-18
+
+Deux tables, `conversation_messages` et `message_sources`. La table `conversations` ne portait
+que le fil ; une page rechargée revenait vide.
+
+### Ce qui a été décidé, et pourquoi
+
+**`conversation_id` est optionnel sur `AgentQuestion`.** Absent, le comportement est celui
+d'avant ; présent, les deux tours sont enregistrés. Le rendre obligatoire aurait cassé le
+frontend le jour même, alors que le chantier de rhabillage démarre en parallèle et qu'il ne
+demandait pas encore cette fonctionnalité.
+
+**Le tour utilisateur s'écrit avant l'appel, la réponse après.** Un `429` laisse donc une
+question sans réponse à côté, ce qui est la description exacte de ce qui s'est produit. En
+revanche une conversation inconnue, ou appartenant à quelqu'un d'autre, est refusée **avant**
+l'appel : le découvrir ensuite aurait gaspillé un budget réel pour une réponse que personne ne
+peut recevoir.
+
+**Un échec d'écriture ne fait pas échouer la réponse.** Écart assumé avec l'audit, qui reste
+fail-closed. Les deux ne protègent pas la même chose : une lecture non consignée est un trou de
+gouvernance, une ligne de conversation perdue est une gêne. Refuser une réponse déjà payée en
+appel au modèle et en lecture Jira détruirait plus que le défaut évité — et l'audit garde le
+récit complet.
+
+**Deux invariants sont dans le schéma, pas dans le code.** La clé étrangère embarque la colonne
+propriétaire, sur le modèle de `action_proposals` : écrire dans le fil d'autrui est rejeté par
+PostgreSQL. Et `message_sources` n'a de colonne ni pour un score de confiance ni pour un
+drapeau d'inférence — la décision prise au niveau de l'API devient impossible à contourner par
+le stockage.
+
+Vérifié contre le PostgreSQL du `compose` : rattacher un tour à la conversation d'un autre
+échoue sur `fk_conversation_messages_tenant_conversation_owner`, deux tours au même rang sur
+`uq_conversation_messages_tenant_id_conversation_id_sequence`.
+
+### Un défaut trouvé par les tests, pas par la relecture
+
+L'ordre des tours était **aléatoire**. L'horloge Windows a une résolution d'environ 15 ms : les
+deux tours d'un même échange tombent dans le même tic, `created_at` est identique, et le
+départage tombait sur un UUID aléatoire. La conversation s'affichait à l'envers environ une fois
+sur deux.
+
+Ce défaut ne se serait pas vu en relecture, et se serait manifesté en production comme « les
+messages sont parfois dans le désordre » — irreproductible à la demande. Corrigé par une colonne
+`sequence` explicite, unique par fil, attribuée dans la même transaction que l'insertion : deux
+tours concurrents se heurtent alors à la contrainte plutôt que de prendre silencieusement le
+même rang. Un test de régression joue deux échanges consécutifs et vérifie les quatre rangs.
+
+### Périmètre
+
+Le plafond de lecture est serveur, à 200 tours, et une demande supérieure est **refusée** plutôt
+que réduite en silence. Reste à faire : le branchement dans l'interface, qui appartient au
+chantier de rhabillage, et le sort d'`indexRequests` dans le port — repoussé pour ne pas déplacer
+le sol sous ce chantier.
+
 ## Dette technique
 
 - **Deux fichiers de secrets sont en réalité des répertoires.** `infra/secrets/dev/`
