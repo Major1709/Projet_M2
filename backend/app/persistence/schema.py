@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Integer,
+    LargeBinary,
     MetaData,
     String,
     Table,
@@ -214,4 +215,30 @@ document_embeddings = Table(
     Column("content_digest", String(64), nullable=False),
     Column("embedding", Vector(EMBEDDING_DIMENSIONS), nullable=False),
     Column("indexed_at", DateTime(timezone=True), nullable=False),
+)
+
+
+delegated_grants = Table(
+    "delegated_grants",
+    metadata,
+    # One grant per person per tenant. The pair is the key because that is what a
+    # read is performed on behalf of; a second row for the same pair would mean
+    # two Atlassian identities behind one user, and nothing could choose between
+    # them.
+    Column("tenant_id", String(200), primary_key=True),
+    Column("user_id", String(200), primary_key=True),
+    # Ciphertext, never the tokens. AES-256-GCM with the nonce prefixed, and the
+    # tenant and user bound in as associated data -- a row copied to another
+    # identity then fails to authenticate instead of handing over its access.
+    Column("access_token", LargeBinary, nullable=False),
+    Column("refresh_token", LargeBinary, nullable=False),
+    # Which key sealed this row. Rotation can then proceed row by row rather than
+    # as a flag day that invalidates every grant at once.
+    Column("key_version", Integer, nullable=False),
+    # In the clear, deliberately: the renewal decision must be takeable without
+    # decrypting, and an expiry timestamp reveals nothing a session table does not
+    # already say.
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("key_version >= 1", name="key_version_positive"),
 )

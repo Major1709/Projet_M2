@@ -16,7 +16,10 @@ from app.auth.adapters.memory import (
     InMemoryDelegatedGrantSink,
     InMemoryPendingAuthorizationStore,
 )
+from app.auth.adapters.postgres import PostgresDelegatedGrantStore
 from app.auth.client import AtlassianOAuthClient
+from app.auth.crypto import GrantCipher, load_key
+from app.auth.ports import DelegatedGrantSink
 from app.auth.workflow import AtlassianSignIn
 from app.conversations.adapters.memory import (
     InMemoryConversationMessageRepository,
@@ -91,6 +94,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
         approval_uow_factory = InMemoryApprovalUnitOfWork()
         mcp_reads = _build_mcp_read_workflow(settings, approval_uow_factory.audit)
         semantic_index = _build_semantic_index(settings, InMemoryEmbeddingStore())
+        grants: DelegatedGrantSink = _build_grant_sink(settings, None)
         return ApplicationContainer(
             approvals=ApprovalWorkflow(approval_uow_factory, conversation_repository),
             audit=approval_uow_factory.audit,
@@ -103,7 +107,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
             readiness_probe=lambda: True,
             sessions=session_store,
             settings=settings,
-            sign_in=_build_sign_in(settings, session_store),
+            sign_in=_build_sign_in(settings, session_store, grants),
         )
 
     engine = create_database_engine(settings)
@@ -115,6 +119,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
     audit_writer = PostgresAppendOnlyAuditWriter(session_factory)
     mcp_reads = _build_mcp_read_workflow(settings, audit_writer)
     semantic_index = _build_semantic_index(settings, PostgresEmbeddingStore(session_factory))
+    grants = _build_grant_sink(settings, session_factory)
     return ApplicationContainer(
         approvals=ApprovalWorkflow(approval_uow_factory, conversation_repository),
         audit=audit_writer,
@@ -125,7 +130,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
         readiness_probe=lambda: database_is_ready(engine),
         sessions=session_store,
         settings=settings,
-        sign_in=_build_sign_in(settings, session_store),
+        sign_in=_build_sign_in(settings, session_store, grants),
         engine=engine,
     )
 
@@ -133,6 +138,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
 def _build_sign_in(
     settings: Settings,
     sessions: SessionStore,
+    grants: DelegatedGrantSink,
 ) -> AtlassianSignIn | None:
     if not settings.atlassian_oauth_enabled:
         return None
@@ -150,15 +156,27 @@ def _build_sign_in(
         ),
         pending=InMemoryPendingAuthorizationStore(),
         sessions=sessions,
-        # Process memory until the encrypted store exists. Losing the grant on
-        # restart forces consent again, which beats a refresh token in a file
-        # nobody rotates.
-        grants=InMemoryDelegatedGrantSink(),
+        grants=grants,
         client_id=settings.atlassian_oauth_client_id,
         redirect_uri=settings.atlassian_oauth_redirect_uri,
         session_lifetime=timedelta(hours=settings.session_lifetime_hours),
         expected_cloud_id=settings.atlassian_expected_cloud_id,
     )
+
+
+def _build_grant_sink(settings: Settings, session_factory: object | None):
+    """The durable grant store, or the memory one.
+
+    Falls back rather than fails: a deployment without an encryption key must not
+    write refresh tokens to disk in the clear, and it must not refuse to start
+    either. Losing grants on restart costs a consent; storing them unsealed costs
+    considerably more.
+    """
+
+    if settings.token_encryption_key_file is None or session_factory is None:
+        return InMemoryDelegatedGrantSink()
+    cipher = GrantCipher(load_key(settings.token_encryption_key_file.read_text()))
+    return PostgresDelegatedGrantStore(session_factory, cipher)
 
 
 def _build_semantic_index(settings: Settings, store: EmbeddingStore) -> SemanticIndex | None:

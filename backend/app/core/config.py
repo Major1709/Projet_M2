@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     auth_mode: Literal["dev_headers", "session"] = "dev_headers"
     session_lifetime_hours: int = Field(default=12, ge=1, le=24 * 30)
 
+    # Seals the delegated grants at rest. 32 bytes in hexadecimal, in a file --
+    # never an environment variable, which every child process inherits and every
+    # crash reporter collects. Absent, the durable grant store is not built and
+    # consent stays in process memory, which is the safer of the two omissions.
+    token_encryption_key_file: Path | None = None
+
     # Semantic retrieval. Off by default: the runtime weighs about 2,3 Go and
     # downloads a model on first use, so a deployment must ask for it rather than
     # acquire it by upgrading.
