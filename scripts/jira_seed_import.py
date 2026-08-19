@@ -75,6 +75,20 @@ API = "{site}/rest/api/3"
 # est exactement le profil qu'une limite de debit sanctionne, et une limite
 # atteinte au quinzieme ticket laisse le corpus a moitie importe.
 PAUSE_SECONDES = 0.7
+# Jira traduit le nom de ses types standards selon la langue du site, et l'API
+# les expose traduits. Le corpus, lui, est ecrit une fois : il nomme les types en
+# anglais, et c'est ici qu'on retrouve le nom que ce site-ci emploie.
+#
+# La table ne traduit rien d'autre. Un type propre au projet doit porter dans le
+# corpus le nom exact qu'il a dans Jira -- deviner une equivalence sur un type
+# metier reviendrait a classer des tickets d'apres une ressemblance de mots.
+ALIAS_TYPES: dict[str, tuple[str, ...]] = {
+    "Task": ("Task", "Tâche"),
+    "Bug": ("Bug", "Bogue"),
+    "Story": ("Story", "Récit"),
+    "Epic": ("Epic", "Épopée"),
+    "Subtask": ("Subtask", "Sous-tâche"),
+}
 
 
 class ImportEchoue(RuntimeError):
@@ -151,8 +165,8 @@ def _verifier_le_projet(
     site: str,
     projet: str,
     lignes: list[dict[str, str]],
-) -> None:
-    """Confronter le corpus au projet avant d'ecrire quoi que ce soit.
+) -> dict[str, str]:
+    """Confronter le corpus au projet, et rendre la traduction des types a employer.
 
     Un type ou une priorite absents ne se verraient sinon qu'a la premiere
     creation refusee, corpus deja a moitie importe.
@@ -170,12 +184,25 @@ def _verifier_le_projet(
             f"Le projet {projet} est introuvable, ou ce compte n'y cree pas de ticket."
         )
     disponibles = {t["name"] for t in projets[0].get("issuetypes", [])}
-    manquants = {ligne["Issue Type"] for ligne in lignes} - disponibles
-    if manquants:
+    traduction: dict[str, str] = {}
+    introuvables: list[str] = []
+    for demande in sorted({ligne["Issue Type"] for ligne in lignes}):
+        trouve = next(
+            (nom for nom in ALIAS_TYPES.get(demande, (demande,)) if nom in disponibles),
+            None,
+        )
+        if trouve is None:
+            introuvables.append(demande)
+        else:
+            traduction[demande] = trouve
+    if introuvables:
         raise ImportEchoue(
-            f"Types de ticket absents de {projet} : {sorted(manquants)}. "
+            f"Types de ticket absents de {projet} : {introuvables}. "
             f"Disponibles : {sorted(disponibles)}"
         )
+    for demande, employe in traduction.items():
+        if demande != employe:
+            print(f"  type {demande!r} -> {employe!r} (site en francais)")
     priorites = {p["name"] for p in _appel(f"{base}/priority", autorisation)}
     manquantes = {ligne["Priority"] for ligne in lignes} - priorites
     if manquantes:
@@ -184,6 +211,7 @@ def _verifier_le_projet(
             f"Disponibles : {sorted(priorites)}"
         )
     print(f"  projet {projet} : types et priorites conformes")
+    return traduction
 
 
 def _charger_le_registre() -> dict[str, str]:
@@ -233,7 +261,7 @@ def main() -> int:
     try:
         autorisation = _autorisation(arguments.courriel)
         print(f"Site     : {arguments.site}")
-        _verifier_le_projet(autorisation, arguments.site, arguments.projet, restants)
+        traduction = _verifier_le_projet(autorisation, arguments.site, arguments.projet, restants)
     except ImportEchoue as erreur:
         print(f"\nArret avant toute ecriture :\n  {erreur}", file=sys.stderr)
         return 1
@@ -260,7 +288,7 @@ def main() -> int:
                 "project": {"key": arguments.projet},
                 "summary": ligne["Summary"],
                 "description": _adf(ligne["Description"]),
-                "issuetype": {"name": ligne["Issue Type"]},
+                "issuetype": {"name": traduction[ligne["Issue Type"]]},
                 "priority": {"name": ligne["Priority"]},
                 "labels": [e for e in (ligne["Labels 1"], ligne["Labels 2"]) if e],
             }
