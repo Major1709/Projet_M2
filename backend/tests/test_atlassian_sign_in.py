@@ -532,3 +532,44 @@ async def test_every_outbound_call_asks_for_an_uncompressed_body() -> None:
     # The token exchange, accessible-resources and /me: all three.
     assert len(recorder.accept_encodings) == 3
     assert set(recorder.accept_encodings) == {"identity"}
+
+
+@pytest.mark.anyio
+async def test_one_site_listed_once_per_product_is_not_ambiguous() -> None:
+    """Two rows naming the same place are not two places.
+
+    accessible-resources can return an entry per product, so a grant covering
+    Jira and Confluence on a single site arrives as several rows sharing one cloud
+    id. Counting rows would refuse the ordinary case, and tell the user to
+    authorise a single site when that is exactly what they did.
+    """
+
+    recorder = Recorder(
+        resources=[
+            {"id": CLOUD_ID, "url": SITE_URL, "scopes": ["read:jira-work"]},
+            {"id": CLOUD_ID, "url": SITE_URL, "scopes": ["read:confluence-content.all"]},
+        ]
+    )
+    sessions = InMemorySessionStore()
+    sign_in = sign_in_for(recorder, sessions=sessions)
+    _, state = redeem(sign_in)
+
+    token = await sign_in.complete(code="code-1", state=state)
+
+    assert sessions.get_by_token_hash(session_token_hash(token)).tenant_id == CLOUD_ID
+
+
+@pytest.mark.anyio
+async def test_two_genuinely_different_sites_are_still_refused() -> None:
+    # The deduplication must not become a way to pick one of two real sites.
+    recorder = Recorder(
+        resources=[
+            {"id": CLOUD_ID, "url": SITE_URL},
+            {"id": "other-cloud-id", "url": "https://other.atlassian.net"},
+        ]
+    )
+    sign_in = sign_in_for(recorder)
+    _, state = redeem(sign_in)
+
+    with pytest.raises(AmbiguousSiteGrant):
+        await sign_in.complete(code="code-1", state=state)

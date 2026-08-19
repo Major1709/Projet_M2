@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any, Final
 from urllib.parse import urlencode, urlsplit
 
@@ -80,6 +81,8 @@ def authorization_url(*, client_id: str, redirect_uri: str, state: str, verifier
 # other encoding outright. Without this header the client advertises gzip, the
 # provider obliges, and a perfectly good sign-in dies on a refusal that names the
 # response rather than the missing header.
+logger = logging.getLogger(__name__)
+
 REQUEST_HEADERS: Final = {
     "Accept": "application/json",
     "Accept-Encoding": "identity",
@@ -157,11 +160,19 @@ class AtlassianOAuthClient:
         payload = await self._get(ATLASSIAN_ACCESSIBLE_RESOURCES, access_token)
         if not isinstance(payload, list):
             raise ProviderRefused()
-        sites = [
-            AtlassianSite(cloud_id=str(entry["id"]), url=str(entry["url"]))
-            for entry in payload
-            if isinstance(entry, dict) and entry.get("id") and entry.get("url")
-        ]
+        # Keyed by cloud id, because "several entries" and "several sites" are not
+        # the same claim. The endpoint can list one entry per product, and a grant
+        # covering Jira and Confluence on one site then arrives as two rows naming
+        # the same place. Refusing that would be refusing the ordinary case, and the
+        # message would tell the user to authorise a single site when they already
+        # had. Ambiguity is a count of distinct sites, so that is what gets counted.
+        by_cloud_id: dict[str, AtlassianSite] = {}
+        for entry in payload:
+            if not isinstance(entry, dict) or not entry.get("id") or not entry.get("url"):
+                continue
+            site = AtlassianSite(cloud_id=str(entry["id"]), url=str(entry["url"]))
+            by_cloud_id.setdefault(site.cloud_id, site)
+        sites = list(by_cloud_id.values())
         if not sites:
             raise NoSiteGranted()
 
@@ -175,6 +186,14 @@ class AtlassianOAuthClient:
             raise UnexpectedSiteGranted()
 
         if len(sites) > 1:
+            # The refusal handed to the browser stays terse on purpose. The operator
+            # running this deployment needs the opposite -- the ids to choose from --
+            # and a site url is not a secret. Without them, pinning a site means
+            # guessing which one to pin.
+            logger.warning(
+                "atlassian sign-in refused an ambiguous grant",
+                extra={"candidate_sites": [(s.cloud_id, s.url) for s in sites]},
+            )
             raise AmbiguousSiteGrant()
         return sites[0]
 
