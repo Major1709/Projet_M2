@@ -14,6 +14,7 @@ dependencies = [
   "httpx2>=2.5,<3.0",
   "jsonschema>=4.23,<5.0",
   "mcp==2.0.0",
+  "pgvector>=0.3,<1.0",
   "pydantic>=2.10,<3.0",
   "pydantic-settings>=2.7,<3.0",
   "psycopg[binary]>=3.2,<4.0",
@@ -22,6 +23,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Le modele d'embeddings et son moteur, isoles dans un extra. Ils pesent environ
+# 2,3 Go a eux seuls : les inclure au socle alourdirait aussi le worker, la
+# migration et tout environnement qui n'indexe rien.
+#
+# Installer torch depuis l'index CPU AVANT cet extra, sinon pip tire la variante
+# CUDA -- plus de 2 Go de bibliotheques pour un GPU que ni cette machine ni le
+# conteneur ne possedent :
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch
+embeddings = [
+  "sentence-transformers>=3.3,<6.0",
+]
 dev = [
   "httpx>=0.28,<1.0",
   "pytest>=8.3,<9.0",
