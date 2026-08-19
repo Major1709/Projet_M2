@@ -1,3 +1,4 @@
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -13,6 +14,8 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
 )
+
+from app.semantics.domain import EMBEDDING_DIMENSIONS
 
 metadata = MetaData(
     naming_convention={
@@ -188,4 +191,27 @@ sessions = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("expires_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("expires_at > created_at", name="expiry_after_creation"),
+)
+
+
+document_embeddings = Table(
+    "document_embeddings",
+    metadata,
+    Column("tenant_id", String(200), primary_key=True),
+    Column("id", Uuid(as_uuid=True), nullable=False, unique=True),
+    Column("source_system", String(50), primary_key=True),
+    # The provider's own identifier -- a Jira key, a Confluence page id. Part of
+    # the primary key so re-indexing a document updates it rather than adding a
+    # second vector for the same thing, which would let one ticket outvote the
+    # rest of the corpus simply by having been indexed twice.
+    Column("external_id", String(200), primary_key=True),
+    Column("title", String(1000), nullable=False),
+    Column("resource_reference", String(1000)),
+    # Which model produced this vector. Vectors from two models share a dimension
+    # count and nothing else, so comparing across them yields confident nonsense.
+    # Recorded rather than assumed, a model change becomes detectable.
+    Column("model_name", String(200), nullable=False),
+    Column("content_digest", String(64), nullable=False),
+    Column("embedding", Vector(EMBEDDING_DIMENSIONS), nullable=False),
+    Column("indexed_at", DateTime(timezone=True), nullable=False),
 )
