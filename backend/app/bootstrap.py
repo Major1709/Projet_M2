@@ -11,8 +11,14 @@ from app.approvals.adapters.postgres import PostgresApprovalUnitOfWorkFactory
 from app.approvals.workflow import ApprovalWorkflow
 from app.audit.adapters.postgres import PostgresAppendOnlyAuditWriter
 from app.audit.ports import AuditSink
-from app.conversations.adapters.memory import InMemoryConversationRepository
-from app.conversations.adapters.postgres import PostgresConversationRepository
+from app.conversations.adapters.memory import (
+    InMemoryConversationMessageRepository,
+    InMemoryConversationRepository,
+)
+from app.conversations.adapters.postgres import (
+    PostgresConversationMessageRepository,
+    PostgresConversationRepository,
+)
 from app.conversations.workflow import ConversationWorkflow
 from app.core.config import Settings
 from app.core.database import (
@@ -57,12 +63,13 @@ class ApplicationContainer:
 def build_container(settings: Settings) -> ApplicationContainer:
     if settings.repository_backend == "memory":
         conversation_repository = InMemoryConversationRepository()
+        message_repository = InMemoryConversationMessageRepository()
         approval_uow_factory = InMemoryApprovalUnitOfWork()
         mcp_reads = _build_mcp_read_workflow(settings, approval_uow_factory.audit)
         return ApplicationContainer(
             approvals=ApprovalWorkflow(approval_uow_factory, conversation_repository),
             audit=approval_uow_factory.audit,
-            conversations=ConversationWorkflow(conversation_repository),
+            conversations=ConversationWorkflow(conversation_repository, message_repository),
             mcp_reads=mcp_reads,
             agent=_build_agent(settings, approval_uow_factory.audit, mcp_reads),
             readiness_probe=lambda: True,
@@ -72,13 +79,14 @@ def build_container(settings: Settings) -> ApplicationContainer:
     engine = create_database_engine(settings)
     session_factory = create_session_factory(engine)
     conversation_repository = PostgresConversationRepository(session_factory)
+    message_repository = PostgresConversationMessageRepository(session_factory)
     approval_uow_factory = PostgresApprovalUnitOfWorkFactory(session_factory)
     audit_writer = PostgresAppendOnlyAuditWriter(session_factory)
     mcp_reads = _build_mcp_read_workflow(settings, audit_writer)
     return ApplicationContainer(
         approvals=ApprovalWorkflow(approval_uow_factory, conversation_repository),
         audit=audit_writer,
-        conversations=ConversationWorkflow(conversation_repository),
+        conversations=ConversationWorkflow(conversation_repository, message_repository),
         mcp_reads=mcp_reads,
         agent=_build_agent(settings, audit_writer, mcp_reads),
         readiness_probe=lambda: database_is_ready(engine),
