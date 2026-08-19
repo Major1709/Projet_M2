@@ -48,6 +48,11 @@ from app.mcp.registry import (
     FIGMA_TOKEN_ENDPOINT,
     MCPToolRegistry,
 )
+from app.semantics.adapters.local_model import LocalEmbeddingProvider
+from app.semantics.adapters.memory import InMemoryEmbeddingStore
+from app.semantics.adapters.postgres import PostgresEmbeddingStore
+from app.semantics.ports import EmbeddingStore
+from app.semantics.workflow import SemanticIndex
 from app.sessions.adapters.memory import InMemorySessionStore
 from app.sessions.adapters.postgres import PostgresSessionStore
 from app.sessions.ports import SessionStore
@@ -72,6 +77,9 @@ class ApplicationContainer:
     # Absent unless the deployment registered an Atlassian OAuth app. The sign-in
     # route then refuses rather than existing and always failing.
     sign_in: AtlassianSignIn | None = None
+    # Absent unless the deployment enabled embeddings. The reindex route then
+    # refuses rather than existing and always failing.
+    semantic_index: SemanticIndex | None = None
     engine: Engine | None = None
 
 
@@ -82,12 +90,16 @@ def build_container(settings: Settings) -> ApplicationContainer:
         session_store: SessionStore = InMemorySessionStore()
         approval_uow_factory = InMemoryApprovalUnitOfWork()
         mcp_reads = _build_mcp_read_workflow(settings, approval_uow_factory.audit)
+        semantic_index = _build_semantic_index(settings, InMemoryEmbeddingStore())
         return ApplicationContainer(
             approvals=ApprovalWorkflow(approval_uow_factory, conversation_repository),
             audit=approval_uow_factory.audit,
             conversations=ConversationWorkflow(conversation_repository, message_repository),
             mcp_reads=mcp_reads,
-            agent=_build_agent(settings, approval_uow_factory.audit, mcp_reads),
+            agent=_build_agent(
+                settings, approval_uow_factory.audit, mcp_reads, semantic_index
+            ),
+            semantic_index=semantic_index,
             readiness_probe=lambda: True,
             sessions=session_store,
             settings=settings,
@@ -102,12 +114,14 @@ def build_container(settings: Settings) -> ApplicationContainer:
     approval_uow_factory = PostgresApprovalUnitOfWorkFactory(session_factory)
     audit_writer = PostgresAppendOnlyAuditWriter(session_factory)
     mcp_reads = _build_mcp_read_workflow(settings, audit_writer)
+    semantic_index = _build_semantic_index(settings, PostgresEmbeddingStore(session_factory))
     return ApplicationContainer(
         approvals=ApprovalWorkflow(approval_uow_factory, conversation_repository),
         audit=audit_writer,
         conversations=ConversationWorkflow(conversation_repository, message_repository),
         mcp_reads=mcp_reads,
-        agent=_build_agent(settings, audit_writer, mcp_reads),
+        agent=_build_agent(settings, audit_writer, mcp_reads, semantic_index),
+        semantic_index=semantic_index,
         readiness_probe=lambda: database_is_ready(engine),
         sessions=session_store,
         settings=settings,
@@ -147,10 +161,27 @@ def _build_sign_in(
     )
 
 
+def _build_semantic_index(settings: Settings, store: EmbeddingStore) -> SemanticIndex | None:
+    """The index, or nothing at all.
+
+    Off by default. The runtime weighs about 2,3 Go and downloads a model on
+    first use, so a deployment that has not asked for retrieval must not acquire
+    it by upgrading. Absent, the assistant answers exactly as it did before.
+    """
+
+    if not settings.embeddings_enabled:
+        return None
+    return SemanticIndex(
+        provider=LocalEmbeddingProvider(settings.embedding_model),
+        store=store,
+    )
+
+
 def _build_agent(
     settings: Settings,
     audit_sink: AuditSink,
     mcp_reads: MCPReadWorkflow,
+    semantic_index: SemanticIndex | None = None,
 ) -> AgentReadWorkflow | None:
     if not settings.llm_groq_enabled or settings.llm_groq_api_key_file is None:
         return None
@@ -171,6 +202,7 @@ def _build_agent(
         # The same sink the provider and the reads write to, so a question and
         # everything it caused share one trail.
         audit_sink=audit_sink,
+        semantic_index=semantic_index,
     )
 
 

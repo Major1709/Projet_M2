@@ -33,6 +33,13 @@ class AuditEventType(StrEnum):
     # written so a suppressed call stays visible -- otherwise a step that produced
     # no read is indistinguishable from a step that never happened.
     AGENT_TOOL_CALL_SKIPPED = "AGENT_TOOL_CALL_SKIPPED"
+    # Retrieval ran and offered the model a shortlist. Recorded because it shapes
+    # the answer: a question answered with leads and the same question answered
+    # without them are two different runs, and a trail that cannot tell them apart
+    # cannot explain why one cited a ticket the other never mentioned. It is not a
+    # read -- nothing left the process -- so it gets its own type rather than
+    # borrowing the read events and implying a source was consulted.
+    SEMANTIC_RETRIEVAL_COMPLETED = "SEMANTIC_RETRIEVAL_COMPLETED"
 
 
 class AuditEvent(BaseModel):
