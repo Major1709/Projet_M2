@@ -5,7 +5,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -161,6 +161,29 @@ class Settings(BaseSettings):
     # Bounded by the model's own completion ceiling so no configuration can raise it
     # past what the provider will actually produce.
     llm_groq_max_completion_tokens: int = Field(default=16_384, ge=256, le=16_384)
+
+    @field_validator(
+        "atlassian_oauth_client_id",
+        "atlassian_oauth_redirect_uri",
+        "atlassian_expected_cloud_id",
+        mode="before",
+    )
+    @classmethod
+    def _empty_means_absent(cls, value: object) -> object:
+        """An empty string is how a container says "not set", so read it that way.
+
+        Compose substitutes a variable it cannot resolve with an empty string
+        rather than dropping it. Rejecting that string is technically right and
+        practically wrong: it stops the whole process over an optional pin nobody
+        asked for, and the traceback names a validation rule rather than the
+        variable. Absent and empty mean the same thing here, so they behave the
+        same. What must never be silently accepted is a *wrong* value, and that is
+        still refused -- an unmatched cloud id raises rather than resolving.
+        """
+
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @model_validator(mode="after")
     def validate_runtime_adapters(self) -> "Settings":

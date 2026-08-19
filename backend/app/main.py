@@ -38,16 +38,30 @@ def create_app(
     )
     app.state.container = resolved_container
     if resolved_settings.frontend_origins:
-        # Installed only when a front end has been named. Credentials stay off: this
-        # API carries no cookie, and allowing them would make the browser attach any
-        # it holds for the origin. The header list is closed for the same reason the
-        # origin list is -- the identity headers are the tenant.
+        # Installed only when a front end has been named, and shaped by the identity
+        # mode rather than fixed.
+        #
+        # Session mode carries the identity in a cookie, so the browser must be
+        # allowed to attach it -- a cross-origin front end otherwise sends nothing
+        # and every call answers 401, which reads as a broken sign-in rather than a
+        # missing header. That permission is only safe because the origin list is
+        # explicit: the specification forbids pairing credentials with a wildcard,
+        # and this build never has one to offer.
+        #
+        # Header mode carries the identity in two headers instead, so no cookie
+        # needs attaching, and allowing them anyway would widen what a browser sends
+        # for no gain.
+        session_mode = resolved_settings.auth_mode == "session"
         app.add_middleware(
             CORSMiddleware,
             allow_origins=list(resolved_settings.frontend_origins),
-            allow_credentials=False,
+            allow_credentials=session_mode,
             allow_methods=["GET", "POST"],
-            allow_headers=["Content-Type", "X-Tenant-ID", "X-User-ID"],
+            allow_headers=(
+                ["Content-Type"]
+                if session_mode
+                else ["Content-Type", "X-Tenant-ID", "X-User-ID"]
+            ),
         )
     app.include_router(health_router)
     app.include_router(conversations_router)
