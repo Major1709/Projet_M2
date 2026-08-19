@@ -74,6 +74,18 @@ def authorization_url(*, client_id: str, redirect_uri: str, state: str, verifier
     return f"{ATLASSIAN_AUTHORIZE_ENDPOINT}?{query}"
 
 
+# Identity encoding, like every other outbound caller here. The response ceiling is
+# enforced on the bytes that arrive on the wire, and a compressed body's decoded
+# size is unbounded by anything visible at that point -- so the guard refuses any
+# other encoding outright. Without this header the client advertises gzip, the
+# provider obliges, and a perfectly good sign-in dies on a refusal that names the
+# response rather than the missing header.
+REQUEST_HEADERS: Final = {
+    "Accept": "application/json",
+    "Accept-Encoding": "identity",
+}
+
+
 class AtlassianOAuthClient:
     """The three outbound calls a sign-in makes, under the project's transport rules.
 
@@ -178,7 +190,7 @@ class AtlassianOAuthClient:
                 response = await client.post(
                     endpoint,
                     data=form,
-                    headers={"Accept": "application/json"},
+                    headers=REQUEST_HEADERS,
                 )
             except httpx2.HTTPError as error:
                 raise ProviderRefused() from error
@@ -191,7 +203,7 @@ class AtlassianOAuthClient:
                     endpoint,
                     headers={
                         "Authorization": f"Bearer {access_token}",
-                        "Accept": "application/json",
+                        **REQUEST_HEADERS,
                     },
                 )
             except httpx2.HTTPError as error:

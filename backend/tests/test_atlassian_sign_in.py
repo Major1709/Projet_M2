@@ -55,10 +55,12 @@ class Recorder:
         )
         self.token_form: dict[str, list[str]] = {}
         self.bearer_tokens: list[str] = []
+        self.accept_encodings: list[str] = []
 
     def transport(self) -> httpx2.MockTransport:
         async def handle(request: httpx2.Request) -> httpx2.Response:
             url = str(request.url)
+            self.accept_encodings.append(request.headers.get("Accept-Encoding", ""))
             if url == ATLASSIAN_OAUTH_TOKEN_ENDPOINT:
                 self.token_form = parse_qs(request.content.decode())
                 if self.token_status != 200:
@@ -506,3 +508,27 @@ def test_an_oversized_code_is_refused_without_being_echoed_back() -> None:
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "SIGN_IN_MALFORMED"
     assert code[:200] not in response.text
+
+
+@pytest.mark.anyio
+async def test_every_outbound_call_asks_for_an_uncompressed_body() -> None:
+    """The response ceiling counts wire bytes, so compression must be refused.
+
+    A compressed body's decoded size is unbounded by anything the guard can see,
+    which is why the transport rejects any encoding but identity. Advertising gzip
+    therefore does not merely waste the ceiling -- the provider obliges, and a
+    perfectly good sign-in dies on a refusal that names the response instead of the
+    missing header. Found in a real consent, not here: a fake transport answers
+    uncompressed whatever it is asked, so nothing in this file could have caught it.
+    That is why the assertion is on what was *sent*.
+    """
+
+    recorder = Recorder()
+    sign_in = sign_in_for(recorder)
+    _, state = redeem(sign_in)
+
+    await sign_in.complete(code="code-1", state=state)
+
+    # The token exchange, accessible-resources and /me: all three.
+    assert len(recorder.accept_encodings) == 3
+    assert set(recorder.accept_encodings) == {"identity"}
