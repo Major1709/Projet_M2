@@ -471,3 +471,38 @@ def test_the_callback_body_never_carries_a_token() -> None:
     assert "at-secret" not in done.text
     assert "rt-secret" not in done.text
     assert "rt-secret" not in json.dumps(dict(done.headers))
+
+
+def test_a_realistic_provider_code_is_not_refused_for_its_length() -> None:
+    """Atlassian sends a signed JWT, not a short opaque handle.
+
+    The first real callback was refused by a bound set from imagination rather
+    than from the provider, and the consent that produced it was wasted.
+    """
+
+    from app.auth.api import CODE_MAX_LENGTH
+
+    assert CODE_MAX_LENGTH >= 4_096
+
+
+def test_an_oversized_code_is_refused_without_being_echoed_back() -> None:
+    """A refusal must not hand the credential back to the browser.
+
+    FastAPI reports a violated parameter constraint by quoting the value. Here
+    the value is an authorization code, so quoting it would put a live credential
+    into the address bar's history and into every log that keeps response bodies.
+    """
+
+    app, _ = app_with_sign_in(Recorder())
+    client = TestClient(app, base_url="https://testserver")
+    code = "z" * 9_000
+
+    response = client.get(
+        "/api/auth/atlassian/callback",
+        params={"code": code, "state": "whatever"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "SIGN_IN_MALFORMED"
+    assert code[:200] not in response.text

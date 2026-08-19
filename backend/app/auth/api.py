@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Final
 
 from fastapi import APIRouter, Cookie, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -41,12 +41,35 @@ def start_sign_in(request: Request) -> RedirectResponse:
     return RedirectResponse(sign_in.begin(), status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
+# Atlassian issues a signed JWT as the authorization code, not an opaque handle,
+# and it carries the granted scopes and every resource ari. Real ones run past two
+# thousand characters. The bound stays, because an unbounded value is still worth
+# refusing, but it is now set from what the provider actually sends rather than
+# from a guess. Above this, uvicorn refuses the request line first anyway.
+CODE_MAX_LENGTH: Final = 8_192
+STATE_MAX_LENGTH: Final = 200
+
+
 @router.get("/callback")
 async def complete_sign_in(
     request: Request,
-    code: Annotated[str, Query(min_length=1, max_length=2_000)],
-    state: Annotated[str, Query(min_length=1, max_length=200)],
+    code: Annotated[str, Query()],
+    state: Annotated[str, Query()],
 ) -> RedirectResponse:
+    # Checked here rather than declared as constraints on the parameters. FastAPI
+    # reports a failed constraint by echoing the offending value, and the offending
+    # value is the authorization code -- so the refusal would hand a live credential
+    # back to the browser, into its history and into any log that keeps response
+    # bodies. Refusing without quoting is the whole point.
+    if not 1 <= len(code) <= CODE_MAX_LENGTH or not 1 <= len(state) <= STATE_MAX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "SIGN_IN_MALFORMED",
+                "message": "The sign-in response was not in the expected shape",
+            },
+        )
+
     sign_in = get_sign_in(request)
     try:
         token = await sign_in.complete(code=code, state=state)
