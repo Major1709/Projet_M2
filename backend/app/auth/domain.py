@@ -28,8 +28,13 @@ ATLASSIAN_ME_ENDPOINT: Final = "https://api.atlassian.com/me"
 # offline_access is what makes the grant renewable. Without it the deployment holds
 # an access token for about an hour and then has to send the user back through
 # consent, which is not a product.
+#
+# read:me is not decorative: the sign-in flow reads /me to learn who signed in, and
+# that endpoint refuses a token that was not granted this scope. A simulated
+# transport answers it regardless, so the omission survives every test here and
+# would only surface as a refused sign-in against the real provider.
 ATLASSIAN_SCOPES: Final = (
-    "offline_access "
+    "offline_access read:me "
     "read:jira-work read:jira-user "
     "read:confluence-content.all read:confluence-space.summary"
 )
