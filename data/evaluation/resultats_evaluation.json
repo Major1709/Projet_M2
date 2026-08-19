@@ -1,0 +1,57 @@
+{
+  "resultats": [
+    {
+      "systeme": "TF-IDF (reference lexicale)",
+      "doublons": {
+        "paires": 7,
+        "rappel@1": 0.0,
+        "rappel@3": 0.429,
+        "rappel@5": 0.571,
+        "mrr": 0.283,
+        "jumeaux_introuvables": [],
+        "faux_amis_devant_le_jumeau": [
+          "SEED-05: SEED-15 devant SEED-06",
+          "SEED-03: SEED-17 devant SEED-04",
+          "SEED-07: SEED-18 devant SEED-08",
+          "SEED-09: SEED-19 devant SEED-10",
+          "SEED-13: SEED-20 devant SEED-14"
+        ]
+      },
+      "requetes": {
+        "requetes": 14,
+        "rappel@1": 0.857,
+        "rappel@3": 0.929,
+        "rappel@5": 1.0,
+        "mrr": 0.911,
+        "sans_reponse_attendue": [],
+        "pieges_classes_premiers": [
+          "Q10: SEED-09"
+        ]
+      }
+    },
+    {
+      "systeme": "Embeddings intfloat/multilingual-e5-base",
+      "doublons": {
+        "paires": 7,
+        "rappel@1": 0.714,
+        "rappel@3": 1.0,
+        "rappel@5": 1.0,
+        "mrr": 0.857,
+        "jumeaux_introuvables": [],
+        "faux_amis_devant_le_jumeau": [
+          "SEED-05: SEED-15 devant SEED-06",
+          "SEED-11: SEED-16 devant SEED-12"
+        ]
+      },
+      "requetes": {
+        "requetes": 14,
+        "rappel@1": 1.0,
+        "rappel@3": 1.0,
+        "rappel@5": 1.0,
+        "mrr": 1.0,
+        "sans_reponse_attendue": [],
+        "pieges_classes_premiers": []
+      }
+    }
+  ]
+}
