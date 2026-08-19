@@ -101,7 +101,7 @@ export const demoMessages: ChatMessage[] = [
   {
     id: "message-1",
     role: "system",
-    author: "Nexus",
+    author: "NEXIA",
     content:
       "Les réponses utilisent uniquement les sources autorisées dans votre session. Toute écriture externe attendra votre approbation.",
     createdAt: "09:38",
@@ -119,7 +119,7 @@ export const demoMessages: ChatMessage[] = [
   {
     id: "message-3",
     role: "assistant",
-    author: "Nexus",
+    author: "NEXIA",
     content:
       "La demande vise à réduire l’abandon pendant la récupération de compte. Le cahier des charges exige un lien valable 20 minutes, tandis que le CJM signale une rupture lorsque l’utilisateur quitte l’application pour consulter son e-mail. Je propose de compléter la User Story avec une reprise de parcours et un message indiquant la durée de validité. Un ticket proche existe peut-être, mais la similarité doit encore être confirmée par un humain.",
     createdAt: "09:42",

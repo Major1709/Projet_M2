@@ -140,7 +140,7 @@ export function createHttpAssistantGateway(
         // reads in the audit trail, and it is the identifier to quote in a report.
         id: correlationId,
         role: "assistant",
-        author: "Nexus",
+        author: "NEXIA",
         content: answer.text,
         createdAt: formatTime(now()),
         sources: toSourceReferences(answer.sources ?? []),

@@ -1,4 +1,4 @@
-# Frontend — Nexus Project Intelligence
+# Frontend — NEXIA Project Intelligence
 
 Shell UX autonome du chat projet. Il illustre le parcours Jira → RAG → analyse sourcée → proposition Confluence → approbation humaine.
 
