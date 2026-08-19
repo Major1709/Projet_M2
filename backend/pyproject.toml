@@ -26,6 +26,11 @@ dependencies = [
 # Le modele d'embeddings et son moteur, isoles dans un extra. Ils pesent environ
 # 2,3 Go a eux seuls : les inclure au socle alourdirait aussi le worker, la
 # migration et tout environnement qui n'indexe rien.
+#
+# Installer torch depuis l'index CPU AVANT cet extra, sinon pip tire la variante
+# CUDA -- plus de 2 Go de bibliotheques pour un GPU que ni cette machine ni le
+# conteneur ne possedent :
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch
 embeddings = [
   "sentence-transformers>=3.3,<6.0",
 ]
