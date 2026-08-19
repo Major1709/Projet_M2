@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 
 from sqlalchemy import Engine
 
@@ -11,6 +12,12 @@ from app.approvals.adapters.postgres import PostgresApprovalUnitOfWorkFactory
 from app.approvals.workflow import ApprovalWorkflow
 from app.audit.adapters.postgres import PostgresAppendOnlyAuditWriter
 from app.audit.ports import AuditSink
+from app.auth.adapters.memory import (
+    InMemoryDelegatedGrantSink,
+    InMemoryPendingAuthorizationStore,
+)
+from app.auth.client import AtlassianOAuthClient
+from app.auth.workflow import AtlassianSignIn
 from app.conversations.adapters.memory import (
     InMemoryConversationMessageRepository,
     InMemoryConversationRepository,
@@ -41,6 +48,9 @@ from app.mcp.registry import (
     FIGMA_TOKEN_ENDPOINT,
     MCPToolRegistry,
 )
+from app.sessions.adapters.memory import InMemorySessionStore
+from app.sessions.adapters.postgres import PostgresSessionStore
+from app.sessions.ports import SessionStore
 
 
 @dataclass(frozen=True)
@@ -52,11 +62,16 @@ class ApplicationContainer:
     conversations: ConversationWorkflow
     mcp_reads: MCPReadWorkflow
     readiness_probe: Callable[[], bool]
+    # Consulted on every request in session mode, and never in dev_headers mode.
+    sessions: SessionStore
     settings: Settings
     # Absent when no language model provider is configured. The MCP reads stay
     # available in that case: the assistant is the optional layer, not the
     # connectors underneath it.
     agent: AgentReadWorkflow | None = None
+    # Absent unless the deployment registered an Atlassian OAuth app. The sign-in
+    # route then refuses rather than existing and always failing.
+    sign_in: AtlassianSignIn | None = None
     engine: Engine | None = None
 
 
@@ -64,6 +79,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
     if settings.repository_backend == "memory":
         conversation_repository = InMemoryConversationRepository()
         message_repository = InMemoryConversationMessageRepository()
+        session_store: SessionStore = InMemorySessionStore()
         approval_uow_factory = InMemoryApprovalUnitOfWork()
         mcp_reads = _build_mcp_read_workflow(settings, approval_uow_factory.audit)
         return ApplicationContainer(
@@ -73,13 +89,16 @@ def build_container(settings: Settings) -> ApplicationContainer:
             mcp_reads=mcp_reads,
             agent=_build_agent(settings, approval_uow_factory.audit, mcp_reads),
             readiness_probe=lambda: True,
+            sessions=session_store,
             settings=settings,
+            sign_in=_build_sign_in(settings, session_store),
         )
 
     engine = create_database_engine(settings)
     session_factory = create_session_factory(engine)
     conversation_repository = PostgresConversationRepository(session_factory)
     message_repository = PostgresConversationMessageRepository(session_factory)
+    session_store = PostgresSessionStore(session_factory)
     approval_uow_factory = PostgresApprovalUnitOfWorkFactory(session_factory)
     audit_writer = PostgresAppendOnlyAuditWriter(session_factory)
     mcp_reads = _build_mcp_read_workflow(settings, audit_writer)
@@ -90,8 +109,41 @@ def build_container(settings: Settings) -> ApplicationContainer:
         mcp_reads=mcp_reads,
         agent=_build_agent(settings, audit_writer, mcp_reads),
         readiness_probe=lambda: database_is_ready(engine),
+        sessions=session_store,
         settings=settings,
+        sign_in=_build_sign_in(settings, session_store),
         engine=engine,
+    )
+
+
+def _build_sign_in(
+    settings: Settings,
+    sessions: SessionStore,
+) -> AtlassianSignIn | None:
+    if not settings.atlassian_oauth_enabled:
+        return None
+    # The settings already refuse an enabled sign-in without these three, so the
+    # assertions describe an invariant rather than guarding an input.
+    assert settings.atlassian_oauth_client_id is not None
+    assert settings.atlassian_oauth_client_secret_file is not None
+    assert settings.atlassian_oauth_redirect_uri is not None
+    secret = settings.atlassian_oauth_client_secret_file.read_text(encoding="utf-8").strip()
+    return AtlassianSignIn(
+        client=AtlassianOAuthClient(
+            client_id=settings.atlassian_oauth_client_id,
+            client_secret=secret,
+            redirect_uri=settings.atlassian_oauth_redirect_uri,
+        ),
+        pending=InMemoryPendingAuthorizationStore(),
+        sessions=sessions,
+        # Process memory until the encrypted store exists. Losing the grant on
+        # restart forces consent again, which beats a refresh token in a file
+        # nobody rotates.
+        grants=InMemoryDelegatedGrantSink(),
+        client_id=settings.atlassian_oauth_client_id,
+        redirect_uri=settings.atlassian_oauth_redirect_uri,
+        session_lifetime=timedelta(hours=settings.session_lifetime_hours),
+        expected_cloud_id=settings.atlassian_expected_cloud_id,
     )
 
 

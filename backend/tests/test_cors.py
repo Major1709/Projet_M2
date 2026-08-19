@@ -16,8 +16,12 @@ from app.main import create_app
 ALLOWED = "http://localhost:3000"
 
 
-def client_for(*origins: str) -> TestClient:
-    settings = Settings(environment="test", frontend_origins=origins)
+def client_for(*origins: str, auth_mode: str = "dev_headers") -> TestClient:
+    settings = Settings(
+        environment="test",
+        frontend_origins=origins,
+        auth_mode=auth_mode,
+    )
     return TestClient(create_app(settings))
 
 
@@ -56,10 +60,42 @@ def test_the_preflight_admits_the_identity_headers_the_gateway_sends() -> None:
     assert {"content-type", "x-tenant-id", "x-user-id"} <= set(allowed.split(", "))
 
 
-def test_credentials_are_never_allowed() -> None:
+def test_credentials_are_not_allowed_while_the_identity_rides_in_headers() -> None:
+    # Nothing to attach in this mode, so nothing is permitted to be attached.
     response = client_for(ALLOWED).get("/health", headers={"Origin": ALLOWED})
 
     assert "access-control-allow-credentials" not in response.headers
+
+
+def test_credentials_are_allowed_once_the_identity_rides_in_a_cookie() -> None:
+    # Session mode puts the identity in a cookie the browser will only send when
+    # told to. Without this the front end sends none and every call answers 401,
+    # which looks like a rejected sign-in rather than a browser that stayed silent.
+    response = client_for(ALLOWED, auth_mode="session").get(
+        "/health", headers={"Origin": ALLOWED}
+    )
+
+    assert response.headers["access-control-allow-credentials"] == "true"
+    assert response.headers["access-control-allow-origin"] == ALLOWED
+
+
+def test_the_identity_headers_stop_being_admitted_in_session_mode() -> None:
+    # They no longer carry anything, and an origin allowed to send them is an
+    # origin that looks like it may still choose its own tenant.
+    response = client_for(ALLOWED, auth_mode="session").options(
+        "/api/agent/questions",
+        headers={
+            "Origin": ALLOWED,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-tenant-id",
+        },
+    )
+
+    # Starlette still echoes the origin on a refused preflight, so the refusal
+    # shows in the status and in what it declines to admit, not in that header.
+    assert response.status_code == 400
+    admitted = response.headers.get("access-control-allow-headers", "").lower()
+    assert "x-tenant-id" not in admitted
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,59 @@
+# Connexion Atlassian des utilisateurs (3LO), developpement uniquement.
+#
+# A ne pas confondre avec compose.atlassian-oauth.yaml, qui traite d'autre chose :
+# celui-la renouvelle le jeton de service utilise par les lectures MCP. Celui-ci
+# fait signer un etre humain, puis lui pose une session cote serveur.
+#
+# Usage :
+#   docker compose -f compose.yaml -f compose.auth-atlassian.yaml up -d api
+#
+# Ce que cette surcouche change vraiment : PKA_AUTH_MODE passe de dev_headers a
+# session. Les en-tetes X-Tenant-ID et X-User-ID cessent alors d'etre lus. Ce
+# n'est pas un detail de configuration, c'est le moment ou l'appelant arrete de
+# choisir son propre tenant.
+#
+# CONSEQUENCE A CONNAITRE AVANT DE LANCER
+#
+# En mode session, le tenant devient le cloudId du site Atlassian consenti et
+# l'utilisateur son accountId. Or les liaisons de grant MCP de infra/.env valent
+# encore development-tenant et development-user. Tant qu'elles ne correspondent
+# pas a l'identite issue de la session, toute lecture MCP repond 503 sans dire
+# pourquoi -- la comparaison est a temps constant, donc volontairement muette.
+#
+# La sequence qui fonctionne, dans cet ordre :
+#   1. lancer avec cette surcouche et se connecter une fois dans le navigateur ;
+#   2. lire le tenant et l'utilisateur reellement obtenus, sans toucher au jeton
+#      (la table ne stocke qu'une empreinte) :
+#        docker compose exec postgres psql -U projet_m2 -d projet_m2 \
+#          -c "select tenant_id, user_id, expires_at from sessions;"
+#   3. reporter ces deux valeurs dans PKA_MCP_ATLASSIAN_GRANT_TENANT_ID et
+#      PKA_MCP_ATLASSIAN_GRANT_USER_ID, puis recreer le conteneur.
+#
+# Prerequis : deposer le secret client dans
+# ${SECRETS_DIR}/atlassian_oauth_client_secret, le secret seul, sans guillemets.
+# Le client id, lui, n'est pas un secret et vit dans infra/.env.
+
+services:
+  api:
+    environment:
+      PKA_AUTH_MODE: session
+      PKA_ATLASSIAN_OAUTH_ENABLED: "true"
+      PKA_ATLASSIAN_OAUTH_CLIENT_ID: ${PKA_ATLASSIAN_OAUTH_CLIENT_ID:?definir PKA_ATLASSIAN_OAUTH_CLIENT_ID dans infra/.env}
+      PKA_ATLASSIAN_OAUTH_CLIENT_SECRET_FILE: /run/secrets/atlassian_oauth_client_secret
+      # Doit correspondre au caractere pres a l'URL enregistree dans la console.
+      # Atlassian compare la chaine exacte : une barre finale en trop suffit a
+      # faire refuser l'echange, apres un consentement pourtant accorde.
+      PKA_ATLASSIAN_OAUTH_REDIRECT_URI: ${PKA_ATLASSIAN_OAUTH_REDIRECT_URI:-http://localhost:8000/api/auth/atlassian/callback}
+      PKA_ATLASSIAN_OAUTH_POST_LOGIN_PATH: ${PKA_ATLASSIAN_OAUTH_POST_LOGIN_PATH:-/health/live}
+      # Facultatif tant qu'un seul site est consenti. Renseigne, il epingle le
+      # site attendu ; absent, un grant couvrant plusieurs sites est refuse au
+      # lieu d'en choisir un.
+      PKA_ATLASSIAN_EXPECTED_CLOUD_ID: ${PKA_ATLASSIAN_EXPECTED_CLOUD_ID:-}
+    secrets:
+      - atlassian_oauth_client_secret
+
+# Le worker ne recoit pas le secret client : il ne fait signer personne.
+
+secrets:
+  atlassian_oauth_client_secret:
+    file: ${SECRETS_DIR:-./secrets/dev}/atlassian_oauth_client_secret

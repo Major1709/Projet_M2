@@ -22,7 +22,7 @@ from app.agent.read_workflow import AgentAnswer, AgentQuestion, AgentReadWorkflo
 from app.conversations.domain import CitedSource, MessageRole, MessageStatus
 from app.conversations.errors import ConversationNotFound
 from app.conversations.workflow import ConversationWorkflow
-from app.core.identity import SecurityContext, get_development_security_context
+from app.core.identity import SecurityContext, get_security_context
 from app.mcp.api import translate_read_error
 from app.mcp.errors import MCPReadError
 
@@ -142,7 +142,7 @@ def translate_llm_error(error: LLMError) -> HTTPException:
 @router.post("/questions", response_model=AgentAnswer)
 async def answer_question(
     question: AgentQuestion,
-    context: Annotated[SecurityContext, Depends(get_development_security_context)],
+    context: Annotated[SecurityContext, Depends(get_security_context)],
     agent: Annotated[AgentReadWorkflow, Depends(get_agent)],
     conversations: Annotated[ConversationWorkflow, Depends(get_conversations)],
 ) -> AgentAnswer:

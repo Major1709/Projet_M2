@@ -173,3 +173,19 @@ message_sources = Table(
         name="fk_message_sources_tenant_message",
     ),
 )
+
+sessions = Table(
+    "sessions",
+    metadata,
+    # No tenant_id in the primary key, unlike every other table here: a session is
+    # what *establishes* the tenant, so it cannot be scoped by one. It is addressed
+    # by the hash of a 256-bit token instead, which is unguessable on its own.
+    Column("id", Uuid(as_uuid=True), primary_key=True),
+    # The token itself is never stored. A leaked dump must not yield live sessions.
+    Column("token_hash", String(64), nullable=False, unique=True),
+    Column("tenant_id", String(200), nullable=False),
+    Column("user_id", String(200), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("expires_at > created_at", name="expiry_after_creation"),
+)

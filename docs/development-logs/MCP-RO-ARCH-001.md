@@ -1,3 +1,42 @@
+### Ce que la configuration refuse a la construction
+
+Echouer au demarrage vaut mieux qu'echouer au callback, ou l'utilisateur est deja a mi-chemin d'un
+ecran de consentement.
+
+| Refus | Raison |
+|---|---|
+| Sign-in active sans `client_id`, secret ou URI de retour | La route ne pourrait qu'echouer |
+| URI de retour en HTTP clair **hors `development`** | Un code d'autorisation en clair est un code redimable par qui est sur le chemin |
+| URI de retour en HTTP clair **hors boucle locale** | Les deux conditions valent ensemble, aucune seule ne suffit |
+| Cible post-connexion qui n'est pas un chemin | Redirection ouverte |
+| Cible post-connexion protocole-relative | Idem, et plus discrete |
+
+**Deux failles corrigees a cette occasion**, l'une et l'autre nees d'une comparaison par prefixe :
+
+`redirect.startswith("http://localhost")` acceptait **`http://localhost.evil.test/callback`** — un
+hote qui commence par `localhost`, resout ou son proprietaire veut, et aurait recu le code
+d'autorisation en clair. L'hote est desormais compare exactement, ou reconnu comme adresse de
+boucle par `ipaddress`.
+
+`target.startswith("/")` acceptait **`//elsewhere.example`**, une URL protocole-relative que le
+navigateur suit hors du site. Le controle du slash initial, cense fermer la redirection ouverte,
+la laissait donc grande ouverte. Le backslash est refuse aussi, certains navigateurs le repliant
+sur un slash.
+
+### Type d'autorisation et portees, a ne pas confondre
+
+Ce sont deux choix distincts, et les confondre a failli passer dans ce journal.
+
+**Le type d'autorisation** — `resource-level grant` si la console Atlassian le propose — restreint
+l'octroi a un site. **Les portees** sont les permissions demandees. Ajouter les API Jira et
+Confluence dans la console selectionne des *permissions* ; cela ne restreint rien a un site.
+
+Portees classiques minimales, aucune ecriture : `offline_access`, `read:jira-work`,
+`read:jira-user`, `read:confluence-content.all`, `read:confluence-space.summary`.
+
+La restriction au site est en outre appliquee cote serveur par `PKA_ATLASSIAN_EXPECTED_CLOUD_ID`,
+independamment de ce que la console permet.
+
 # MCP-RO-ARCH-001 — Connecteurs MCP en lecture seule
 
 ## Exécution
@@ -1161,6 +1200,164 @@ Le plafond de lecture est serveur, à 200 tours, et une demande supérieure est 
 que réduite en silence. Reste à faire : le branchement dans l'interface, qui appartient au
 chantier de rhabillage, et le sort d'`indexRequests` dans le port — repoussé pour ne pas déplacer
 le sol sous ce chantier.
+
+## Phase 2, premiere tranche : la session cote serveur — 2026-08-18
+
+Le defaut le plus grave du systeme est traite : l'appelant ne choisit plus son locataire.
+
+### Additif, et c'est le point
+
+`auth_mode` accepte desormais `session` en plus de `dev_headers`, et **garde `dev_headers` par
+defaut**. Le chantier de rhabillage tourne en parallele et envoie encore les en-tetes d'identite ;
+basculer le mode maintenant l'aurait casse pour une fonctionnalite qu'il n'a pas demandee.
+
+C'est exactement l'extension que le controle de mode sur le chemin de requete avait prevue :
+ajouter un mode n'accorde pas silencieusement un chemin qui continue de faire confiance a ce
+qu'il faisait confiance avant.
+
+### Les cinq proprietes qui comptent
+
+**Les en-tetes deviennent inertes en mode session** — pas meme un repli en dernier recours. Un
+repli rendrait a l'appelant precisement ce qu'on vient de lui retirer. Un test le prouve par ce
+qu'un appelant peut lire, pas en inspectant le contexte : une session valide plus des en-tetes
+usurpes donne l'identite de la session, et l'identite usurpee ne peut pas atteindre la
+conversation creee.
+
+**Un magasin injoignable repond 503.** Fail-closed : une identite qu'on ne peut pas verifier ne
+doit pas etre affirmee, et les en-tetes attendent juste a cote comme solution de facilite.
+
+**Le jeton n'est jamais stocke.** 256 bits d'urandom remis une fois au navigateur, seule
+l'empreinte SHA-256 vit en base. Un vidage de base ne rend aucune session utilisable. SHA-256 nu
+plutot qu'un hachage de mot de passe, faute d'entree devinable a ralentir et parce que le cout se
+paierait sur chaque requete authentifiee.
+
+**L'expiration est absolue, pas glissante.** Une session qui se renouvelle a chaque requete ne se
+termine jamais pour qui detient le jeton — le cas meme contre lequel l'expiration existe. Une
+session expiree repond comme une session absente, pour ne rien dire d'un jeton dont l'appelant
+n'est peut-etre pas proprietaire.
+
+**La table `sessions` n'est pas clef-par-locataire**, contrairement a toutes les autres. C'est
+elle qui etablit le locataire : elle ne peut pas en dependre.
+
+### Un choix qui contredit la feuille de route
+
+Elle annoncait Redis, deja lance dans le `compose` sans consommateur. C'est PostgreSQL qui a ete
+retenu : la consultation de session est sur le chemin de **chaque requete authentifiee**, et y
+placer un second magasin ajouterait une bibliotheque cliente, un identifiant et un mode de panne a
+un code dont toute la discipline est une surface sortante etroite. Les sessions sont peu
+nombreuses, courtes, et balayees par l'expiration.
+
+Redis reste donc sans consommateur. C'est un point de menage du `compose`, pas une raison
+d'ecrire du code.
+
+### Ce qui manque encore
+
+Il n'existe **aucun moyen d'ouvrir une session** : ni page de connexion, ni flux OAuth. Le mode
+est donc utilisable en test mais inutile en deploiement — personne ne peut entrer, ce qui est
+fail-closed mais sterile. La suite de la phase 2 est le flux Atlassian 3LO, la table des
+habilitations deleguees et le verrou partage du renouvellement.
+
+## Phase 2.3 : le flux Atlassian, du consentement a la session — 2026-08-18
+
+Le mode session existait sans moyen d'ouvrir une session. Trois routes le remplissent :
+`/api/auth/atlassian/start`, `/callback` et `/signout`.
+
+### Le tenant est derive, jamais declare
+
+C'est le seul point qui compte vraiment. Un jeton delegue Atlassian couvre **exactement le site
+choisi sur l'ecran de consentement**, et rien dans le jeton ne dit lequel : `accessible-resources`
+est le seul moyen de l'apprendre. Ce projet l'avait deja appris a ses depens, c'est la raison
+d'etre de l'option `--attendu` du script d'import.
+
+Le `cloudId` devient donc le tenant et l'`account_id` devient l'utilisateur, tous deux relus chez
+le fournisseur. C'est toute la difference avec le mode en-tetes qu'il remplace, ou l'appelant
+choisissait les deux.
+
+**Mais un octroi peut couvrir plusieurs sites**, et les trois cas sont traites separement :
+
+| Sites couverts | Comportement |
+|---|---|
+| aucun | Refus. Toute lecture ulterieure echouerait avec une erreur sans rapport apparent. |
+| un | Le tenant en est derive, apres verification contre `PKA_ATLASSIAN_EXPECTED_CLOUD_ID` si un site est epingle. |
+| plusieurs | Refus explicite, sauf si l'epinglage en designe un. |
+
+**Jamais le premier element par defaut.** L'ordre de cette liste ne fait partie d'aucun contrat :
+choisir en silence ferait dependre le tenant -- et avec lui chaque frontiere de permission du
+systeme -- d'un ordre arbitraire qui peut changer entre deux connexions du meme utilisateur. Une
+premiere version du code prenait `payload[0]` ; c'etait un defaut, corrige avant toute fusion.
+
+### Ce qui n'est pas negociable dans ce flux
+
+**PKCE est envoye, pas garanti.** Rectification de ce qui a ete ecrit plus haut dans cette meme
+section : la documentation 3LO d'Atlassian decrit un flux `authorization_code` authentifie par
+`client_secret` et **ne documente ni `code_challenge` ni `code_verifier`**. Rien ici n'a observe le
+fournisseur enregistrer le defi ni refuser un verifieur qui ne correspond pas.
+
+Les parametres restent envoyes -- ils ne coutent rien et agissent d'eux-memes si le fournisseur les
+honore -- mais ils sont traites comme inertes. Ce qui protege reellement ce flux aujourd'hui :
+un `state` imprevisible a usage unique, le `client_secret` detenu cote serveur, un code redimable
+une seule fois, et un cookie que le navigateur ne remet pas au script.
+
+Le test qui verifie l'appariement defi/verifieur atteste **notre propre coherence**, pas une
+garantie du fournisseur, et son nom le dit desormais.
+
+**Procedure pour trancher**, differee volontairement : le flux normal sera valide d'abord. Le test
+negatif — echanger un code avec un verifieur different de celui qui a produit le defi — ne sera
+joue qu'ensuite et seulement si necessaire, avec revocation immediate de tout jeton delivre. Un
+echange reussi signifierait qu'Atlassian ignore PKCE ; un `invalid_grant` qu'il l'applique.
+
+**`prompt=consent` est explicite.** Sans lui Atlassian peut reutiliser un octroi anterieur en
+silence, et l'utilisateur ne voit jamais le selecteur de site — l'ecran qui decide quel site le
+jeton couvrira. **`offline_access` de meme** : sans refresh token, retour au consentement dans
+l'heure.
+
+**L'etat est a usage unique par construction.** Il est *retire* du magasin, pas lu. Un callback
+rejoue frapperait sinon une seconde session dans un seul consentement.
+
+**Les trois appels sortants suivent la discipline du projet** : HTTPS valide a l'import, port fixe,
+redirections refusees, `trust_env` ignore, adresse resolue puis epinglee avec le nom conserve pour
+SNI, reponse bornee a 256 Ko. Un code d'autorisation et un refresh token le meritent au moins
+autant qu'une lecture MCP.
+
+**Le corps du fournisseur n'est jamais reexpedie.** Il peut renvoyer le code en echo, nommer le
+client, ou decrire l'echec dans des termes ecrits pour un operateur.
+
+**`DelegatedCredentials` ne se represente pas.** Son `repr` ne montre que le tenant et
+l'utilisateur : un refresh token dans un `repr` finit dans la premiere trace d'appel qui le touche,
+puis dans un journal, puis dans une sauvegarde.
+
+**Le cookie** porte `httponly`, `secure` partout sauf sur localhost en clair, `samesite=lax` et le
+chemin racine. La deconnexion **revoque cote serveur avant** de vider le cookie : vider seulement
+le cookie laisserait une session vivante pour quiconque a deja copie le jeton, ce qui est
+precisement le cas auquel une deconnexion doit repondre.
+
+### Trois refus a la construction
+
+Un sign-in active sans son enregistrement, une cible de redirection en HTTP clair hors localhost,
+ou une cible post-connexion qui est une URL complete plutot qu'un chemin — cette derniere etant la
+definition d'une redirection ouverte. Echouer au demarrage vaut mieux qu'echouer au callback, ou
+l'utilisateur est deja a mi-chemin d'un ecran de consentement.
+
+### Ce qui reste
+
+Les identifiants delegues vont dans un **port**, pas dans une table. L'implementation persistante et
+chiffree est la tranche 2.4 ; en attendant ils vivent en memoire de processus et **jamais sur
+disque**, ce qui force un nouveau consentement au redemarrage plutot que de laisser un refresh token
+dans un fichier que personne ne fait tourner.
+
+Consequence a ne pas oublier : le courtier d'habilitations que les lectures MCP utilisent lit
+encore des fichiers designes par la configuration. Tant que 2.4 n'est pas livree, se connecter
+donne une session mais pas une habilitation par utilisateur.
+
+Rien de ce flux n'a ete joue contre le vrai Atlassian : il n'y a pas d'application OAuth
+enregistree. Les tests passent par un transport injecte.
+
+**Le comportement du cookie `Secure` reste a verifier dans un vrai navigateur** lors du test OAuth
+reel. Les tests le prouvent au niveau du client HTTP — l'attribut est pose, et le client refuse de
+le renvoyer en clair — mais un navigateur applique aussi ses propres regles de site et de port.
+
+**La production exigera HTTPS de bout en bout.** Le callback en `http://localhost:8000` n'existe
+que pour la machine de developpement et la configuration le refuse partout ailleurs.
 
 ## Dette technique
 

@@ -1,11 +1,68 @@
+import ipaddress
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _is_loopback(hostname: str | None) -> bool:
+    """True only for the local machine, by name or by address.
+
+    ``localhost`` is compared exactly rather than by prefix: ``localhost.evil.test``
+    starts with it, resolves wherever its owner points it, and would otherwise have
+    passed as local -- carrying an authorization code to a third party over plain
+    HTTP.
+    """
+
+    if not hostname:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_redirect_uri(redirect: str, *, environment: str) -> None:
+    """HTTPS everywhere, with one narrow exception for a developer machine.
+
+    An authorization code travelling over plain HTTP is a code anyone on the path
+    can redeem, so the exception is fenced on both sides: the environment has to be
+    ``development`` **and** the host has to be the local machine. Either alone is not
+    enough.
+    """
+
+    parsed = urlsplit(redirect)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme != "http":
+        raise ValueError("The Atlassian redirect URI must use HTTPS")
+    if environment != "development":
+        raise ValueError(
+            "A plain HTTP redirect URI is only allowed in the development environment"
+        )
+    if not _is_loopback(parsed.hostname):
+        raise ValueError("A plain HTTP redirect URI is only allowed on the loopback host")
+
+
+def _validate_post_login_path(target: str) -> None:
+    """A same-origin path, and nothing that a browser would read as elsewhere.
+
+    ``//elsewhere.example`` starts with a slash and is a protocol-relative URL that
+    browsers follow off-site, so the leading-slash check alone leaves the open
+    redirect it was meant to close. A backslash is folded to a slash by some
+    browsers, which reopens it a second way.
+    """
+
+    if not target.startswith("/"):
+        raise ValueError("The post sign-in target must be a path, not a URL")
+    if target.startswith(("//", "/\\")):
+        raise ValueError("The post sign-in target must not be a protocol-relative URL")
 
 
 class Settings(BaseSettings):
@@ -20,7 +77,26 @@ class Settings(BaseSettings):
     app_name: str = "Project Knowledge Assistant API"
     environment: Literal["development", "test", "production"] = "development"
     repository_backend: Literal["memory", "postgres"] = "memory"
-    auth_mode: Literal["dev_headers"] = "dev_headers"
+    # Two modes now. ``dev_headers`` remains the default so an existing front end
+    # keeps working; ``session`` is what a deployment switches to once a sign-in
+    # flow exists, and it makes the identity headers inert.
+    auth_mode: Literal["dev_headers", "session"] = "dev_headers"
+    session_lifetime_hours: int = Field(default=12, ge=1, le=24 * 30)
+
+    # Atlassian 3LO. Off by default: a deployment that has not registered an OAuth
+    # app must not expose a sign-in route that can only fail.
+    atlassian_oauth_enabled: bool = False
+    atlassian_oauth_client_id: str | None = Field(default=None, min_length=1, max_length=200)
+    atlassian_oauth_client_secret_file: Path | None = None
+    # Must match the app registration exactly. Not derived from the request, because
+    # a redirect target taken from a Host header is a redirect an attacker can aim.
+    atlassian_oauth_redirect_uri: str | None = Field(default=None, min_length=1, max_length=500)
+    # Where the browser lands once signed in. A path, never a full URL and never a
+    # caller-supplied "next": an open redirect is the classic hole in this flow.
+    atlassian_oauth_post_login_path: str = Field(default="/", min_length=1, max_length=200)
+    # Pins which site becomes the tenant when a grant covers several. Absent, a
+    # multi-site grant is refused rather than resolved by picking one.
+    atlassian_expected_cloud_id: str | None = Field(default=None, min_length=1, max_length=200)
     # Browser origins allowed to call the API cross-origin. Empty by default, which
     # installs no CORS middleware at all: a browser then refuses the call, which is
     # the right answer for a deployment that has not named its front end.
@@ -86,6 +162,29 @@ class Settings(BaseSettings):
     # past what the provider will actually produce.
     llm_groq_max_completion_tokens: int = Field(default=16_384, ge=256, le=16_384)
 
+    @field_validator(
+        "atlassian_oauth_client_id",
+        "atlassian_oauth_redirect_uri",
+        "atlassian_expected_cloud_id",
+        mode="before",
+    )
+    @classmethod
+    def _empty_means_absent(cls, value: object) -> object:
+        """An empty string is how a container says "not set", so read it that way.
+
+        Compose substitutes a variable it cannot resolve with an empty string
+        rather than dropping it. Rejecting that string is technically right and
+        practically wrong: it stops the whole process over an optional pin nobody
+        asked for, and the traceback names a validation rule rather than the
+        variable. Absent and empty mean the same thing here, so they behave the
+        same. What must never be silently accepted is a *wrong* value, and that is
+        still refused -- an unmatched cloud id raises rather than resolving.
+        """
+
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @model_validator(mode="after")
     def validate_runtime_adapters(self) -> "Settings":
         if self.mcp_mutations_enabled:
@@ -98,6 +197,26 @@ class Settings(BaseSettings):
                 raise ValueError("The in-memory repository is forbidden in production")
             if self.auth_mode == "dev_headers":
                 raise ValueError("Development header identity is forbidden in production")
+
+        if self.atlassian_oauth_enabled:
+            missing = [
+                name
+                for name, value in (
+                    ("client id", self.atlassian_oauth_client_id),
+                    ("client secret file", self.atlassian_oauth_client_secret_file),
+                    ("redirect URI", self.atlassian_oauth_redirect_uri),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValueError(
+                    "Atlassian sign-in requires its " + ", ".join(missing)
+                )
+            _validate_redirect_uri(
+                str(self.atlassian_oauth_redirect_uri),
+                environment=self.environment,
+            )
+            _validate_post_login_path(self.atlassian_oauth_post_login_path)
 
         if self.mcp_jira_enabled and not self.mcp_atlassian_enabled:
             raise ValueError("The Jira MCP binding requires the Atlassian provider")

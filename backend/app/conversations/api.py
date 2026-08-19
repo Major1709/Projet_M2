@@ -10,7 +10,7 @@ from app.conversations.domain import (
 )
 from app.conversations.errors import ConversationNotFound
 from app.conversations.workflow import MAX_MESSAGES_RETURNED, ConversationWorkflow
-from app.core.identity import SecurityContext, get_development_security_context
+from app.core.identity import SecurityContext, get_security_context
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -22,7 +22,7 @@ def get_workflow(request: Request) -> ConversationWorkflow:
 @router.post("", response_model=Conversation, status_code=status.HTTP_201_CREATED)
 def create_conversation(
     command: ConversationCreate,
-    context: Annotated[SecurityContext, Depends(get_development_security_context)],
+    context: Annotated[SecurityContext, Depends(get_security_context)],
     workflow: Annotated[ConversationWorkflow, Depends(get_workflow)],
 ) -> Conversation:
     return workflow.create(command, context)
@@ -31,7 +31,7 @@ def create_conversation(
 @router.get("/{conversation_id}", response_model=Conversation)
 def get_conversation(
     conversation_id: UUID,
-    context: Annotated[SecurityContext, Depends(get_development_security_context)],
+    context: Annotated[SecurityContext, Depends(get_security_context)],
     workflow: Annotated[ConversationWorkflow, Depends(get_workflow)],
 ) -> Conversation:
     try:
@@ -46,7 +46,7 @@ def get_conversation(
 @router.get("/{conversation_id}/messages", response_model=list[ConversationMessage])
 def list_conversation_messages(
     conversation_id: UUID,
-    context: Annotated[SecurityContext, Depends(get_development_security_context)],
+    context: Annotated[SecurityContext, Depends(get_security_context)],
     workflow: Annotated[ConversationWorkflow, Depends(get_workflow)],
     limit: Annotated[int, Query(ge=1, le=MAX_MESSAGES_RETURNED)] = MAX_MESSAGES_RETURNED,
 ) -> list[ConversationMessage]:
