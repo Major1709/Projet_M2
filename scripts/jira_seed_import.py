@@ -122,6 +122,13 @@ def _appel(
         raise ImportEchoue(f"{methode} {chemin} -> {erreur.code}\n  {detail}") from erreur
     except urllib.error.URLError as erreur:
         raise ImportEchoue(f"Reseau injoignable : {erreur.reason}") from erreur
+    except OSError as erreur:
+        # Un depassement de delai en lecture n'est pas une URLError et remontait
+        # donc brut, en traceback, apres une requete deja partie. C'est le pire
+        # cas : la creation a peut-etre abouti cote serveur sans que la reponse
+        # revienne, et le registre local ignore alors une cle bien reelle. La
+        # reconciliation par resume existe pour cette raison.
+        raise ImportEchoue(f"Echange interrompu : {erreur}") from erreur
 
 
 def _autorisation(courriel: str) -> str:
@@ -214,6 +221,38 @@ def _verifier_le_projet(
     return traduction
 
 
+def _resumes_deja_presents(autorisation: str, site: str, projet: str) -> dict[str, str]:
+    """Les resumes deja dans le projet, associes a leur cle.
+
+    Le registre local ne suffit pas a garantir l'idempotence. Une creation dont
+    la reponse n'arrive jamais -- delai depasse, connexion coupee -- a pu aboutir
+    cote serveur : le ticket existe, le registre l'ignore, et une relance le
+    creerait une seconde fois. Un doublon dans un corpus qui sert justement a
+    mesurer la detection de doublons est le pire resultat possible ici.
+
+    On interroge donc le projet avant d'ecrire, et on adopte ce qui existe deja.
+    """
+
+    base = API.format(site=site)
+    jql = urllib.parse.quote(f'project = "{projet}" ORDER BY created ASC')
+    presents: dict[str, str] = {}
+    jeton_page: str | None = None
+    while True:
+        url = f"{base}/search/jql?jql={jql}&fields=summary&maxResults=100"
+        if jeton_page:
+            url += f"&nextPageToken={urllib.parse.quote(jeton_page)}"
+        page = _appel(url, autorisation)
+        for ticket in page.get("issues", []):
+            resume = (ticket.get("fields") or {}).get("summary")
+            if isinstance(resume, str):
+                # Le premier gagne : si un doublon existe deja, on veut adopter
+                # l'original plutot qu'en fabriquer un troisieme.
+                presents.setdefault(resume, str(ticket["key"]))
+        jeton_page = page.get("nextPageToken")
+        if page.get("isLast", True) or not jeton_page:
+            return presents
+
+
 def _charger_le_registre() -> dict[str, str]:
     if not REGISTRE.exists():
         return {}
@@ -262,9 +301,28 @@ def main() -> int:
         autorisation = _autorisation(arguments.courriel)
         print(f"Site     : {arguments.site}")
         traduction = _verifier_le_projet(autorisation, arguments.site, arguments.projet, restants)
+        presents = _resumes_deja_presents(autorisation, arguments.site, arguments.projet)
     except ImportEchoue as erreur:
         print(f"\nArret avant toute ecriture :\n  {erreur}", file=sys.stderr)
         return 1
+
+    adoptes = {
+        ligne["Id"]: presents[ligne["Summary"]]
+        for ligne in restants
+        if ligne["Summary"] in presents
+    }
+    if adoptes:
+        # Ces tickets existent dans Jira sans figurer au registre : une reponse
+        # perdue apres une creation reussie. Les adopter, plutot que les recreer.
+        registre.update(adoptes)
+        _ecrire_le_registre(registre)
+        restants = [ligne for ligne in restants if ligne["Id"] not in registre]
+        for graine, cle in sorted(adoptes.items()):
+            print(f"  deja present, adopte : {graine} -> {cle}")
+        print(f"Reste    : {len(restants)} a creer")
+        if not restants:
+            print("Rien a creer.")
+            return 0
 
     if not arguments.execute:
         print("\nSimulation -- aucune ecriture. Apercu des trois premiers :")
