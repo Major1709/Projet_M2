@@ -70,49 +70,6 @@ x-backend-secrets: &backend-secrets
   - session_signing_key
 
 services:
-  frontend:
-    image: ${FRONTEND_IMAGE:-projet-m2-frontend:local}
-    build:
-      context: ../frontend
-      dockerfile: Dockerfile
-    init: true
-    restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      APP_ENV: ${APP_ENV:-development}
-      API_INTERNAL_URL: ${API_INTERNAL_URL:-http://api:8000}
-      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-https://identity.example.invalid}
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-projet-m2-web}
-      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-http://localhost:3000/auth/callback}
-      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
-      SESSION_SIGNING_KEY_FILE: /run/secrets/session_signing_key
-      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
-    secrets:
-      - oidc_client_secret
-      - session_signing_key
-    ports:
-      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-3000}:3000"
-    depends_on:
-      api:
-        condition: service_healthy
-    healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    networks:
-      - edge
-    security_opt:
-      - no-new-privileges:true
-    stop_grace_period: 30s
-    logging: *default-logging
-
   api:
     image: ${BACKEND_IMAGE:-projet-m2-backend:local}
     build: *backend-build
@@ -322,5 +279,3 @@ secrets:
     file: ${SECRETS_DIR:-./secrets/dev}/token_encryption_key
   session_signing_key:
     file: ${SECRETS_DIR:-./secrets/dev}/session_signing_key
-  oidc_client_secret:
-    file: ${SECRETS_DIR:-./secrets/dev}/oidc_client_secret

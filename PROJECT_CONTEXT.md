@@ -190,6 +190,14 @@ Le rapport de référence est `docs/architecture/sprint-0-integration-report.md`
 
 ## Organisation actuelle du code
 
-Le frontend est structuré par feature sous `frontend/src/features/project-assistant/` avec les couches `domain`, `application`, `adapters`, `ui` et `demo`. Le backend est un monolithe modulaire structuré par domaines (`approvals`, `conversations`, `agent`, `mcp`, `knowledge`, `audit`) ; chaque domaine sépare modèles, ports, workflows et adaptateurs.
+Le frontend précédent a été retiré du dépôt le 30 août 2026 afin d'être
+reconstruit depuis une base propre. Il n'existe donc temporairement aucun dossier
+`frontend/` ni application web exécutable dans l'état courant. Cette remise à
+zéro ne modifie ni la vision produit, ni la stack frontend recommandée, ni les
+contrats et invariants de sécurité que la nouvelle interface devra respecter.
+
+Le backend reste un monolithe modulaire structuré par domaines (`approvals`,
+`conversations`, `agent`, `mcp`, `knowledge`, `audit`) ; chaque domaine sépare
+modèles, ports, workflows et adaptateurs.
 
 Les règles détaillées et la procédure d'ajout d'une intégration sont conservées dans `docs/architecture/code-organization.md`.
