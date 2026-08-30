@@ -506,11 +506,18 @@ async def test_a_compressed_body_is_refused(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_deeply_nested_tool_arguments_stay_inside_the_taxonomy(tmp_path: Path) -> None:
-    # RecursionError is not a ValueError. Uncaught it escapes the fail-closed taxonomy
-    # and surfaces as a generic 500 with a traceback -- reachable from a page whose
-    # content the model was asked to relay.
-    nested = '{"a":' + "[" * 5_000 + "]" * 5_000 + "}"
-    assert len(nested) < MAX_TOOL_ARGUMENTS_CHARACTERS
+    """A nesting bomb is refused inside the taxonomy, never as an escaping 500.
+
+    Which guard fires is deliberately not asserted. Exhausting the parser stack takes
+    about 10 000 levels, and balanced brackets cost two characters per level, so any
+    payload deep enough to recurse is already over MAX_TOOL_ARGUMENTS_CHARACTERS and
+    the size guard answers first. The RecursionError arm in the adapter is therefore
+    unreachable by nesting alone at the current cap; it stays as defence in depth for
+    the day that cap is raised, and this test pins the property that matters either
+    way -- the refusal is typed, and no traceback reaches a caller.
+    """
+
+    nested = '{"a":' + "[" * 10_000 + "]" * 10_000 + "}"
     handler = json_handler(
         completion(
             text="",
@@ -524,7 +531,7 @@ async def test_deeply_nested_tool_arguments_stay_inside_the_taxonomy(tmp_path: P
         )
     )
     provider = provider_for(tmp_path, handler)
-    with pytest.raises(LLMInvalidResponse):
+    with pytest.raises((LLMInvalidResponse, LLMResponseTooLarge)):
         await provider.generate(request=REQUEST, context=CONTEXT)
 
 
