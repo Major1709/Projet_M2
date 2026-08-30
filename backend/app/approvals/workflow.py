@@ -1,7 +1,7 @@
 import hmac
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.approvals.domain import (
@@ -16,10 +16,15 @@ from app.approvals.errors import (
     InvalidDecisionToken,
     InvalidTransition,
     ProposalConversationNotFound,
+    ProposalExpired,
     ProposalNotFound,
     VersionConflict,
 )
-from app.approvals.ports import ApprovalRepository, ApprovalUnitOfWorkFactory
+from app.approvals.ports import (
+    ApprovalRepository,
+    ApprovalUnitOfWorkFactory,
+    MutationToolPin,
+)
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
 from app.conversations.ports import ConversationRepository
@@ -46,9 +51,13 @@ class ApprovalWorkflow:
         self,
         unit_of_work_factory: ApprovalUnitOfWorkFactory,
         conversation_repository: ConversationRepository,
+        tool_pin: MutationToolPin,
+        approval_ttl_seconds: int,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._conversations = conversation_repository
+        self._tool_pin = tool_pin
+        self._approval_ttl = timedelta(seconds=approval_ttl_seconds)
 
     def propose(
         self,
@@ -63,6 +72,11 @@ class ApprovalWorkflow:
             proposed_by_user_id=context.user_id,
             execution_context_hash=security_context_fingerprint(context),
             decision_token_hash=sha256_text(decision_token),
+            tool_schema_sha256=self._tool_pin.schema_sha256(
+                source_system=command.source_system,
+                tool_name=command.tool_name,
+            ),
+            expires_at=datetime.now(UTC) + self._approval_ttl,
         )
         with self._unit_of_work_factory() as unit_of_work:
             unit_of_work.proposals.add(proposal)
@@ -176,6 +190,14 @@ class ApprovalWorkflow:
                 proposed_by_user_id=context.user_id,
                 execution_context_hash=security_context_fingerprint(context),
                 decision_token_hash=sha256_text(decision_token),
+                # A revision is a fresh proposal, so it is re-pinned and re-dated rather
+                # than inheriting the window of the one it supersedes -- otherwise
+                # revising near the deadline would hand back consent that is nearly spent.
+                tool_schema_sha256=self._tool_pin.schema_sha256(
+                    source_system=replacement_command.source_system,
+                    tool_name=replacement_command.tool_name,
+                ),
+                expires_at=datetime.now(UTC) + self._approval_ttl,
                 supersedes_id=current.id,
             )
             superseded = current.model_copy(
@@ -239,6 +261,12 @@ class ApprovalWorkflow:
 
     @staticmethod
     def _validate_decision(proposal: ActionProposal, decision: ActionDecision) -> None:
+        # Checked before the token, so an expired proposal answers the same way whether
+        # or not the caller holds a valid token -- expiry is not a token oracle.
+        if proposal.has_expired():
+            raise ProposalExpired(
+                "The approval window closed; propose the action again to decide on it"
+            )
         if proposal.state != ActionProposalState.PENDING_APPROVAL:
             raise InvalidTransition(
                 f"Only PENDING_APPROVAL can receive a decision, got {proposal.state}"

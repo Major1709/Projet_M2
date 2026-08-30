@@ -33,3 +33,6 @@ class InvalidDecisionToken(ApprovalError):
 class TenantBoundaryViolation(ApprovalError):
     pass
 
+
+class ProposalExpired(ApprovalError):
+    """The approval window closed before the decision or the execution arrived."""

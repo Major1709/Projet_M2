@@ -1,9 +1,10 @@
+import hmac
 from datetime import UTC, datetime
 from uuid import UUID
 
 from app.approvals.domain import ActionProposal, ActionProposalState
-from app.approvals.errors import InvalidTransition
-from app.approvals.ports import ApprovalRepository
+from app.approvals.errors import InvalidTransition, ProposalExpired
+from app.approvals.ports import ApprovalRepository, MutationToolPin
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
 from app.core.identity import SecurityContext, security_context_fingerprint
@@ -20,11 +21,13 @@ class ApprovedMutationRunner:
         repository: ApprovalRepository,
         gateway: MCPToolGateway,
         permission_verifier: SourcePermissionVerifier,
+        tool_pin: MutationToolPin,
         audit_sink: AuditSink,
     ) -> None:
         self._repository = repository
         self._gateway = gateway
         self._permission_verifier = permission_verifier
+        self._tool_pin = tool_pin
         self._audit_sink = audit_sink
 
     def execute(
@@ -47,6 +50,13 @@ class ApprovedMutationRunner:
             from app.approvals.errors import VersionConflict
 
             raise VersionConflict(expected=expected_version, actual=proposal.version)
+        # Before every other check: an approval that outlived its window is spent, and
+        # saying so first keeps a stale proposal from reporting an identity or context
+        # mismatch that is merely a consequence of the delay.
+        if proposal.has_expired():
+            raise ProposalExpired(
+                "The approval expired before execution; propose the action again"
+            )
         if proposal.state != ActionProposalState.APPROVED:
             raise InvalidTransition(
                 "MCP mutation execution requires an APPROVED action proposal"
@@ -57,6 +67,14 @@ class ApprovedMutationRunner:
             raise InvalidTransition("The approved execution context has changed")
         if not proposal.action_class.is_external_mutation:
             raise InvalidTransition("The approved action is not an external mutation")
+        # The human consented to one shape of call. A provider that changed its schema
+        # since then has changed what that consent covers, so it is withdrawn.
+        current_schema = self._tool_pin.schema_sha256(
+            source_system=proposal.source_system,
+            tool_name=proposal.tool_name,
+        )
+        if not hmac.compare_digest(current_schema, proposal.tool_schema_sha256):
+            raise InvalidTransition("The tool schema changed after the approval")
 
         call = MCPToolCall(
             source_system=proposal.source_system,

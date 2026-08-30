@@ -134,6 +134,10 @@ class Settings(BaseSettings):
     database_pool_timeout_seconds: int = Field(default=2, ge=1, le=10)
     database_statement_timeout_ms: int = Field(default=2_000, ge=100, le=30_000)
     mcp_reads_enabled: bool = False
+    # How long an approval stays spendable. Short on purpose: the human approved what
+    # was on screen, and the further the target drifts from that moment the less the
+    # approval means. Fifteen minutes covers a read-check-approve round trip.
+    approval_ttl_seconds: int = Field(default=900, ge=60, le=3_600)
     mcp_mutations_enabled: bool = False
     mcp_atlassian_enabled: bool = False
     mcp_jira_enabled: bool = False

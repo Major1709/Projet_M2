@@ -102,6 +102,13 @@ class ActionProposal(BaseModel):
     diff_json: str | None = None
     correlation_id: str
     execution_context_hash: str
+    # The tool schema the human was shown a payload for. Pinned at proposal time and
+    # rechecked before execution: an approval is consent to one shape of call, and a
+    # provider that changes its schema in between has changed what the approval means.
+    tool_schema_sha256: str = Field(min_length=64, max_length=64)
+    # An approval is a decision taken with what was on screen at that moment. Past this
+    # instant the target may have moved, so consent is spent rather than merely stale.
+    expires_at: datetime
     state: ActionProposalState = ActionProposalState.PENDING_APPROVAL
     version: int = 1
     decision_token_hash: str | None = Field(default=None, min_length=64, max_length=64)
@@ -120,6 +127,8 @@ class ActionProposal(BaseModel):
         proposed_by_user_id: str,
         execution_context_hash: str,
         decision_token_hash: str,
+        tool_schema_sha256: str,
+        expires_at: datetime,
         supersedes_id: UUID | None = None,
     ) -> "ActionProposal":
         payload_json = canonical_json(command.payload)
@@ -132,6 +141,7 @@ class ActionProposal(BaseModel):
             "payload": command.payload,
             "diff": command.diff,
             "execution_context_hash": execution_context_hash,
+            "tool_schema_sha256": tool_schema_sha256,
         }
         return cls(
             tenant_id=tenant_id,
@@ -147,9 +157,17 @@ class ActionProposal(BaseModel):
             diff_json=diff_json,
             correlation_id=command.correlation_id,
             execution_context_hash=execution_context_hash,
+            tool_schema_sha256=tool_schema_sha256,
+            expires_at=expires_at,
             decision_token_hash=decision_token_hash,
             supersedes_id=supersedes_id,
         )
+
+    def has_expired(self, *, now: datetime | None = None) -> bool:
+        """True once consent is spent. Compared against a caller-supplied instant so
+        the check is the same one in the workflow, the runner and the tests."""
+
+        return (now or utc_now()) >= self.expires_at
 
     @property
     def payload(self) -> dict[str, Any]:

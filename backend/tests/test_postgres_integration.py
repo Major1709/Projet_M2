@@ -48,6 +48,14 @@ def postgres_engine(postgres_settings: Settings) -> Iterator[Engine]:
     engine.dispose()
 
 
+class StubToolPin:
+    """Stands in for the mutation registry, which does not exist yet: the production
+    adapter denies every tool by design, so these tests supply a fixed fingerprint."""
+
+    def schema_sha256(self, *, source_system, tool_name) -> str:
+        del source_system, tool_name
+        return "a" * 64
+
 def unique_context(label: str) -> SecurityContext:
     run_id = uuid4().hex
     return SecurityContext(
@@ -222,7 +230,7 @@ def test_compare_and_swap_allows_only_one_winner(postgres_engine: Engine) -> Non
     sessions = create_session_factory(postgres_engine)
     conversations = PostgresConversationRepository(sessions)
     unit_of_work_factory = PostgresApprovalUnitOfWorkFactory(sessions)
-    workflow = ApprovalWorkflow(unit_of_work_factory, conversations)
+    workflow = ApprovalWorkflow(unit_of_work_factory, conversations, StubToolPin(), 900)
     context = unique_context("cas")
     conversation_record = Conversation(
         tenant_id=context.tenant_id,
@@ -266,7 +274,7 @@ def test_audit_failure_rolls_back_proposal_transition(postgres_engine: Engine) -
     sessions = create_session_factory(postgres_engine)
     conversations = PostgresConversationRepository(sessions)
     unit_of_work_factory = PostgresApprovalUnitOfWorkFactory(sessions)
-    workflow = ApprovalWorkflow(unit_of_work_factory, conversations)
+    workflow = ApprovalWorkflow(unit_of_work_factory, conversations, StubToolPin(), 900)
     context = unique_context("rollback")
     conversation = Conversation(
         tenant_id=context.tenant_id,

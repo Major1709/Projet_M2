@@ -9,6 +9,7 @@ from app.agent.audit import AuditedLLMProvider
 from app.agent.read_workflow import AgentReadWorkflow
 from app.approvals.adapters.memory import InMemoryApprovalUnitOfWork
 from app.approvals.adapters.postgres import PostgresApprovalUnitOfWorkFactory
+from app.approvals.adapters.tool_pin import NoMutationToolsPin
 from app.approvals.workflow import ApprovalWorkflow
 from app.audit.adapters.postgres import PostgresAppendOnlyAuditWriter
 from app.audit.ports import AuditSink
@@ -96,7 +97,12 @@ def build_container(settings: Settings) -> ApplicationContainer:
         semantic_index = _build_semantic_index(settings, InMemoryEmbeddingStore())
         grants: DelegatedGrantSink = _build_grant_sink(settings, None)
         return ApplicationContainer(
-            approvals=ApprovalWorkflow(approval_uow_factory, conversation_repository),
+            approvals=ApprovalWorkflow(
+                approval_uow_factory,
+                conversation_repository,
+                NoMutationToolsPin(),
+                settings.approval_ttl_seconds,
+            ),
             audit=approval_uow_factory.audit,
             conversations=ConversationWorkflow(conversation_repository, message_repository),
             mcp_reads=mcp_reads,
@@ -121,7 +127,12 @@ def build_container(settings: Settings) -> ApplicationContainer:
     semantic_index = _build_semantic_index(settings, PostgresEmbeddingStore(session_factory))
     grants = _build_grant_sink(settings, session_factory)
     return ApplicationContainer(
-        approvals=ApprovalWorkflow(approval_uow_factory, conversation_repository),
+        approvals=ApprovalWorkflow(
+                approval_uow_factory,
+                conversation_repository,
+                NoMutationToolsPin(),
+                settings.approval_ttl_seconds,
+            ),
         audit=audit_writer,
         conversations=ConversationWorkflow(conversation_repository, message_repository),
         mcp_reads=mcp_reads,

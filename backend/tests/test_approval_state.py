@@ -18,7 +18,7 @@ from app.approvals.adapters.memory import (
     InMemoryActionProposalRepository,
     InMemoryApprovalUnitOfWork,
 )
-from app.approvals.errors import ProposalConversationNotFound
+from app.approvals.errors import ProposalConversationNotFound, ProposalExpired
 from app.audit.adapters.memory import InMemoryAuditSink
 from app.conversations.adapters.memory import InMemoryConversationRepository
 from app.conversations.domain import Conversation
@@ -31,6 +31,34 @@ from app.mcp import (
 )
 
 CONVERSATION_ID = uuid4()
+PINNED_SCHEMA = "a" * 64
+APPROVAL_TTL_SECONDS = 900
+
+
+class StubToolPin:
+    """Stands in for the mutation registry, which does not exist yet.
+
+    The production adapter denies every tool, so proposing anything through it is
+    impossible by design; these tests exercise the approval machinery itself, not the
+    registry. ``schema_sha256`` is mutable so a test can simulate a provider changing
+    its schema between approval and execution.
+    """
+
+    def __init__(self, digest: str = PINNED_SCHEMA) -> None:
+        self.digest = digest
+
+    def schema_sha256(self, *, source_system: SourceSystem, tool_name: str) -> str:
+        del source_system, tool_name
+        return self.digest
+
+
+def workflow_for(unit_of_work, conversations, *, tool_pin=None, ttl=APPROVAL_TTL_SECONDS):
+    return ApprovalWorkflow(
+        unit_of_work,
+        conversations,
+        tool_pin or StubToolPin(),
+        ttl,
+    )
 
 
 def make_command(payload: dict[str, Any] | None = None) -> ActionProposalCreate:
@@ -69,7 +97,7 @@ def setup() -> tuple[
             owner_user_id=context.user_id,
         )
     )
-    return ApprovalWorkflow(unit_of_work, conversations), repository, audit, context
+    return workflow_for(unit_of_work, conversations), repository, audit, context
 
 
 def test_approval_requires_expected_version_and_consumes_token(setup: tuple) -> None:
@@ -154,7 +182,7 @@ def test_proposal_and_audit_roll_back_together(monkeypatch: pytest.MonkeyPatch) 
             owner_user_id=context.user_id,
         )
     )
-    service = ApprovalWorkflow(unit_of_work, conversations)
+    service = workflow_for(unit_of_work, conversations)
     append = unit_of_work.audit.append
 
     def fail_after_append(event: Any) -> None:
@@ -173,7 +201,7 @@ def test_proposal_and_audit_roll_back_together(monkeypatch: pytest.MonkeyPatch) 
 def test_proposal_requires_an_owned_conversation() -> None:
     unit_of_work = InMemoryApprovalUnitOfWork()
     context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
-    service = ApprovalWorkflow(unit_of_work, InMemoryConversationRepository())
+    service = workflow_for(unit_of_work, InMemoryConversationRepository())
 
     with pytest.raises(ProposalConversationNotFound, match="Conversation not found"):
         service.propose(make_command(), context)
@@ -233,6 +261,7 @@ def test_mcp_mutation_cannot_run_before_approval(setup: tuple) -> None:
         repository=repository,
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
+        tool_pin=StubToolPin(),
         audit_sink=audit,
     )
 
@@ -264,6 +293,7 @@ def test_approved_mutation_is_reauthorized_then_executed(setup: tuple) -> None:
         repository=repository,
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
+        tool_pin=StubToolPin(),
         audit_sink=audit,
     )
 
@@ -279,3 +309,155 @@ def test_approved_mutation_is_reauthorized_then_executed(setup: tuple) -> None:
     stored = repository.get(tenant_id=context.tenant_id, proposal_id=approved.id)
     assert stored is not None
     assert stored.state == ActionProposalState.COMPLETED
+
+
+def test_a_decision_arriving_after_the_window_is_refused(setup: tuple) -> None:
+    """Consent is spent by time, not only by use."""
+
+    _, repository, audit, context = setup
+    unit_of_work = InMemoryApprovalUnitOfWork()
+    conversations = InMemoryConversationRepository()
+    conversations.add(
+        Conversation(
+            id=CONVERSATION_ID,
+            tenant_id=context.tenant_id,
+            owner_user_id=context.user_id,
+        )
+    )
+    # A window already closed by the time propose() returns, which is the only way to
+    # observe the deadline without making the test wait on a clock.
+    service = workflow_for(unit_of_work, conversations, ttl=0)
+    issued = service.propose(make_command(), context)
+
+    with pytest.raises(ProposalExpired):
+        service.approve(
+            issued.proposal.id,
+            ActionDecision(
+                expected_version=issued.proposal.version,
+                decision_token=issued.decision_token,
+            ),
+            context,
+        )
+
+
+def test_expiry_answers_before_the_token_is_examined(setup: tuple) -> None:
+    """An expired proposal must not tell a caller whether their token was right."""
+
+    _, _, _, context = setup
+    unit_of_work = InMemoryApprovalUnitOfWork()
+    conversations = InMemoryConversationRepository()
+    conversations.add(
+        Conversation(
+            id=CONVERSATION_ID,
+            tenant_id=context.tenant_id,
+            owner_user_id=context.user_id,
+        )
+    )
+    service = workflow_for(unit_of_work, conversations, ttl=0)
+    issued = service.propose(make_command(), context)
+
+    with pytest.raises(ProposalExpired):
+        service.approve(
+            issued.proposal.id,
+            ActionDecision(
+                expected_version=issued.proposal.version,
+                decision_token="x" * 40,
+            ),
+            context,
+        )
+
+
+def test_an_approved_mutation_expiring_before_execution_never_reaches_the_gateway(
+    setup: tuple,
+) -> None:
+    service, repository, audit, context = setup
+    issued = service.propose(make_command(), context)
+    proposal = issued.proposal
+    approved = service.approve(
+        proposal.id,
+        ActionDecision(
+            expected_version=proposal.version,
+            decision_token=issued.decision_token,
+        ),
+        context,
+    )
+    # The approval was valid when granted; the delay is what withdraws it.
+    expired = approved.model_copy(
+        update={"expires_at": approved.created_at, "version": approved.version + 1}
+    )
+    repository.replace(proposal=expired, expected_version=approved.version)
+    gateway = RecordingGateway()
+    executor = ApprovedMutationRunner(
+        repository=repository,
+        gateway=gateway,
+        permission_verifier=AllowPermissionVerifier(),
+        tool_pin=StubToolPin(),
+        audit_sink=audit,
+    )
+
+    with pytest.raises(ProposalExpired):
+        executor.execute(
+            proposal_id=expired.id,
+            expected_version=expired.version,
+            context=context,
+            idempotency_key="idempotency-1",
+        )
+
+    assert gateway.mutation_calls == 0
+
+
+def test_a_tool_schema_changing_after_approval_withdraws_it(setup: tuple) -> None:
+    """The human approved one shape of call; a redefined tool is a different one."""
+
+    service, repository, audit, context = setup
+    issued = service.propose(make_command(), context)
+    proposal = issued.proposal
+    approved = service.approve(
+        proposal.id,
+        ActionDecision(
+            expected_version=proposal.version,
+            decision_token=issued.decision_token,
+        ),
+        context,
+    )
+    gateway = RecordingGateway()
+    executor = ApprovedMutationRunner(
+        repository=repository,
+        gateway=gateway,
+        permission_verifier=AllowPermissionVerifier(),
+        tool_pin=StubToolPin("b" * 64),
+        audit_sink=audit,
+    )
+
+    with pytest.raises(InvalidTransition, match="schema changed"):
+        executor.execute(
+            proposal_id=approved.id,
+            expected_version=approved.version,
+            context=context,
+            idempotency_key="idempotency-1",
+        )
+
+    assert gateway.mutation_calls == 0
+
+
+def test_a_revision_is_repinned_and_redated_rather_than_inheriting(setup: tuple) -> None:
+    service, _, _, context = setup
+    issued = service.propose(make_command(), context)
+    proposal = issued.proposal
+
+    revised = service.revise(
+        proposal.id,
+        ActionRevision(
+            expected_version=proposal.version,
+            decision_token=issued.decision_token,
+            target=proposal.target,
+            payload={"title": "Epic paiement", "body": "Version corrigee"},
+            reason="Correction du corps",
+        ),
+        context,
+    )
+
+    # Strictly later: a revision granted near the deadline must not hand back a window
+    # that is nearly spent.
+    assert revised.replacement.expires_at > proposal.expires_at
+    assert revised.replacement.tool_schema_sha256 == PINNED_SCHEMA

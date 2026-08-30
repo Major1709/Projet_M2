@@ -61,6 +61,8 @@ action_proposals = Table(
     Column("diff_json", Text, nullable=True),
     Column("correlation_id", String(200), nullable=False),
     Column("execution_context_hash", String(64), nullable=False),
+    Column("tool_schema_sha256", String(64), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
     Column("state", String(50), nullable=False),
     Column("version", Integer, nullable=False),
     Column("decision_token_hash", String(64), nullable=True),
