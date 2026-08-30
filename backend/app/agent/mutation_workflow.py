@@ -9,7 +9,11 @@ from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
 from app.core.identity import SecurityContext, security_context_fingerprint
 from app.mcp.domain import MCPExecutionResult, MCPToolCall, PermissionCheck
-from app.mcp.ports import MCPToolGateway, SourcePermissionVerifier
+from app.mcp.ports import (
+    MCPToolGateway,
+    MutationIdempotencyStore,
+    SourcePermissionVerifier,
+)
 
 
 class ApprovedMutationRunner:
@@ -22,12 +26,14 @@ class ApprovedMutationRunner:
         gateway: MCPToolGateway,
         permission_verifier: SourcePermissionVerifier,
         tool_pin: MutationToolPin,
+        idempotency: MutationIdempotencyStore,
         audit_sink: AuditSink,
     ) -> None:
         self._repository = repository
         self._gateway = gateway
         self._permission_verifier = permission_verifier
         self._tool_pin = tool_pin
+        self._idempotency = idempotency
         self._audit_sink = audit_sink
 
     def execute(
@@ -36,7 +42,6 @@ class ApprovedMutationRunner:
         proposal_id: UUID,
         expected_version: int,
         context: SecurityContext,
-        idempotency_key: str,
     ) -> MCPExecutionResult:
         proposal = self._repository.get(
             tenant_id=context.tenant_id,
@@ -50,9 +55,21 @@ class ApprovedMutationRunner:
             from app.approvals.errors import VersionConflict
 
             raise VersionConflict(expected=expected_version, actual=proposal.version)
-        # Before every other check: an approval that outlived its window is spent, and
-        # saying so first keeps a stale proposal from reporting an identity or context
-        # mismatch that is merely a consequence of the delay.
+        # Answered before every state check, because a mutation that already ran left
+        # the proposal COMPLETED rather than APPROVED. This is a lookup, not a
+        # reservation: nothing is minted for a proposal that never reached execution.
+        finished = self._idempotency.find(
+            tenant_id=proposal.tenant_id,
+            proposal_id=proposal.id,
+        )
+        if finished is not None and finished.completed:
+            if finished.result is None:
+                raise InvalidTransition("A completed mutation has no recorded outcome")
+            return finished.result
+
+        # An approval that outlived its window is spent, and saying so first keeps a
+        # stale proposal from reporting an identity or context mismatch that is merely
+        # a consequence of the delay.
         if proposal.has_expired():
             raise ProposalExpired(
                 "The approval expired before execution; propose the action again"
@@ -83,6 +100,13 @@ class ApprovedMutationRunner:
             arguments=proposal.payload,
             correlation_id=proposal.correlation_id,
         )
+        # Reserved before anything is attempted, and durable at that point: the key
+        # must survive a crash, or a retry would mint a second one and the provider
+        # would treat one approved action as two requests.
+        reservation = self._idempotency.reserve(
+            tenant_id=proposal.tenant_id,
+            proposal_id=proposal.id,
+        )
         checking = self._transition(proposal, ActionProposalState.PERMISSION_CHECK)
         decision = self._permission_verifier.check(
             PermissionCheck(context=context, call=call)
@@ -95,20 +119,33 @@ class ApprovedMutationRunner:
         )
         if not decision.allowed:
             self._transition(checking, ActionProposalState.DENIED)
-            return MCPExecutionResult(
+            denial = MCPExecutionResult(
                 succeeded=False,
                 error_code=decision.reason_code or "SOURCE_PERMISSION_DENIED",
                 safe_message="The source system denied this action",
             )
+            # Recorded like any terminal outcome. A refusal that left the reservation
+            # open would let the same approval be retried until the source happened to
+            # allow it.
+            self._idempotency.record_outcome(
+                tenant_id=proposal.tenant_id,
+                proposal_id=proposal.id,
+                result=denial,
+            )
+            return denial
 
         executing = self._transition(checking, ActionProposalState.EXECUTING)
         try:
             result = self._gateway.execute_mutation(
                 call=call,
                 context=context,
-                idempotency_key=idempotency_key,
+                idempotency_key=reservation.idempotency_key,
             )
         except Exception:
+            # The reservation stays open, deliberately. A raised call leaves the write
+            # in an unknown state, so the honest retry re-presents the SAME key and
+            # lets the provider decide whether it already applied it. Recording an
+            # outcome here would claim knowledge we do not have.
             failed = self._transition(executing, ActionProposalState.FAILED)
             self._audit(failed, context, AuditEventType.MUTATION_FAILED, {})
             raise
@@ -121,6 +158,11 @@ class ApprovedMutationRunner:
             else ActionProposalState.FAILED
         )
         terminal = self._transition(executing, terminal_state)
+        self._idempotency.record_outcome(
+            tenant_id=proposal.tenant_id,
+            proposal_id=proposal.id,
+            result=result,
+        )
         self._audit(
             terminal,
             context,

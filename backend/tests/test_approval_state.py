@@ -29,6 +29,7 @@ from app.mcp import (
     SourceSystem,
     ToolActionClass,
 )
+from app.mcp.adapters.idempotency import InMemoryMutationIdempotencyStore
 
 CONVERSATION_ID = uuid4()
 PINNED_SCHEMA = "a" * 64
@@ -239,13 +240,22 @@ def test_revision_supersedes_snapshot_and_requires_new_approval(setup: tuple) ->
 class RecordingGateway:
     def __init__(self) -> None:
         self.mutation_calls = 0
+        self.idempotency_keys: list[str] = []
 
     def execute_read(self, **_: Any) -> MCPExecutionResult:
         return MCPExecutionResult(succeeded=True)
 
-    def execute_mutation(self, **_: Any) -> MCPExecutionResult:
+    def execute_mutation(self, **kwargs: Any) -> MCPExecutionResult:
         self.mutation_calls += 1
+        self.idempotency_keys.append(kwargs["idempotency_key"])
         return MCPExecutionResult(succeeded=True, external_ids=("CONF-42",))
+
+
+class RaisingGateway(RecordingGateway):
+    def execute_mutation(self, **kwargs: Any) -> MCPExecutionResult:
+        self.mutation_calls += 1
+        self.idempotency_keys.append(kwargs["idempotency_key"])
+        raise RuntimeError("the provider connection dropped mid-write")
 
 
 class AllowPermissionVerifier:
@@ -262,6 +272,7 @@ def test_mcp_mutation_cannot_run_before_approval(setup: tuple) -> None:
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
         tool_pin=StubToolPin(),
+        idempotency=InMemoryMutationIdempotencyStore(),
         audit_sink=audit,
     )
 
@@ -270,7 +281,6 @@ def test_mcp_mutation_cannot_run_before_approval(setup: tuple) -> None:
             proposal_id=proposal.id,
             expected_version=proposal.version,
             context=context,
-            idempotency_key="idempotency-1",
         )
 
     assert gateway.mutation_calls == 0
@@ -294,6 +304,7 @@ def test_approved_mutation_is_reauthorized_then_executed(setup: tuple) -> None:
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
         tool_pin=StubToolPin(),
+        idempotency=InMemoryMutationIdempotencyStore(),
         audit_sink=audit,
     )
 
@@ -301,7 +312,6 @@ def test_approved_mutation_is_reauthorized_then_executed(setup: tuple) -> None:
         proposal_id=approved.id,
         expected_version=approved.version,
         context=context,
-        idempotency_key="idempotency-1",
     )
 
     assert result.succeeded is True
@@ -392,6 +402,7 @@ def test_an_approved_mutation_expiring_before_execution_never_reaches_the_gatewa
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
         tool_pin=StubToolPin(),
+        idempotency=InMemoryMutationIdempotencyStore(),
         audit_sink=audit,
     )
 
@@ -400,7 +411,6 @@ def test_an_approved_mutation_expiring_before_execution_never_reaches_the_gatewa
             proposal_id=expired.id,
             expected_version=expired.version,
             context=context,
-            idempotency_key="idempotency-1",
         )
 
     assert gateway.mutation_calls == 0
@@ -426,6 +436,7 @@ def test_a_tool_schema_changing_after_approval_withdraws_it(setup: tuple) -> Non
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
         tool_pin=StubToolPin("b" * 64),
+        idempotency=InMemoryMutationIdempotencyStore(),
         audit_sink=audit,
     )
 
@@ -434,7 +445,6 @@ def test_a_tool_schema_changing_after_approval_withdraws_it(setup: tuple) -> Non
             proposal_id=approved.id,
             expected_version=approved.version,
             context=context,
-            idempotency_key="idempotency-1",
         )
 
     assert gateway.mutation_calls == 0
@@ -461,3 +471,135 @@ def test_a_revision_is_repinned_and_redated_rather_than_inheriting(setup: tuple)
     # that is nearly spent.
     assert revised.replacement.expires_at > proposal.expires_at
     assert revised.replacement.tool_schema_sha256 == PINNED_SCHEMA
+
+
+def approved_proposal(service, context):
+    issued = service.propose(make_command(), context)
+    proposal = issued.proposal
+    return service.approve(
+        proposal.id,
+        ActionDecision(
+            expected_version=proposal.version,
+            decision_token=issued.decision_token,
+        ),
+        context,
+    )
+
+
+def runner_for(repository, audit, gateway, store):
+    return ApprovedMutationRunner(
+        repository=repository,
+        gateway=gateway,
+        permission_verifier=AllowPermissionVerifier(),
+        tool_pin=StubToolPin(),
+        idempotency=store,
+        audit_sink=audit,
+    )
+
+
+def test_the_idempotency_key_is_minted_by_the_server_not_the_caller(setup: tuple) -> None:
+    """execute() takes no key: a caller-chosen one could collide with another action."""
+
+    import inspect
+
+    service, repository, audit, context = setup
+    approved = approved_proposal(service, context)
+    gateway = RecordingGateway()
+    runner_for(repository, audit, gateway, InMemoryMutationIdempotencyStore()).execute(
+        proposal_id=approved.id,
+        expected_version=approved.version,
+        context=context,
+    )
+
+    assert "idempotency_key" not in inspect.signature(ApprovedMutationRunner.execute).parameters
+    assert len(gateway.idempotency_keys) == 1
+    assert len(gateway.idempotency_keys[0]) >= 32
+
+
+def test_a_completed_mutation_replays_its_outcome_instead_of_writing_twice(
+    setup: tuple,
+) -> None:
+    service, repository, audit, context = setup
+    approved = approved_proposal(service, context)
+    gateway = RecordingGateway()
+    store = InMemoryMutationIdempotencyStore()
+    runner = runner_for(repository, audit, gateway, store)
+
+    first = runner.execute(
+        proposal_id=approved.id,
+        expected_version=approved.version,
+        context=context,
+    )
+    stored = repository.get(tenant_id=context.tenant_id, proposal_id=approved.id)
+    assert stored is not None
+    second = runner.execute(
+        proposal_id=approved.id,
+        expected_version=stored.version,
+        context=context,
+    )
+
+    # One approval, one write. The second call returns the record, not a new result.
+    assert gateway.mutation_calls == 1
+    assert second == first
+    assert second.external_ids == ("CONF-42",)
+
+
+def test_a_failed_call_keeps_the_same_key_for_the_retry(setup: tuple) -> None:
+    """A raised call leaves the write in an unknown state, so the provider must be
+    the one to decide whether it already applied it -- which needs the same key."""
+
+    service, repository, audit, context = setup
+    approved = approved_proposal(service, context)
+    store = InMemoryMutationIdempotencyStore()
+    failing = RaisingGateway()
+
+    with pytest.raises(RuntimeError):
+        runner_for(repository, audit, failing, store).execute(
+            proposal_id=approved.id,
+            expected_version=approved.version,
+            context=context,
+        )
+
+    stored = repository.get(tenant_id=context.tenant_id, proposal_id=approved.id)
+    assert stored is not None
+    assert stored.state == ActionProposalState.FAILED
+    reservation = store.reserve(tenant_id=context.tenant_id, proposal_id=approved.id)
+    assert reservation.completed is False
+    assert reservation.idempotency_key == failing.idempotency_keys[0]
+
+
+def test_a_source_denial_is_recorded_so_it_cannot_be_retried_until_it_passes(
+    setup: tuple,
+) -> None:
+    service, repository, audit, context = setup
+    approved = approved_proposal(service, context)
+    gateway = RecordingGateway()
+    store = InMemoryMutationIdempotencyStore()
+
+    class DenyPermissionVerifier:
+        def check(self, _: Any) -> PermissionDecision:
+            return PermissionDecision(
+                allowed=False,
+                decision_id="permission-2",
+                reason_code="FORBIDDEN",
+            )
+
+    runner = ApprovedMutationRunner(
+        repository=repository,
+        gateway=gateway,
+        permission_verifier=DenyPermissionVerifier(),
+        tool_pin=StubToolPin(),
+        idempotency=store,
+        audit_sink=audit,
+    )
+    denied = runner.execute(
+        proposal_id=approved.id,
+        expected_version=approved.version,
+        context=context,
+    )
+
+    assert denied.succeeded is False
+    assert gateway.mutation_calls == 0
+    reservation = store.reserve(tenant_id=context.tenant_id, proposal_id=approved.id)
+    assert reservation.completed is True
+    assert reservation.result == denied

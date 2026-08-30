@@ -244,3 +244,30 @@ delegated_grants = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("key_version >= 1", name="key_version_positive"),
 )
+
+
+mutation_idempotency = Table(
+    "mutation_idempotency",
+    metadata,
+    # One reservation per approved proposal. The primary key is what makes reserving
+    # idempotent: a concurrent second attempt collides here rather than minting a
+    # second key for an action the human approved once.
+    Column("tenant_id", String(200), primary_key=True),
+    Column("proposal_id", Uuid(as_uuid=True), primary_key=True),
+    # Minted server-side, never accepted from a caller.
+    Column("idempotency_key", String(128), nullable=False),
+    # Set only once a terminal outcome is known. Until then a retry re-presents the
+    # same key to the provider, which is what lets the provider deduplicate.
+    Column("completed", Boolean, nullable=False),
+    # The recorded outcome, replayed to a retry instead of calling the provider again.
+    Column("result_json", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    # Two proposals sharing a key would let the provider discard the second silently.
+    UniqueConstraint("tenant_id", "idempotency_key", name="uq_mutation_idempotency_key"),
+    ForeignKeyConstraint(
+        ["tenant_id", "proposal_id"],
+        ["action_proposals.tenant_id", "action_proposals.id"],
+        name="fk_mutation_idempotency_proposal",
+    ),
+)
