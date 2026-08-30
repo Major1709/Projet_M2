@@ -2,6 +2,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from app.agent import ApprovedMutationRunner
 from app.approvals import (
@@ -603,3 +604,121 @@ def test_a_source_denial_is_recorded_so_it_cannot_be_retried_until_it_passes(
     reservation = store.reserve(tenant_id=context.tenant_id, proposal_id=approved.id)
     assert reservation.completed is True
     assert reservation.result == denied
+
+
+def update_command(resource_version: str | None) -> ActionProposalCreate:
+    return ActionProposalCreate(
+        conversation_id=CONVERSATION_ID,
+        source_system=SourceSystem.CONFLUENCE,
+        tool_name="confluence.update_page",
+        action_class=ToolActionClass.UPDATE,
+        target=ActionTarget(
+            source_system=SourceSystem.CONFLUENCE,
+            resource_type="page",
+            resource_id="98483",
+            title="Modele de decision",
+            resource_version=resource_version,
+        ),
+        payload={"title": "Modele de decision", "body": "Corps revu"},
+        diff={"body": {"before": "Corps", "after": "Corps revu"}},
+        correlation_id="corr-2",
+    )
+
+
+def test_touching_an_existing_resource_without_its_version_is_not_proposable() -> None:
+    """An approval that cannot be revalidated could be spent on a changed target."""
+
+    with pytest.raises(ValidationError, match="requires its version"):
+        update_command(None)
+
+
+def test_a_creation_needs_no_version_because_it_has_no_target_yet() -> None:
+    assert make_command().target.resource_version is None
+
+
+def test_the_verifier_is_told_which_version_the_human_was_shown(setup: tuple) -> None:
+    service, repository, audit, context = setup
+    issued = service.propose(update_command("7"), context)
+    proposal = issued.proposal
+    approved = service.approve(
+        proposal.id,
+        ActionDecision(
+            expected_version=proposal.version,
+            decision_token=issued.decision_token,
+        ),
+        context,
+    )
+
+    class CapturingVerifier:
+        def __init__(self) -> None:
+            self.seen: Any = None
+
+        def check(self, request: Any) -> PermissionDecision:
+            self.seen = request
+            return PermissionDecision(allowed=True, decision_id="permission-1")
+
+    verifier = CapturingVerifier()
+    gateway = RecordingGateway()
+    ApprovedMutationRunner(
+        repository=repository,
+        gateway=gateway,
+        permission_verifier=verifier,
+        tool_pin=StubToolPin(),
+        idempotency=InMemoryMutationIdempotencyStore(),
+        audit_sink=audit,
+    ).execute(
+        proposal_id=approved.id,
+        expected_version=approved.version,
+        context=context,
+    )
+
+    assert verifier.seen.resource_id == "98483"
+    assert verifier.seen.expected_resource_version == "7"
+    assert verifier.seen.resource_type == "page"
+
+
+def test_a_resource_changed_since_the_approval_is_never_written(setup: tuple) -> None:
+    service, repository, audit, context = setup
+    issued = service.propose(update_command("7"), context)
+    proposal = issued.proposal
+    approved = service.approve(
+        proposal.id,
+        ActionDecision(
+            expected_version=proposal.version,
+            decision_token=issued.decision_token,
+        ),
+        context,
+    )
+
+    class DriftDetectingVerifier:
+        """Stands for a source read finding a version other than the approved one."""
+
+        def check(self, request: Any) -> PermissionDecision:
+            if request.expected_resource_version != "9":
+                return PermissionDecision(
+                    allowed=False,
+                    decision_id="permission-3",
+                    reason_code="RESOURCE_CHANGED",
+                )
+            return PermissionDecision(allowed=True, decision_id="permission-3")
+
+    gateway = RecordingGateway()
+    result = ApprovedMutationRunner(
+        repository=repository,
+        gateway=gateway,
+        permission_verifier=DriftDetectingVerifier(),
+        tool_pin=StubToolPin(),
+        idempotency=InMemoryMutationIdempotencyStore(),
+        audit_sink=audit,
+    ).execute(
+        proposal_id=approved.id,
+        expected_version=approved.version,
+        context=context,
+    )
+
+    assert result.succeeded is False
+    assert result.error_code == "RESOURCE_CHANGED"
+    assert gateway.mutation_calls == 0
+    stored = repository.get(tenant_id=context.tenant_id, proposal_id=approved.id)
+    assert stored is not None
+    assert stored.state == ActionProposalState.DENIED

@@ -37,6 +37,11 @@ class ActionTarget(BaseModel):
     resource_id: str | None = Field(default=None, max_length=500)
     title: str | None = Field(default=None, max_length=500)
     container_id: str | None = Field(default=None, max_length=500)
+    # The version the human was shown, as the source states it -- a Confluence version
+    # number, a Jira updated timestamp, an ETag. Opaque here on purpose: only the
+    # source can say what its own version means, and comparing it just before writing
+    # is what tells us the target has not moved since the approval.
+    resource_version: str | None = Field(default=None, max_length=200)
 
 
 class ActionProposalCreate(BaseModel):
@@ -64,6 +69,13 @@ class ActionProposalCreate(BaseModel):
             not self.target.resource_id or not self.target.title
         ):
             raise ValueError("A DELETE proposal requires the target id and title")
+        # Without it the resource cannot be revalidated before the write, so the
+        # approval could be spent on something that changed since it was shown. A
+        # CREATE has no target yet, so it is exempt.
+        if self.action_class != ToolActionClass.CREATE and not self.target.resource_version:
+            raise ValueError(
+                "A proposal touching an existing resource requires its version"
+            )
         return self
 
 

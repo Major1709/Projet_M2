@@ -109,7 +109,17 @@ class ApprovedMutationRunner:
         )
         checking = self._transition(proposal, ActionProposalState.PERMISSION_CHECK)
         decision = self._permission_verifier.check(
-            PermissionCheck(context=context, call=call)
+            PermissionCheck(
+                context=context,
+                call=call,
+                resource_type=proposal.target.resource_type,
+                resource_id=proposal.target.resource_id,
+                # The version the human was shown. The verifier compares it against
+                # what the source holds now, so a resource edited between approval and
+                # execution is refused rather than overwritten.
+                expected_resource_version=proposal.target.resource_version,
+                container_id=proposal.target.container_id,
+            )
         )
         self._audit(
             checking,
