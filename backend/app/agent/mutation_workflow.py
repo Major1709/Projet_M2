@@ -59,6 +59,11 @@ class ApprovedMutationRunner:
             from app.approvals.errors import VersionConflict
 
             raise VersionConflict(expected=expected_version, actual=proposal.version)
+        # Checked before anything else is taken from the record, including the replay
+        # answer: a proposal whose fields no longer agree with their own hash is not a
+        # record to act on, and returning its stored outcome would be acting on it.
+        if not hmac.compare_digest(proposal.recomputed_hash(), proposal.payload_hash):
+            raise InvalidTransition("The approved proposal no longer matches its hash")
         # Answered before every state check, because a mutation that already ran left
         # the proposal COMPLETED rather than APPROVED. This is a lookup, not a
         # reservation: nothing is minted for a proposal that never reached execution.

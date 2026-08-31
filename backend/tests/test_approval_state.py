@@ -484,11 +484,15 @@ def test_a_revision_is_repinned_and_redated_rather_than_inheriting(setup: tuple)
 
     # A full window, measured from the revision itself rather than inherited: a
     # revision granted near the original deadline must not hand back a window that is
-    # nearly spent. Asserted as a duration rather than as "strictly later", because
-    # the two proposals can be minted inside one tick of a coarse system clock.
-    assert revised.replacement.expires_at - revised.replacement.created_at == timedelta(
-        seconds=APPROVAL_TTL_SECONDS
-    )
+    # nearly spent.
+    #
+    # Asserted as an approximate duration, and both halves of that matter. Not
+    # "strictly later", because two proposals can be minted inside one tick of a
+    # coarse system clock. Not an exact equality either: expires_at and created_at
+    # come from two separate clock reads, so the difference is the window plus
+    # however long the call took.
+    window = revised.replacement.expires_at - revised.replacement.created_at
+    assert abs(window - timedelta(seconds=APPROVAL_TTL_SECONDS)) < timedelta(seconds=1)
     assert revised.replacement.expires_at >= proposal.expires_at
     assert revised.replacement.tool_schema_sha256 == PINNED_SCHEMA
 
@@ -865,6 +869,114 @@ def test_an_approval_cannot_be_spent_from_a_different_session(setup: tuple) -> N
             proposal_id=approved.id,
             expected_version=approved.version,
             context=elsewhere,
+        )
+
+    assert gateway.mutation_calls == 0
+
+
+def confluence_update(
+    *,
+    resource_id: str = "98483",
+    payload: dict[str, Any] | None = None,
+    container_id: str | None = None,
+) -> ActionProposalCreate:
+    return ActionProposalCreate(
+        conversation_id=CONVERSATION_ID,
+        source_system=SourceSystem.CONFLUENCE,
+        tool_name="confluence.update_page",
+        action_class=ToolActionClass.UPDATE,
+        target=ActionTarget(
+            source_system=SourceSystem.CONFLUENCE,
+            resource_type="page",
+            resource_id=resource_id,
+            title="Modele de decision",
+            resource_version="7",
+            container_id=container_id,
+        ),
+        payload=payload if payload is not None else {"body": "Corps revu"},
+        diff={"body": {"before": "Corps", "after": "Corps revu"}},
+        correlation_id="corr-b01",
+    )
+
+
+def test_a_payload_naming_a_different_resource_than_the_target_is_refused() -> None:
+    """The finding B-01 in one line: the preview shows page A, the call writes page B.
+
+    For a DELETE the shown title can be perfectly valid while the id underneath is
+    another page entirely, so the approver sees a resource they recognise and
+    consents to the destruction of one they never saw.
+    """
+
+    with pytest.raises(ValidationError, match="not the approved target"):
+        confluence_update(payload={"pageId": "12345", "body": "Corps revu"})
+
+
+def test_a_payload_naming_the_same_resource_is_accepted() -> None:
+    """The rule refuses contradiction, not repetition."""
+
+    assert confluence_update(payload={"pageId": "98483", "body": "Corps revu"})
+
+
+def test_a_creation_cannot_name_an_existing_resource_in_its_payload() -> None:
+    """There is no target to compare against, so any named resource is a smuggled one."""
+
+    with pytest.raises(ValidationError, match="cannot name an existing resource"):
+        ActionProposalCreate(
+            conversation_id=CONVERSATION_ID,
+            source_system=SourceSystem.CONFLUENCE,
+            tool_name="confluence.create_page",
+            action_class=ToolActionClass.CREATE,
+            target=ActionTarget(
+                source_system=SourceSystem.CONFLUENCE,
+                resource_type="page",
+                title="Nouvelle page",
+            ),
+            payload={"pageId": "98483", "title": "Nouvelle page"},
+            correlation_id="corr-b01",
+        )
+
+
+def test_a_payload_container_that_contradicts_the_target_is_refused() -> None:
+    """Writing into another space is the same defect one level up."""
+
+    with pytest.raises(ValidationError, match="not the approved container"):
+        confluence_update(
+            container_id="SPACE-1",
+            payload={"spaceId": "SPACE-9", "body": "Corps revu"},
+        )
+
+
+def test_an_identifier_nested_in_the_body_is_content_not_a_target() -> None:
+    """A page id inside a body is something someone wrote about a page. Refusing it
+    would reject legitimate proposals, and the arguments a tool acts on are the
+    top-level ones."""
+
+    assert confluence_update(payload={"body": {"pageId": "12345", "text": "cf. 12345"}})
+
+
+def test_a_record_that_no_longer_matches_its_hash_is_never_executed(
+    setup: tuple,
+) -> None:
+    """Recomputed from the record's own fields immediately before the write, so a
+    row changed since the approval -- a partial write, a mapping defect -- stops the
+    mutation instead of being sent to the provider."""
+
+    service, unit_of_work, _, context = setup
+    approved = approved_proposal(service, context)
+    tampered = approved.model_copy(
+        update={
+            "payload_json": '{"title": "Epic paiement", "body": "Corps substitue"}',
+            "version": approved.version + 1,
+        }
+    )
+    unit_of_work.proposals.replace(proposal=tampered, expected_version=approved.version)
+    gateway = RecordingGateway()
+
+    with pytest.raises(InvalidTransition, match="no longer matches its hash"):
+        runner_for(unit_of_work, gateway, InMemoryMutationIdempotencyStore()).execute(
+            proposal_id=tampered.id,
+            expected_version=tampered.version,
+            context=context,
         )
 
     assert gateway.mutation_calls == 0

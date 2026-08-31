@@ -44,6 +44,73 @@ class ActionTarget(BaseModel):
     resource_version: str | None = Field(default=None, max_length=200)
 
 
+# Payload keys that name the resource an action touches, and the container it sits
+# in, per source system. Taken from the argument names the read registry already
+# uses rather than invented, plus the obvious aliases a provider might accept.
+#
+# Deliberately generous: checking a key that never appears costs nothing, while a
+# key that names a resource and goes unchecked is the whole defect this guards. The
+# list is not derived from a mutation registry because none exists yet -- when one
+# does, the canonical command should replace this map rather than extend it.
+_RESOURCE_KEYS: dict[SourceSystem, tuple[str, ...]] = {
+    SourceSystem.CONFLUENCE: ("pageId", "id"),
+    SourceSystem.JIRA: ("issueIdOrKey", "issueId", "issueKey", "key"),
+}
+_CONTAINER_KEYS: dict[SourceSystem, tuple[str, ...]] = {
+    SourceSystem.CONFLUENCE: ("spaceId", "spaceKey"),
+    SourceSystem.JIRA: ("projectKey", "projectId"),
+}
+
+
+def _named_in(payload: dict[str, Any], keys: tuple[str, ...]) -> dict[str, str]:
+    """Top-level payload entries that name a resource, as strings.
+
+    Top level only, on purpose: that is where a tool's arguments live. A pageId
+    nested inside a body is content someone wrote about a page, not the page this
+    call acts on, and treating it as a target would refuse legitimate proposals.
+    """
+
+    return {
+        key: str(payload[key])
+        for key in keys
+        if key in payload and payload[key] is not None
+    }
+
+
+def canonical_hash(
+    *,
+    source_system: SourceSystem,
+    tool_name: str,
+    action_class: ToolActionClass,
+    target: "ActionTarget",
+    payload: dict[str, Any],
+    diff: dict[str, Any] | None,
+    execution_context_hash: str,
+    tool_schema_sha256: str,
+) -> str:
+    """One definition of what a proposal *is*, used to mint the hash and to recheck it.
+
+    Written once rather than twice on purpose: two copies of a canonicalisation drift,
+    and a recheck computed differently from the mint would either always pass or
+    always fail, which are the two ways an integrity check becomes decoration.
+    """
+
+    return sha256_text(
+        canonical_json(
+            {
+                "source_system": source_system,
+                "tool_name": tool_name,
+                "action_class": action_class,
+                "target": target.model_dump(mode="json"),
+                "payload": payload,
+                "diff": diff,
+                "execution_context_hash": execution_context_hash,
+                "tool_schema_sha256": tool_schema_sha256,
+            }
+        )
+    )
+
+
 class ActionProposalCreate(BaseModel):
     conversation_id: UUID
     source_system: SourceSystem
@@ -76,7 +143,35 @@ class ActionProposalCreate(BaseModel):
             raise ValueError(
                 "A proposal touching an existing resource requires its version"
             )
+        self._refuse_a_payload_that_contradicts_the_target()
         return self
+
+    def _refuse_a_payload_that_contradicts_the_target(self) -> None:
+        """The preview and the call must be about the same resource.
+
+        The target is what a human is shown and decides on; the payload is what is
+        actually sent. Nothing else ties them together, so a proposal could display a
+        page the approver recognises while the arguments designate another -- for a
+        DELETE, a valid-looking title over a different id. Refused at construction:
+        an approval granted on that pair could never be honestly executed.
+        """
+
+        named = _named_in(self.payload, _RESOURCE_KEYS.get(self.source_system, ()))
+        for key, value in named.items():
+            if self.target.resource_id is None:
+                raise ValueError(
+                    f"A creation cannot name an existing resource in its payload ({key})"
+                )
+            if value != self.target.resource_id:
+                raise ValueError(
+                    f"The payload resource in {key} is not the approved target"
+                )
+        containers = _named_in(self.payload, _CONTAINER_KEYS.get(self.source_system, ()))
+        for key, value in containers.items():
+            if self.target.container_id is not None and value != self.target.container_id:
+                raise ValueError(
+                    f"The payload container in {key} is not the approved container"
+                )
 
 
 class ActionRevision(BaseModel):
@@ -145,16 +240,6 @@ class ActionProposal(BaseModel):
     ) -> "ActionProposal":
         payload_json = canonical_json(command.payload)
         diff_json = canonical_json(command.diff) if command.diff is not None else None
-        snapshot = {
-            "source_system": command.source_system,
-            "tool_name": command.tool_name,
-            "action_class": command.action_class,
-            "target": command.target.model_dump(mode="json"),
-            "payload": command.payload,
-            "diff": command.diff,
-            "execution_context_hash": execution_context_hash,
-            "tool_schema_sha256": tool_schema_sha256,
-        }
         return cls(
             tenant_id=tenant_id,
             conversation_id=command.conversation_id,
@@ -164,7 +249,16 @@ class ActionProposal(BaseModel):
             action_class=command.action_class,
             target=command.target,
             payload_json=payload_json,
-            payload_hash=sha256_text(canonical_json(snapshot)),
+            payload_hash=canonical_hash(
+                source_system=command.source_system,
+                tool_name=command.tool_name,
+                action_class=command.action_class,
+                target=command.target,
+                payload=command.payload,
+                diff=command.diff,
+                execution_context_hash=execution_context_hash,
+                tool_schema_sha256=tool_schema_sha256,
+            ),
             explanation=command.explanation,
             diff_json=diff_json,
             correlation_id=command.correlation_id,
@@ -173,6 +267,30 @@ class ActionProposal(BaseModel):
             expires_at=expires_at,
             decision_token_hash=decision_token_hash,
             supersedes_id=supersedes_id,
+        )
+
+    def recomputed_hash(self) -> str:
+        """The hash this record would have if it were minted from its own fields now.
+
+        Compared against the stored ``payload_hash`` just before the write. It catches
+        a record that changed between the approval and the execution: a partial write,
+        a mapping defect, a migration that dropped a column.
+
+        What it does NOT do is authenticate the record. Anyone able to rewrite the row
+        can rewrite the hash beside it, so this is an integrity check and not a
+        signature. Making it one means an HMAC under a server-held key, which is a
+        worthwhile upgrade and a key-management decision, not a line of code.
+        """
+
+        return canonical_hash(
+            source_system=self.source_system,
+            tool_name=self.tool_name,
+            action_class=self.action_class,
+            target=self.target,
+            payload=self.payload,
+            diff=self.diff,
+            execution_context_hash=self.execution_context_hash,
+            tool_schema_sha256=self.tool_schema_sha256,
         )
 
     def has_expired(self, *, now: datetime | None = None) -> bool:
