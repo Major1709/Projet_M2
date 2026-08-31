@@ -49,6 +49,10 @@ services:
       # site attendu ; absent, un grant couvrant plusieurs sites est refuse au
       # lieu d'en choisir un.
       PKA_ATLASSIAN_EXPECTED_CLOUD_ID: ${PKA_ATLASSIAN_EXPECTED_CLOUD_ID:-}
+      # Scelle les grants delegues au repos. Sans elle, le magasin durable n'est
+      # pas construit et le consentement reste en memoire vive : l'omission sure
+      # des deux. Le socle monte deja ce secret.
+      PKA_TOKEN_ENCRYPTION_KEY_FILE: /run/secrets/token_encryption_key
     secrets:
       - atlassian_oauth_client_secret
 

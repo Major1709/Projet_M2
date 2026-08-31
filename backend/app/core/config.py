@@ -83,6 +83,24 @@ class Settings(BaseSettings):
     auth_mode: Literal["dev_headers", "session"] = "dev_headers"
     session_lifetime_hours: int = Field(default=12, ge=1, le=24 * 30)
 
+    # Seals the delegated grants at rest. 32 bytes in hexadecimal, in a file --
+    # never an environment variable, which every child process inherits and every
+    # crash reporter collects. Absent, the durable grant store is not built and
+    # consent stays in process memory, which is the safer of the two omissions.
+    token_encryption_key_file: Path | None = None
+
+    # Semantic retrieval. Off by default: the runtime weighs about 2,3 Go and
+    # downloads a model on first use, so a deployment must ask for it rather than
+    # acquire it by upgrading.
+    embeddings_enabled: bool = False
+    embedding_model: str = Field(default="intfloat/multilingual-e5-base", min_length=1)
+    # How many leads a question is offered. Prepended to every step's transcript,
+    # so each extra one is paid for again at every turn.
+    retrieval_limit: int = Field(default=5, ge=1, le=20)
+    # The JQL the reindex route walks. A setting rather than a request field: a
+    # caller who chooses the query chooses what enters the tenant's index.
+    reindex_jql: str = Field(default="ORDER BY created DESC", min_length=1, max_length=4_000)
+
     # Atlassian 3LO. Off by default: a deployment that has not registered an OAuth
     # app must not expose a sign-in route that can only fail.
     atlassian_oauth_enabled: bool = False
@@ -116,6 +134,10 @@ class Settings(BaseSettings):
     database_pool_timeout_seconds: int = Field(default=2, ge=1, le=10)
     database_statement_timeout_ms: int = Field(default=2_000, ge=100, le=30_000)
     mcp_reads_enabled: bool = False
+    # How long an approval stays spendable. Short on purpose: the human approved what
+    # was on screen, and the further the target drifts from that moment the less the
+    # approval means. Fifteen minutes covers a read-check-approve round trip.
+    approval_ttl_seconds: int = Field(default=900, ge=60, le=3_600)
     mcp_mutations_enabled: bool = False
     mcp_atlassian_enabled: bool = False
     mcp_jira_enabled: bool = False

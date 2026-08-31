@@ -30,6 +30,8 @@ def _proposal_values(proposal: ActionProposal) -> dict[str, object]:
         "diff_json": proposal.diff_json,
         "correlation_id": proposal.correlation_id,
         "execution_context_hash": proposal.execution_context_hash,
+        "tool_schema_sha256": proposal.tool_schema_sha256,
+        "expires_at": proposal.expires_at,
         "state": proposal.state.value,
         "version": proposal.version,
         "decision_token_hash": proposal.decision_token_hash,

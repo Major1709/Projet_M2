@@ -33,3 +33,15 @@ class InvalidDecisionToken(ApprovalError):
 class TenantBoundaryViolation(ApprovalError):
     pass
 
+
+class ProposalExpired(ApprovalError):
+    """The approval window closed before the decision or the execution arrived."""
+
+
+class SessionRequired(ApprovalError):
+    """A mutation was proposed from an identity no sign-in stands behind.
+
+    Named rather than folded into InvalidTransition: nothing about the proposal is
+    wrong, and no change to the payload would fix it. The deployment is deriving
+    identities from headers, so there is no session for the consent to end with.
+    """

@@ -16,7 +16,9 @@ from app.approvals.errors import (
     InvalidDecisionToken,
     InvalidTransition,
     ProposalConversationNotFound,
+    ProposalExpired,
     ProposalNotFound,
+    SessionRequired,
     VersionConflict,
 )
 from app.approvals.workflow import ApprovalWorkflow
@@ -32,10 +34,18 @@ def get_workflow(request: Request) -> ApprovalWorkflow:
 def translate_domain_error(error: ApprovalError) -> HTTPException:
     if isinstance(error, (ProposalNotFound, ProposalConversationNotFound)):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+    if isinstance(error, ProposalExpired):
+        # 410 rather than 409: the window is gone, so retrying this proposal will never
+        # succeed. A conflict would invite the client to refetch and try again.
+        return HTTPException(status_code=status.HTTP_410_GONE, detail=str(error))
     if isinstance(error, InvalidDecisionToken):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
     if isinstance(error, (InvalidTransition, VersionConflict)):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    if isinstance(error, SessionRequired):
+        # 401 rather than 400: the request is well formed, and what is missing is a
+        # sign-in. A 400 would send the client looking for a bad field.
+        return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(error))
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error))
 
 

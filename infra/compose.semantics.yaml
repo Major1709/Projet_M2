@@ -1,0 +1,44 @@
+# Recherche semantique, developpement.
+#
+# Usage, en plus des surcouches habituelles :
+#   docker compose -f compose.yaml -f compose.atlassian.yaml \
+#                  -f compose.atlassian-oauth.yaml -f compose.atlassian-bindings.yaml \
+#                  -f compose.auth-atlassian.yaml -f compose.semantics.yaml up -d --build api
+#
+# A SAVOIR AVANT DE LANCER
+#
+# 1. L'image doit etre construite avec WITH_EMBEDDINGS=1, ce que fait la section
+#    build ci-dessous. Elle passe alors d'environ 200 Mo a plus de 2,5 Go. Sans
+#    cet extra le conteneur demarre quand meme et la route de reindexation
+#    repond une erreur explicite plutot que de tomber.
+#
+# 2. Le modele pese environ 1 Go et se telecharge au premier usage. Le cache de
+#    l'hote est monte, donc un telechargement deja fait sur la machine -- par
+#    scripts/semantic_eval.py par exemple -- est reutilise tel quel, et une
+#    reconstruction de l'image ne le recommence pas.
+#
+# 3. L'index demarre VIDE. Tant que POST /api/semantics/reindex n'a pas ete
+#    appele, la recherche ne remonte aucune piste et l'assistant repond
+#    exactement comme avant : c'est la degradation voulue, pas une panne.
+#
+# Le worker ne recoit rien de tout cela : il n'indexe pas et n'interroge pas
+# l'index. Lui donner le moteur d'inference alourdirait un service qui ne s'en
+# sert pas.
+
+services:
+  api:
+    build:
+      args:
+        WITH_EMBEDDINGS: "1"
+    environment:
+      PKA_EMBEDDINGS_ENABLED: "true"
+      PKA_EMBEDDING_MODEL: ${PKA_EMBEDDING_MODEL:-intfloat/multilingual-e5-base}
+      PKA_RETRIEVAL_LIMIT: ${PKA_RETRIEVAL_LIMIT:-5}
+      # Ce que la reindexation parcourt. Vient de la configuration et jamais de
+      # la requete : un appelant qui choisit le JQL choisit ce qui entre dans son
+      # index, donc ce que l'assistant pourra trouver plus tard.
+      PKA_REINDEX_JQL: ${PKA_REINDEX_JQL:-project = KAN ORDER BY created ASC}
+    volumes:
+      # Le cache de modeles de l'hote, en lecture-ecriture : le telechargement
+      # survit a la recreation du conteneur.
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/home/app/.cache/huggingface:rw

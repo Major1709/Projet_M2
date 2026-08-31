@@ -1,5 +1,6 @@
 import hashlib
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Cookie, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,12 +24,25 @@ class SecurityContext(BaseModel):
 
     tenant_id: str = Field(min_length=1, max_length=200)
     user_id: str = Field(min_length=1, max_length=200)
+    # The sign-in this identity was derived from. Absent in dev_headers mode, which
+    # has no session to name -- so a context without one is not "some session", it is
+    # an identity no sign-in stands behind, and the approval domain refuses to bind a
+    # mutation to it.
+    session_id: UUID | None = None
 
 
 def security_context_fingerprint(context: SecurityContext) -> str:
-    """Bind a proposal to the server-derived identity without exposing credentials."""
+    """Bind a proposal to the server-derived identity without exposing credentials.
 
-    value = f"{context.tenant_id}\x1f{context.user_id}"
+    The session is part of the identity, not an attribute of it. Left out, the
+    fingerprint would match any later request by the same user, so an approval could
+    be spent from a session that has since been signed out, or from a stolen cookie
+    the user believes they replaced by signing in again. Folding it in makes consent
+    end when the sign-in it was given in ends.
+    """
+
+    session = "" if context.session_id is None else str(context.session_id)
+    value = f"{context.tenant_id}\x1f{context.user_id}\x1f{session}"
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
@@ -84,7 +98,11 @@ def _from_session(request: Request, token: str | None) -> SecurityContext:
         # Expired reads the same as absent on purpose: telling a caller that their
         # session existed but lapsed says something about a token they may not own.
         raise _no_identity()
-    return SecurityContext(tenant_id=session.tenant_id, user_id=session.user_id)
+    return SecurityContext(
+        tenant_id=session.tenant_id,
+        user_id=session.user_id,
+        session_id=session.id,
+    )
 
 
 def get_security_context(

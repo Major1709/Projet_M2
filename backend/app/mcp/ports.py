@@ -1,6 +1,7 @@
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any, Protocol
+from uuid import UUID
 
 from app.core.identity import SecurityContext
 from app.mcp.domain import (
@@ -36,6 +37,53 @@ class MCPToolGateway(Protocol):
         context: SecurityContext,
         idempotency_key: str,
     ) -> MCPExecutionResult: ...
+
+
+@dataclass(frozen=True)
+class MutationReservation:
+    """The single idempotency key an approved proposal may ever be executed under."""
+
+    idempotency_key: str
+    # Set once a terminal outcome was recorded. A retry then replays that outcome
+    # instead of calling the provider again.
+    completed: bool = False
+    result: MCPExecutionResult | None = None
+
+
+class MutationIdempotencyStore(Protocol):
+    """Mints and holds the idempotency key of a mutation, durably and server-side.
+
+    The key is never accepted from a caller. A client-chosen key lets two different
+    approved actions collide under one key -- the provider then silently discards the
+    second -- or lets one action be replayed under a fresh key, which defeats the
+    provider's own deduplication.
+
+    ``reserve`` is idempotent by construction: the first call mints a key and commits
+    it, every later call for the same proposal returns that same key. It must be
+    durable before the provider is contacted, because a reservation lost to a crash
+    would be reminted and the provider would see a second, distinct request for an
+    action the human approved once.
+    """
+
+    def find(self, *, tenant_id: str, proposal_id: UUID) -> MutationReservation | None:
+        """Read an existing reservation without creating one.
+
+        Separate from ``reserve`` on purpose: replaying a finished mutation has to be
+        answered before the proposal's state is examined, since that state is by then
+        COMPLETED rather than APPROVED. Minting a key at that point would hand one to
+        a proposal that was never approved.
+        """
+        ...
+
+    def reserve(self, *, tenant_id: str, proposal_id: UUID) -> MutationReservation: ...
+
+    def record_outcome(
+        self,
+        *,
+        tenant_id: str,
+        proposal_id: UUID,
+        result: MCPExecutionResult,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)

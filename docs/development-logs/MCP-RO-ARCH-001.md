@@ -1388,3 +1388,44 @@ Piège persistant du cache `mcp-remote` : il est indexé par une empreinte de l'
 identique pour les deux sites. Une nouvelle autorisation écrase donc la précédente, et
 l'autorisation en cache est rejouée en silence — l'écran de choix du site ne réapparaît qu'après
 suppression de `~/.mcp-auth`.
+
+## Site unique, et formes de réponse réelles — 2026-08-31
+
+L'entrée du 2026-08-14 reste vraie pour sa date. Le déploiement a depuis été **consolidé sur un
+seul site**, ce que `getAccessibleAtlassianResources` confirme aujourd'hui : deux entrées, un
+seul `id` et une seule `url`.
+
+| Site | cloudId | Produits |
+| --- | --- | --- |
+| `https://andrianalyfanny.atlassian.net` | `a761589f-69b8-4373-9c30-7561c2d45a39` | Jira et Confluence |
+
+`JIRA_SOURCE_ORIGIN` et `CONFLUENCE_SOURCE_ORIGIN` pointent donc tous deux sur cet hôte, ce qui
+est déjà l'état du dépôt. Le courtier indexé par `(fournisseur, liaison)` reste pertinent : il
+n'est pas devenu inutile, il est devenu **inactif** — les deux liaisons se rabattent sur le même
+document de credentials. Il redeviendra nécessaire au premier déploiement à deux sites.
+
+La surcouche `compose.atlassian-sites.yaml` n'a pas à être appliquée ici. Le piège qu'elle
+documente s'était d'ailleurs reproduit : `atlassian_jira_bearer_token` et
+`atlassian_confluence_bearer_token` existaient comme **répertoires vides** créés par Docker.
+Supprimés.
+
+### Formes de version, observées et non supposées
+
+Mesurées par lecture réelle à travers le pipeline ordinaire, ce qui était le préalable au
+vérificateur de permission :
+
+| Source | Outil | Chemin de la version | Valeur observée |
+| --- | --- | --- | --- |
+| Confluence | `getConfluencePage` | `version.number` | `1` (entier) |
+| Jira | `getJiraIssue` | `fields.updated` | `2026-08-19T20:24:41.681+0300` |
+
+Deux formes incomparables, d'où la comparaison en **chaîne opaque** : seule la source sait ce que
+sa propre version signifie, et l'analyser reviendrait à inventer une sémantique que le
+fournisseur n'a jamais promise.
+
+Confirmé au passage : le corps d'une page Confluence est une **chaîne**, pas un objet — la
+supposition évidente est fausse, et un test la fixe désormais.
+
+Note d'exploitation : `getPagesInConfluenceSpace` a répondu `MCP_TRANSPORT_FAILURE` de façon
+reproductible, là où `searchConfluenceUsingCql` sur le même espace fonctionne. Non diagnostiqué ;
+le vérificateur n'en dépend pas.
