@@ -445,10 +445,69 @@ def test_a_plain_http_callback_is_refused_outside_development(environment: str) 
         )
 
 
-def test_the_post_sign_in_target_must_be_a_path() -> None:
-    # A full URL there is an open redirect, the classic hole in this flow.
-    with pytest.raises(ValueError, match="path"):
+def test_an_absolute_post_sign_in_target_at_an_unlisted_origin_is_refused() -> None:
+    # The classic hole in this flow. Refused even though it is a well-formed URL,
+    # because nothing in the deployment says that origin may be navigated to.
+    with pytest.raises(ValueError, match="frontend origins"):
         registered(atlassian_oauth_post_login_path="https://elsewhere.example/")
+
+
+def test_an_absolute_post_sign_in_target_at_a_listed_origin_is_accepted() -> None:
+    """The point of the change: a front end on another port can be returned to.
+
+    No new trust is granted -- the origin is one the deployment already lets call it
+    cross-origin, so the redirect reuses a decision that was already made.
+    """
+
+    settings = registered(
+        frontend_origins=("http://localhost:3000",),
+        atlassian_oauth_post_login_path="http://localhost:3000/",
+    )
+
+    assert settings.atlassian_oauth_post_login_path == "http://localhost:3000/"
+
+
+def test_a_path_remains_accepted_and_needs_no_listed_origin() -> None:
+    """The common case, and the only one a same-origin deployment needs."""
+
+    assert registered(atlassian_oauth_post_login_path="/health/live")
+
+
+def test_a_userinfo_prefix_does_not_borrow_a_listed_origin() -> None:
+    """http://localhost:3000@elsewhere.example navigates to elsewhere.example.
+
+    It starts with the allowed origin as a string, which is exactly why the check
+    compares the parsed origin instead of the prefix.
+    """
+
+    with pytest.raises(ValueError, match="frontend origins"):
+        registered(
+            frontend_origins=("http://localhost:3000",),
+            atlassian_oauth_post_login_path="http://localhost:3000@elsewhere.example/",
+        )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "javascript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "elsewhere.example/chat",
+    ],
+)
+def test_a_target_that_is_neither_a_path_nor_an_http_url_is_refused(target: str) -> None:
+    with pytest.raises(ValueError, match="path or an absolute"):
+        registered(
+            frontend_origins=("http://localhost:3000",),
+            atlassian_oauth_post_login_path=target,
+        )
+
+
+def test_an_absolute_target_is_refused_when_no_origin_is_configured() -> None:
+    """An empty allow list allows nothing, rather than everything."""
+
+    with pytest.raises(ValueError, match="frontend origins"):
+        registered(atlassian_oauth_post_login_path="http://localhost:3000/")
 
 
 @pytest.mark.parametrize("target", ["//elsewhere.example", "/\\elsewhere.example"])
