@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.agent.citations import AgentSource, ReadRecord, sources_from
 from app.agent.domain import LLMProvider, LLMRequest, ProposedToolCall
 from app.agent.errors import AgentAuditUnavailable
+from app.agent.markup import reduce_markup
 from app.agent.untrusted import wrap as wrap_untrusted
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
@@ -680,7 +681,10 @@ class AgentReadWorkflow:
                     f"sha256 {block.sha256[:12]}]"
                 )
                 continue
-            rendered.append(block.text)
+            # Reduced before the budget is applied, not after: markup costs
+            # characters, and truncating first would spend the ceiling on tags and
+            # cut the reader off inside the text that mattered.
+            rendered.append(reduce_markup(block.text))
 
         observation = "\n".join(rendered)
         if len(observation) > MAX_OBSERVATION_CHARACTERS:
