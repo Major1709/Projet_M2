@@ -1,0 +1,124 @@
+# Ce que personne ne verifiait : les tests ne tournaient que sur une machine, et les
+# cinq tests d'integration ne tournaient nulle part -- ils se sautent faute de base de
+# donnees, donc ils se sautaient toujours. Ils cachaient trois regressions reelles,
+# trouvees en construisant ce fichier.
+#
+# Deux passes de pytest, deliberement separees et dans cet ordre. Les tests unitaires
+# tournent AVANT que la moindre variable PKA_ existe : la configuration se lit dans
+# l'environnement, donc un PKA_REPOSITORY_BACKEND laisse trainer satisfait une regle
+# qu'un test croit eprouver, et ce test passe alors par accident. C'est arrive.
+# L'environnement de base de donnees n'apparait qu'ensuite, pour les etapes qui en ont
+# besoin, isolees par le marqueur "integration" que le projet declare deja.
+
+name: backend
+
+# Sur main a chaque poussee, et sur toute pull request. Une branche de
+# fonctionnalite n'est donc verifiee qu'une fois sa PR ouverte -- choix delibere :
+# declencher aussi sur chaque poussee ferait tourner deux fois la meme chose des
+# qu'une PR existe.
+#
+# Le filtre de chemins evite de faire tourner la suite backend pour un commit qui
+# ne touche que le frontend, tout en incluant ce fichier : un workflow qui ne se
+# verifie pas lui-meme se casse en silence.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+
+# Une seule execution utile par branche : une rafale de commits n'a pas besoin de
+# payer pour des resultats que le suivant remplace aussitot.
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    # Les deux versions que le paquet declare supporter. requires-python annonce
+    # ">=3.11" et l'image de production est en 3.12 : sans la matrice, la moitie de
+    # cette affirmation n'est verifiee par personne.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    services:
+      postgres:
+        # La meme image que Compose. pgvector n'est pas un confort : le schema declare
+        # une colonne vector, donc une migration echoue sur un postgres ordinaire.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: projet_m2
+          POSTGRES_USER: projet_m2
+          POSTGRES_PASSWORD: ci-postgres-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U projet_m2 -d projet_m2"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Installer le socle et les outils
+        # Sans l'extra "embeddings" : il pese environ 2,3 Go et tirerait torch, que
+        # rien dans cette suite n'exerce.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff
+        # En premier : c'est la reponse la plus rapide, et une erreur de lint n'a pas
+        # besoin d'attendre une base de donnees pour etre annoncee.
+        run: ruff check app tests
+
+      - name: Tests unitaires
+        # Aucune variable PKA_ n'existe encore a ce point, et c'est le sujet de
+        # l'etape suivante. Voir l'en-tete de ce fichier.
+        run: pytest -m "not integration"
+
+      - name: Basculer vers la base de donnees
+        # A partir d'ici seulement. Le mot de passe part dans un FICHIER et jamais
+        # dans une variable, parce que c'est le contrat de production : une CI qui
+        # s'en dispenserait n'eprouverait pas le chemin reel.
+        run: |
+          printf '%s' 'ci-postgres-password' > "$RUNNER_TEMP/pgpass"
+          {
+            echo "PKA_ENVIRONMENT=test"
+            echo "PKA_REPOSITORY_BACKEND=postgres"
+            echo "PKA_DATABASE_HOST=127.0.0.1"
+            echo "PKA_DATABASE_PORT=5432"
+            echo "PKA_DATABASE_NAME=projet_m2"
+            echo "PKA_DATABASE_USER=projet_m2"
+            echo "PKA_DATABASE_PASSWORD_FILE=$RUNNER_TEMP/pgpass"
+          } >> "$GITHUB_ENV"
+
+      - name: Migrations
+        # Sur une base vierge, a chaque fois. Une migration n'est correcte que si elle
+        # part de rien, et une base de developpement qui a vu passer toutes les
+        # versions au fil de leur ecriture ne le prouve jamais.
+        run: alembic upgrade head
+
+      - name: Tests d'integration
+        run: pytest -m integration

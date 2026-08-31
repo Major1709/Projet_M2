@@ -41,7 +41,10 @@ def test_mcp_mutations_cannot_be_enabled() -> None:
 
 def test_enabled_mcp_reads_require_postgres_audit_repository() -> None:
     with pytest.raises(ValidationError, match="PostgreSQL audit repository"):
-        Settings(environment="test", mcp_reads_enabled=True)
+        # The backend is named rather than left to the default: an environment that
+        # exports PKA_REPOSITORY_BACKEND would otherwise satisfy the rule and the
+        # test would pass by accident, proving nothing.
+        Settings(environment="test", mcp_reads_enabled=True, repository_backend="memory")
 
 
 def test_atlassian_site_bindings_require_provider_and_cloud_ids() -> None:
