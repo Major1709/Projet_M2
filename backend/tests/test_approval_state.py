@@ -1,3 +1,4 @@
+from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -15,12 +16,10 @@ from app.approvals import (
     InvalidTransition,
     VersionConflict,
 )
-from app.approvals.adapters.memory import (
-    InMemoryActionProposalRepository,
-    InMemoryApprovalUnitOfWork,
-)
+from app.approvals.adapters.memory import InMemoryApprovalUnitOfWork
 from app.approvals.errors import ProposalConversationNotFound, ProposalExpired
 from app.audit.adapters.memory import InMemoryAuditSink
+from app.audit.domain import AuditEventType
 from app.conversations.adapters.memory import InMemoryConversationRepository
 from app.conversations.domain import Conversation
 from app.core.identity import SecurityContext
@@ -83,12 +82,11 @@ def make_command(payload: dict[str, Any] | None = None) -> ActionProposalCreate:
 @pytest.fixture
 def setup() -> tuple[
     ApprovalWorkflow,
-    InMemoryActionProposalRepository,
+    InMemoryApprovalUnitOfWork,
     InMemoryAuditSink,
     SecurityContext,
 ]:
     unit_of_work = InMemoryApprovalUnitOfWork()
-    repository = unit_of_work.proposals
     audit = unit_of_work.audit
     context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
     conversations = InMemoryConversationRepository()
@@ -99,7 +97,7 @@ def setup() -> tuple[
             owner_user_id=context.user_id,
         )
     )
-    return workflow_for(unit_of_work, conversations), repository, audit, context
+    return workflow_for(unit_of_work, conversations), unit_of_work, audit, context
 
 
 def test_approval_requires_expected_version_and_consumes_token(setup: tuple) -> None:
@@ -159,18 +157,18 @@ def test_optimistic_conflict_does_not_overwrite_newer_state(setup: tuple) -> Non
 
 
 def test_repository_detects_a_stale_direct_replacement(setup: tuple) -> None:
-    service, repository, _, context = setup
+    service, unit_of_work, _, context = setup
     proposal = service.propose(make_command(), context).proposal
     changed = proposal.model_copy(
         update={"state": ActionProposalState.REJECTED, "version": 2}
     )
-    repository.replace(proposal=changed, expected_version=1)
+    unit_of_work.proposals.replace(proposal=changed, expected_version=1)
 
     stale = proposal.model_copy(
         update={"state": ActionProposalState.APPROVED, "version": 2}
     )
     with pytest.raises(VersionConflict):
-        repository.replace(proposal=stale, expected_version=1)
+        unit_of_work.proposals.replace(proposal=stale, expected_version=1)
 
 
 def test_proposal_and_audit_roll_back_together(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,16 +263,15 @@ class AllowPermissionVerifier:
 
 
 def test_mcp_mutation_cannot_run_before_approval(setup: tuple) -> None:
-    service, repository, audit, context = setup
+    service, unit_of_work, audit, context = setup
     proposal = service.propose(make_command(), context).proposal
     gateway = RecordingGateway()
     executor = ApprovedMutationRunner(
-        repository=repository,
+        unit_of_work=unit_of_work,
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
         tool_pin=StubToolPin(),
         idempotency=InMemoryMutationIdempotencyStore(),
-        audit_sink=audit,
     )
 
     with pytest.raises(InvalidTransition, match="APPROVED"):
@@ -288,7 +285,7 @@ def test_mcp_mutation_cannot_run_before_approval(setup: tuple) -> None:
 
 
 def test_approved_mutation_is_reauthorized_then_executed(setup: tuple) -> None:
-    service, repository, audit, context = setup
+    service, unit_of_work, audit, context = setup
     issued = service.propose(make_command(), context)
     proposal = issued.proposal
     approved = service.approve(
@@ -301,12 +298,11 @@ def test_approved_mutation_is_reauthorized_then_executed(setup: tuple) -> None:
     )
     gateway = RecordingGateway()
     executor = ApprovedMutationRunner(
-        repository=repository,
+        unit_of_work=unit_of_work,
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
         tool_pin=StubToolPin(),
         idempotency=InMemoryMutationIdempotencyStore(),
-        audit_sink=audit,
     )
 
     result = executor.execute(
@@ -317,7 +313,7 @@ def test_approved_mutation_is_reauthorized_then_executed(setup: tuple) -> None:
 
     assert result.succeeded is True
     assert gateway.mutation_calls == 1
-    stored = repository.get(tenant_id=context.tenant_id, proposal_id=approved.id)
+    stored = unit_of_work.proposals.get(tenant_id=context.tenant_id, proposal_id=approved.id)
     assert stored is not None
     assert stored.state == ActionProposalState.COMPLETED
 
@@ -325,7 +321,7 @@ def test_approved_mutation_is_reauthorized_then_executed(setup: tuple) -> None:
 def test_a_decision_arriving_after_the_window_is_refused(setup: tuple) -> None:
     """Consent is spent by time, not only by use."""
 
-    _, repository, audit, context = setup
+    _, _, _, context = setup
     unit_of_work = InMemoryApprovalUnitOfWork()
     conversations = InMemoryConversationRepository()
     conversations.add(
@@ -381,7 +377,7 @@ def test_expiry_answers_before_the_token_is_examined(setup: tuple) -> None:
 def test_an_approved_mutation_expiring_before_execution_never_reaches_the_gateway(
     setup: tuple,
 ) -> None:
-    service, repository, audit, context = setup
+    service, unit_of_work, audit, context = setup
     issued = service.propose(make_command(), context)
     proposal = issued.proposal
     approved = service.approve(
@@ -396,15 +392,14 @@ def test_an_approved_mutation_expiring_before_execution_never_reaches_the_gatewa
     expired = approved.model_copy(
         update={"expires_at": approved.created_at, "version": approved.version + 1}
     )
-    repository.replace(proposal=expired, expected_version=approved.version)
+    unit_of_work.proposals.replace(proposal=expired, expected_version=approved.version)
     gateway = RecordingGateway()
     executor = ApprovedMutationRunner(
-        repository=repository,
+        unit_of_work=unit_of_work,
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
         tool_pin=StubToolPin(),
         idempotency=InMemoryMutationIdempotencyStore(),
-        audit_sink=audit,
     )
 
     with pytest.raises(ProposalExpired):
@@ -420,7 +415,7 @@ def test_an_approved_mutation_expiring_before_execution_never_reaches_the_gatewa
 def test_a_tool_schema_changing_after_approval_withdraws_it(setup: tuple) -> None:
     """The human approved one shape of call; a redefined tool is a different one."""
 
-    service, repository, audit, context = setup
+    service, unit_of_work, audit, context = setup
     issued = service.propose(make_command(), context)
     proposal = issued.proposal
     approved = service.approve(
@@ -433,12 +428,11 @@ def test_a_tool_schema_changing_after_approval_withdraws_it(setup: tuple) -> Non
     )
     gateway = RecordingGateway()
     executor = ApprovedMutationRunner(
-        repository=repository,
+        unit_of_work=unit_of_work,
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
         tool_pin=StubToolPin("b" * 64),
         idempotency=InMemoryMutationIdempotencyStore(),
-        audit_sink=audit,
     )
 
     with pytest.raises(InvalidTransition, match="schema changed"):
@@ -468,9 +462,14 @@ def test_a_revision_is_repinned_and_redated_rather_than_inheriting(setup: tuple)
         context,
     )
 
-    # Strictly later: a revision granted near the deadline must not hand back a window
-    # that is nearly spent.
-    assert revised.replacement.expires_at > proposal.expires_at
+    # A full window, measured from the revision itself rather than inherited: a
+    # revision granted near the original deadline must not hand back a window that is
+    # nearly spent. Asserted as a duration rather than as "strictly later", because
+    # the two proposals can be minted inside one tick of a coarse system clock.
+    assert revised.replacement.expires_at - revised.replacement.created_at == timedelta(
+        seconds=APPROVAL_TTL_SECONDS
+    )
+    assert revised.replacement.expires_at >= proposal.expires_at
     assert revised.replacement.tool_schema_sha256 == PINNED_SCHEMA
 
 
@@ -487,14 +486,13 @@ def approved_proposal(service, context):
     )
 
 
-def runner_for(repository, audit, gateway, store):
+def runner_for(unit_of_work, gateway, store):
     return ApprovedMutationRunner(
-        repository=repository,
+        unit_of_work=unit_of_work,
         gateway=gateway,
         permission_verifier=AllowPermissionVerifier(),
         tool_pin=StubToolPin(),
         idempotency=store,
-        audit_sink=audit,
     )
 
 
@@ -503,10 +501,10 @@ def test_the_idempotency_key_is_minted_by_the_server_not_the_caller(setup: tuple
 
     import inspect
 
-    service, repository, audit, context = setup
+    service, unit_of_work, audit, context = setup
     approved = approved_proposal(service, context)
     gateway = RecordingGateway()
-    runner_for(repository, audit, gateway, InMemoryMutationIdempotencyStore()).execute(
+    runner_for(unit_of_work, gateway, InMemoryMutationIdempotencyStore()).execute(
         proposal_id=approved.id,
         expected_version=approved.version,
         context=context,
@@ -520,18 +518,18 @@ def test_the_idempotency_key_is_minted_by_the_server_not_the_caller(setup: tuple
 def test_a_completed_mutation_replays_its_outcome_instead_of_writing_twice(
     setup: tuple,
 ) -> None:
-    service, repository, audit, context = setup
+    service, unit_of_work, audit, context = setup
     approved = approved_proposal(service, context)
     gateway = RecordingGateway()
     store = InMemoryMutationIdempotencyStore()
-    runner = runner_for(repository, audit, gateway, store)
+    runner = runner_for(unit_of_work, gateway, store)
 
     first = runner.execute(
         proposal_id=approved.id,
         expected_version=approved.version,
         context=context,
     )
-    stored = repository.get(tenant_id=context.tenant_id, proposal_id=approved.id)
+    stored = unit_of_work.proposals.get(tenant_id=context.tenant_id, proposal_id=approved.id)
     assert stored is not None
     second = runner.execute(
         proposal_id=approved.id,
@@ -549,19 +547,19 @@ def test_a_failed_call_keeps_the_same_key_for_the_retry(setup: tuple) -> None:
     """A raised call leaves the write in an unknown state, so the provider must be
     the one to decide whether it already applied it -- which needs the same key."""
 
-    service, repository, audit, context = setup
+    service, unit_of_work, audit, context = setup
     approved = approved_proposal(service, context)
     store = InMemoryMutationIdempotencyStore()
     failing = RaisingGateway()
 
     with pytest.raises(RuntimeError):
-        runner_for(repository, audit, failing, store).execute(
+        runner_for(unit_of_work, failing, store).execute(
             proposal_id=approved.id,
             expected_version=approved.version,
             context=context,
         )
 
-    stored = repository.get(tenant_id=context.tenant_id, proposal_id=approved.id)
+    stored = unit_of_work.proposals.get(tenant_id=context.tenant_id, proposal_id=approved.id)
     assert stored is not None
     assert stored.state == ActionProposalState.FAILED
     reservation = store.reserve(tenant_id=context.tenant_id, proposal_id=approved.id)
@@ -572,7 +570,7 @@ def test_a_failed_call_keeps_the_same_key_for_the_retry(setup: tuple) -> None:
 def test_a_source_denial_is_recorded_so_it_cannot_be_retried_until_it_passes(
     setup: tuple,
 ) -> None:
-    service, repository, audit, context = setup
+    service, unit_of_work, audit, context = setup
     approved = approved_proposal(service, context)
     gateway = RecordingGateway()
     store = InMemoryMutationIdempotencyStore()
@@ -586,12 +584,11 @@ def test_a_source_denial_is_recorded_so_it_cannot_be_retried_until_it_passes(
             )
 
     runner = ApprovedMutationRunner(
-        repository=repository,
+        unit_of_work=unit_of_work,
         gateway=gateway,
         permission_verifier=DenyPermissionVerifier(),
         tool_pin=StubToolPin(),
         idempotency=store,
-        audit_sink=audit,
     )
     denied = runner.execute(
         proposal_id=approved.id,
@@ -637,7 +634,7 @@ def test_a_creation_needs_no_version_because_it_has_no_target_yet() -> None:
 
 
 def test_the_verifier_is_told_which_version_the_human_was_shown(setup: tuple) -> None:
-    service, repository, audit, context = setup
+    service, unit_of_work, audit, context = setup
     issued = service.propose(update_command("7"), context)
     proposal = issued.proposal
     approved = service.approve(
@@ -660,12 +657,11 @@ def test_the_verifier_is_told_which_version_the_human_was_shown(setup: tuple) ->
     verifier = CapturingVerifier()
     gateway = RecordingGateway()
     ApprovedMutationRunner(
-        repository=repository,
+        unit_of_work=unit_of_work,
         gateway=gateway,
         permission_verifier=verifier,
         tool_pin=StubToolPin(),
         idempotency=InMemoryMutationIdempotencyStore(),
-        audit_sink=audit,
     ).execute(
         proposal_id=approved.id,
         expected_version=approved.version,
@@ -678,7 +674,7 @@ def test_the_verifier_is_told_which_version_the_human_was_shown(setup: tuple) ->
 
 
 def test_a_resource_changed_since_the_approval_is_never_written(setup: tuple) -> None:
-    service, repository, audit, context = setup
+    service, unit_of_work, audit, context = setup
     issued = service.propose(update_command("7"), context)
     proposal = issued.proposal
     approved = service.approve(
@@ -704,12 +700,11 @@ def test_a_resource_changed_since_the_approval_is_never_written(setup: tuple) ->
 
     gateway = RecordingGateway()
     result = ApprovedMutationRunner(
-        repository=repository,
+        unit_of_work=unit_of_work,
         gateway=gateway,
         permission_verifier=DriftDetectingVerifier(),
         tool_pin=StubToolPin(),
         idempotency=InMemoryMutationIdempotencyStore(),
-        audit_sink=audit,
     ).execute(
         proposal_id=approved.id,
         expected_version=approved.version,
@@ -719,6 +714,64 @@ def test_a_resource_changed_since_the_approval_is_never_written(setup: tuple) ->
     assert result.succeeded is False
     assert result.error_code == "RESOURCE_CHANGED"
     assert gateway.mutation_calls == 0
-    stored = repository.get(tenant_id=context.tenant_id, proposal_id=approved.id)
+    stored = unit_of_work.proposals.get(tenant_id=context.tenant_id, proposal_id=approved.id)
     assert stored is not None
     assert stored.state == ActionProposalState.DENIED
+
+
+def test_a_state_change_and_its_trail_commit_together(setup: tuple) -> None:
+    """A state that advanced on a trail nobody could write is the one thing an audit
+    exists to rule out, so the two share a transaction and fall together."""
+
+    service, unit_of_work, audit, context = setup
+    approved = approved_proposal(service, context)
+    before = len(audit.snapshot())
+
+    def refuse(event: Any) -> None:
+        raise RuntimeError("the audit storage is unavailable")
+
+    unit_of_work.audit.append = refuse  # type: ignore[method-assign]
+    gateway = RecordingGateway()
+
+    with pytest.raises(RuntimeError, match="audit storage"):
+        runner_for(unit_of_work, gateway, InMemoryMutationIdempotencyStore()).execute(
+            proposal_id=approved.id,
+            expected_version=approved.version,
+            context=context,
+        )
+
+    stored = unit_of_work.proposals.get(
+        tenant_id=context.tenant_id, proposal_id=approved.id
+    )
+    assert stored is not None
+    # Rolled back to the state the last committed transaction left, never to EXECUTING.
+    assert stored.state == ActionProposalState.PERMISSION_CHECK
+    assert len(audit.snapshot()) == before
+    # And the provider was never contacted: the trail comes first or not at all.
+    assert gateway.mutation_calls == 0
+
+
+def test_a_dispatch_is_recorded_before_the_provider_is_contacted(setup: tuple) -> None:
+    """The outbox record. An external write cannot join our transaction, so what is
+    committed beforehand is the intent -- naming the key the call goes out under, so a
+    write interrupted mid-flight can still be reconciled with the provider."""
+
+    service, unit_of_work, audit, context = setup
+    approved = approved_proposal(service, context)
+    failing = RaisingGateway()
+
+    with pytest.raises(RuntimeError):
+        runner_for(unit_of_work, failing, InMemoryMutationIdempotencyStore()).execute(
+            proposal_id=approved.id,
+            expected_version=approved.version,
+            context=context,
+        )
+
+    dispatched = [
+        event
+        for event in audit.snapshot()
+        if event.event_type == AuditEventType.MUTATION_DISPATCHED
+    ]
+    assert len(dispatched) == 1
+    assert dispatched[0].details["idempotency_key"] == failing.idempotency_keys[0]
+    assert dispatched[0].details["state"] == ActionProposalState.EXECUTING

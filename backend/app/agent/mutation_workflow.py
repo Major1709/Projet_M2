@@ -4,9 +4,8 @@ from uuid import UUID
 
 from app.approvals.domain import ActionProposal, ActionProposalState
 from app.approvals.errors import InvalidTransition, ProposalExpired
-from app.approvals.ports import ApprovalRepository, MutationToolPin
+from app.approvals.ports import ApprovalUnitOfWorkFactory, MutationToolPin
 from app.audit.domain import AuditEvent, AuditEventType
-from app.audit.ports import AuditSink
 from app.core.identity import SecurityContext, security_context_fingerprint
 from app.mcp.domain import MCPExecutionResult, MCPToolCall, PermissionCheck
 from app.mcp.ports import (
@@ -17,24 +16,28 @@ from app.mcp.ports import (
 
 
 class ApprovedMutationRunner:
-    """Fail-closed mutation façade enforcing approval and source reauthorization."""
+    """Fail-closed mutation façade enforcing approval and source reauthorization.
+
+    Every state change is committed together with the audit event that explains it,
+    through the approval unit of work. A trail written in its own transaction can be
+    lost while the state advances, which produces the one thing an audit exists to
+    rule out: a proposal that reached COMPLETED with nothing recording who spent it.
+    """
 
     def __init__(
         self,
         *,
-        repository: ApprovalRepository,
+        unit_of_work: ApprovalUnitOfWorkFactory,
         gateway: MCPToolGateway,
         permission_verifier: SourcePermissionVerifier,
         tool_pin: MutationToolPin,
         idempotency: MutationIdempotencyStore,
-        audit_sink: AuditSink,
     ) -> None:
-        self._repository = repository
+        self._unit_of_work = unit_of_work
         self._gateway = gateway
         self._permission_verifier = permission_verifier
         self._tool_pin = tool_pin
         self._idempotency = idempotency
-        self._audit_sink = audit_sink
 
     def execute(
         self,
@@ -43,10 +46,11 @@ class ApprovedMutationRunner:
         expected_version: int,
         context: SecurityContext,
     ) -> MCPExecutionResult:
-        proposal = self._repository.get(
-            tenant_id=context.tenant_id,
-            proposal_id=proposal_id,
-        )
+        with self._unit_of_work() as unit:
+            proposal = unit.proposals.get(
+                tenant_id=context.tenant_id,
+                proposal_id=proposal_id,
+            )
         if proposal is None:
             from app.approvals.errors import ProposalNotFound
 
@@ -102,12 +106,19 @@ class ApprovedMutationRunner:
         )
         # Reserved before anything is attempted, and durable at that point: the key
         # must survive a crash, or a retry would mint a second one and the provider
-        # would treat one approved action as two requests.
+        # would treat one approved action as two requests. It deliberately stays out
+        # of the transactions below -- a reservation rolled back alongside a failed
+        # write would be reminted, the very outcome the key exists to prevent.
         reservation = self._idempotency.reserve(
             tenant_id=proposal.tenant_id,
             proposal_id=proposal.id,
         )
-        checking = self._transition(proposal, ActionProposalState.PERMISSION_CHECK)
+        # No event yet: the check has not run, so there is no verdict to record and
+        # the state is the whole of what is known at this point.
+        checking = self._advance(proposal, ActionProposalState.PERMISSION_CHECK, context)
+        # Outside any transaction on purpose. The verifier reads the source over the
+        # network, and a transaction held open across I/O keeps rows locked for as
+        # long as the provider takes to answer.
         decision = self._permission_verifier.check(
             PermissionCheck(
                 context=context,
@@ -121,14 +132,18 @@ class ApprovedMutationRunner:
                 container_id=proposal.target.container_id,
             )
         )
-        self._audit(
-            checking,
-            context,
-            AuditEventType.MUTATION_PERMISSION_CHECKED,
-            {"allowed": decision.allowed, "decision_id": decision.decision_id},
-        )
+        verdict: dict[str, object] = {
+            "allowed": decision.allowed,
+            "decision_id": decision.decision_id,
+        }
         if not decision.allowed:
-            self._transition(checking, ActionProposalState.DENIED)
+            self._advance(
+                checking,
+                ActionProposalState.DENIED,
+                context,
+                event_type=AuditEventType.MUTATION_PERMISSION_CHECKED,
+                details=verdict,
+            )
             denial = MCPExecutionResult(
                 succeeded=False,
                 error_code=decision.reason_code or "SOURCE_PERMISSION_DENIED",
@@ -144,7 +159,20 @@ class ApprovedMutationRunner:
             )
             return denial
 
-        executing = self._transition(checking, ActionProposalState.EXECUTING)
+        # The outbox record. An external write cannot be enrolled in our transaction,
+        # so what is made atomic instead is the statement of intent: the EXECUTING
+        # state and the dispatch event commit together, before the provider is
+        # contacted. A crash mid-call therefore always leaves a committed row naming
+        # the call and the key it was sent under, which is exactly what is needed to
+        # go and ask the provider whether the write landed. Recording afterwards
+        # instead would allow a write that nothing accounts for.
+        executing = self._advance(
+            checking,
+            ActionProposalState.EXECUTING,
+            context,
+            event_type=AuditEventType.MUTATION_DISPATCHED,
+            details={**verdict, "idempotency_key": reservation.idempotency_key},
+        )
         try:
             result = self._gateway.execute_mutation(
                 call=call,
@@ -156,8 +184,13 @@ class ApprovedMutationRunner:
             # in an unknown state, so the honest retry re-presents the SAME key and
             # lets the provider decide whether it already applied it. Recording an
             # outcome here would claim knowledge we do not have.
-            failed = self._transition(executing, ActionProposalState.FAILED)
-            self._audit(failed, context, AuditEventType.MUTATION_FAILED, {})
+            self._advance(
+                executing,
+                ActionProposalState.FAILED,
+                context,
+                event_type=AuditEventType.MUTATION_FAILED,
+                details={"raised": True},
+            )
             raise
 
         terminal_state = (
@@ -167,32 +200,38 @@ class ApprovedMutationRunner:
             if result.succeeded
             else ActionProposalState.FAILED
         )
-        terminal = self._transition(executing, terminal_state)
-        self._idempotency.record_outcome(
-            tenant_id=proposal.tenant_id,
-            proposal_id=proposal.id,
-            result=result,
-        )
-        self._audit(
-            terminal,
+        self._advance(
+            executing,
+            terminal_state,
             context,
-            AuditEventType.MUTATION_EXECUTED
+            event_type=AuditEventType.MUTATION_EXECUTED
             if result.succeeded
             else AuditEventType.MUTATION_FAILED,
-            {
+            details={
                 "succeeded": result.succeeded,
                 "partial": result.partial,
                 "external_ids": result.external_ids,
                 "error_code": result.error_code,
             },
         )
+        self._idempotency.record_outcome(
+            tenant_id=proposal.tenant_id,
+            proposal_id=proposal.id,
+            result=result,
+        )
         return result
 
-    def _transition(
+    def _advance(
         self,
         proposal: ActionProposal,
         state: ActionProposalState,
+        context: SecurityContext,
+        *,
+        event_type: AuditEventType | None = None,
+        details: dict[str, object] | None = None,
     ) -> ActionProposal:
+        """Move the proposal one state on, with its explanation, in one transaction."""
+
         changed = proposal.model_copy(
             update={
                 "state": state,
@@ -200,23 +239,22 @@ class ApprovedMutationRunner:
                 "updated_at": datetime.now(UTC),
             }
         )
-        self._repository.replace(proposal=changed, expected_version=proposal.version)
+        with self._unit_of_work() as unit:
+            unit.proposals.replace(proposal=changed, expected_version=proposal.version)
+            if event_type is not None:
+                unit.audit.append(
+                    AuditEvent(
+                        event_type=event_type,
+                        tenant_id=changed.tenant_id,
+                        actor_user_id=context.user_id,
+                        correlation_id=changed.correlation_id,
+                        action_proposal_id=changed.id,
+                        details={
+                            "state": changed.state,
+                            "version": changed.version,
+                            **(details or {}),
+                        },
+                    )
+                )
+            unit.commit()
         return changed
-
-    def _audit(
-        self,
-        proposal: ActionProposal,
-        context: SecurityContext,
-        event_type: AuditEventType,
-        details: dict[str, object],
-    ) -> None:
-        self._audit_sink.append(
-            AuditEvent(
-                event_type=event_type,
-                tenant_id=proposal.tenant_id,
-                actor_user_id=context.user_id,
-                correlation_id=proposal.correlation_id,
-                action_proposal_id=proposal.id,
-                details={"state": proposal.state, "version": proposal.version, **details},
-            )
-        )

@@ -12,6 +12,12 @@ class AuditEventType(StrEnum):
     ACTION_REJECTED = "ACTION_REJECTED"
     ACTION_REVISED = "ACTION_REVISED"
     MUTATION_PERMISSION_CHECKED = "MUTATION_PERMISSION_CHECKED"
+    # Written and committed with the EXECUTING transition, before the provider is
+    # contacted, and carrying the idempotency key the call goes out under. An
+    # external write cannot join our transaction, so this intent record is what
+    # makes it accountable: a crash mid-call leaves a row that says which action
+    # left and under which key, so the provider can be asked whether it landed.
+    MUTATION_DISPATCHED = "MUTATION_DISPATCHED"
     MUTATION_EXECUTED = "MUTATION_EXECUTED"
     MUTATION_FAILED = "MUTATION_FAILED"
     MCP_READ_AUTHORIZED = "MCP_READ_AUTHORIZED"
