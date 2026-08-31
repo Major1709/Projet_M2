@@ -5,7 +5,18 @@ from fastapi.responses import RedirectResponse
 
 from app.auth.errors import SignInDisabled, SignInError
 from app.auth.workflow import AtlassianSignIn
+from app.core.errors import responses_for
 from app.sessions.domain import SESSION_COOKIE_NAME, session_token_hash
+
+SIGN_IN_RESPONSES = responses_for(
+    (),
+    (status.HTTP_403_FORBIDDEN, SignInDisabled.code),
+)
+CALLBACK_RESPONSES = responses_for(
+    (),
+    (status.HTTP_400_BAD_REQUEST, "SIGN_IN_MALFORMED"),
+    (status.HTTP_403_FORBIDDEN, SignInDisabled.code),
+)
 
 router = APIRouter(prefix="/api/auth/atlassian", tags=["auth"])
 
@@ -33,7 +44,7 @@ def _cookie_is_secure(request: Request) -> bool:
     return not (request.url.scheme == "http" and request.url.hostname in {"localhost", "127.0.0.1"})
 
 
-@router.get("/start")
+@router.get("/start", responses=SIGN_IN_RESPONSES)
 def start_sign_in(request: Request) -> RedirectResponse:
     sign_in = get_sign_in(request)
     # 307 rather than 302: the method must be preserved, and a GET that silently
@@ -50,7 +61,7 @@ CODE_MAX_LENGTH: Final = 8_192
 STATE_MAX_LENGTH: Final = 200
 
 
-@router.get("/callback")
+@router.get("/callback", responses=CALLBACK_RESPONSES)
 async def complete_sign_in(
     request: Request,
     code: Annotated[str, Query()],

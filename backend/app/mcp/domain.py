@@ -61,10 +61,23 @@ class PermissionDecision(BaseModel):
 
 
 class PermissionCheck(BaseModel):
+    """What the source must confirm immediately before a write is attempted.
+
+    The target travels as primitives rather than as an ActionTarget: approvals depends
+    on this module, so the reverse import would be a cycle. It also keeps the contract
+    honest -- a verifier needs to know which resource and which version, not how the
+    approval domain models them.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     context: SecurityContext
     call: MCPToolCall
+    resource_type: str | None = None
+    resource_id: str | None = None
+    # Absent for a creation, which has no target to have moved.
+    expected_resource_version: str | None = None
+    container_id: str | None = None
 
 
 class MCPProvider(StrEnum):

@@ -9,8 +9,17 @@ from app.approvals.workflow import ApprovalWorkflow
 from app.conversations.adapters.memory import InMemoryConversationRepository
 from app.conversations.domain import Conversation
 from app.core.config import Settings
+from app.core.identity import DEV_HEADERS_MODE
 from app.main import create_app
 
+
+class StubToolPin:
+    """Stands in for the mutation registry, which does not exist yet: the production
+    adapter denies every tool by design, so these tests supply a fixed fingerprint."""
+
+    def schema_sha256(self, *, source_system, tool_name) -> str:
+        del source_system, tool_name
+        return "a" * 64
 
 def build_client() -> TestClient:
     return TestClient(create_app(Settings(environment="test")))
@@ -84,7 +93,11 @@ def test_action_decision_token_is_returned_once_and_never_by_get() -> None:
         title="Approval contract",
     )
     conversations.add(conversation)
-    workflow = ApprovalWorkflow(unit_of_work, conversations)
+    # dev_headers, matching the app under test: the route derives its identity from
+    # headers here, so there is no session for the proposal to bind to.
+    workflow = ApprovalWorkflow(
+        unit_of_work, conversations, StubToolPin(), 900, DEV_HEADERS_MODE
+    )
     app.dependency_overrides[get_approval_workflow] = lambda: workflow
     client = TestClient(app)
     headers = {"X-Tenant-ID": "tenant-a", "X-User-ID": "owner"}

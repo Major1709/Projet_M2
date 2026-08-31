@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Integer,
+    LargeBinary,
     MetaData,
     String,
     Table,
@@ -60,6 +61,8 @@ action_proposals = Table(
     Column("diff_json", Text, nullable=True),
     Column("correlation_id", String(200), nullable=False),
     Column("execution_context_hash", String(64), nullable=False),
+    Column("tool_schema_sha256", String(64), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
     Column("state", String(50), nullable=False),
     Column("version", Integer, nullable=False),
     Column("decision_token_hash", String(64), nullable=True),
@@ -214,4 +217,57 @@ document_embeddings = Table(
     Column("content_digest", String(64), nullable=False),
     Column("embedding", Vector(EMBEDDING_DIMENSIONS), nullable=False),
     Column("indexed_at", DateTime(timezone=True), nullable=False),
+)
+
+
+delegated_grants = Table(
+    "delegated_grants",
+    metadata,
+    # One grant per person per tenant. The pair is the key because that is what a
+    # read is performed on behalf of; a second row for the same pair would mean
+    # two Atlassian identities behind one user, and nothing could choose between
+    # them.
+    Column("tenant_id", String(200), primary_key=True),
+    Column("user_id", String(200), primary_key=True),
+    # Ciphertext, never the tokens. AES-256-GCM with the nonce prefixed, and the
+    # tenant and user bound in as associated data -- a row copied to another
+    # identity then fails to authenticate instead of handing over its access.
+    Column("access_token", LargeBinary, nullable=False),
+    Column("refresh_token", LargeBinary, nullable=False),
+    # Which key sealed this row. Rotation can then proceed row by row rather than
+    # as a flag day that invalidates every grant at once.
+    Column("key_version", Integer, nullable=False),
+    # In the clear, deliberately: the renewal decision must be takeable without
+    # decrypting, and an expiry timestamp reveals nothing a session table does not
+    # already say.
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("key_version >= 1", name="key_version_positive"),
+)
+
+
+mutation_idempotency = Table(
+    "mutation_idempotency",
+    metadata,
+    # One reservation per approved proposal. The primary key is what makes reserving
+    # idempotent: a concurrent second attempt collides here rather than minting a
+    # second key for an action the human approved once.
+    Column("tenant_id", String(200), primary_key=True),
+    Column("proposal_id", Uuid(as_uuid=True), primary_key=True),
+    # Minted server-side, never accepted from a caller.
+    Column("idempotency_key", String(128), nullable=False),
+    # Set only once a terminal outcome is known. Until then a retry re-presents the
+    # same key to the provider, which is what lets the provider deduplicate.
+    Column("completed", Boolean, nullable=False),
+    # The recorded outcome, replayed to a retry instead of calling the provider again.
+    Column("result_json", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    # Two proposals sharing a key would let the provider discard the second silently.
+    UniqueConstraint("tenant_id", "idempotency_key", name="uq_mutation_idempotency_key"),
+    ForeignKeyConstraint(
+        ["tenant_id", "proposal_id"],
+        ["action_proposals.tenant_id", "action_proposals.id"],
+        name="fk_mutation_idempotency_proposal",
+    ),
 )

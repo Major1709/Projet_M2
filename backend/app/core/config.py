@@ -50,19 +50,45 @@ def _validate_redirect_uri(redirect: str, *, environment: str) -> None:
         raise ValueError("A plain HTTP redirect URI is only allowed on the loopback host")
 
 
-def _validate_post_login_path(target: str) -> None:
-    """A same-origin path, and nothing that a browser would read as elsewhere.
+def _validate_post_login_target(target: str, *, allowed_origins: tuple[str, ...]) -> None:
+    """A same-origin path, or an absolute URL at an origin already trusted for CORS.
 
-    ``//elsewhere.example`` starts with a slash and is a protocol-relative URL that
-    browsers follow off-site, so the leading-slash check alone leaves the open
-    redirect it was meant to close. A backslash is folded to a slash by some
-    browsers, which reopens it a second way.
+    The path rules are unchanged and remain the common case. ``//elsewhere.example``
+    starts with a slash and is a protocol-relative URL that browsers follow off-site,
+    so the leading-slash check alone leaves open the redirect it was meant to close,
+    and a backslash is folded to a slash by some browsers, which reopens it a second
+    way.
+
+    An absolute URL is admitted only when its origin is one the deployment already
+    names in ``frontend_origins``. That adds no new trust: the list is the
+    deployment's own statement of which browser origins may call it, and reusing it
+    here means a front end on another port stops being unreachable after sign-in
+    without the redirect ever becoming aimable. An origin absent from the list is
+    refused, so an edited environment file cannot turn this into an open redirect on
+    its own.
+
+    Matching is exact, so a difference of case or a trailing slash is a refusal
+    rather than a guess. Fail-closed is the right direction here: the cost is an
+    error at startup, and the alternative cost is a redirect somebody else chose.
     """
 
-    if not target.startswith("/"):
-        raise ValueError("The post sign-in target must be a path, not a URL")
-    if target.startswith(("//", "/\\")):
-        raise ValueError("The post sign-in target must not be a protocol-relative URL")
+    if target.startswith("/"):
+        if target.startswith(("//", "/\\")):
+            raise ValueError("The post sign-in target must not be a protocol-relative URL")
+        return
+
+    parsed = urlsplit(target)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            "The post sign-in target must be a path or an absolute http(s) URL"
+        )
+    # Rebuilt from the parsed parts rather than sliced from the string, so a
+    # userinfo section -- http://localhost:3000@elsewhere.example -- is compared as
+    # the origin a browser would actually navigate to.
+    if f"{parsed.scheme}://{parsed.netloc}" not in allowed_origins:
+        raise ValueError(
+            "An absolute post sign-in target must be one of the configured frontend origins"
+        )
 
 
 class Settings(BaseSettings):
@@ -83,6 +109,24 @@ class Settings(BaseSettings):
     auth_mode: Literal["dev_headers", "session"] = "dev_headers"
     session_lifetime_hours: int = Field(default=12, ge=1, le=24 * 30)
 
+    # Seals the delegated grants at rest. 32 bytes in hexadecimal, in a file --
+    # never an environment variable, which every child process inherits and every
+    # crash reporter collects. Absent, the durable grant store is not built and
+    # consent stays in process memory, which is the safer of the two omissions.
+    token_encryption_key_file: Path | None = None
+
+    # Semantic retrieval. Off by default: the runtime weighs about 2,3 Go and
+    # downloads a model on first use, so a deployment must ask for it rather than
+    # acquire it by upgrading.
+    embeddings_enabled: bool = False
+    embedding_model: str = Field(default="intfloat/multilingual-e5-base", min_length=1)
+    # How many leads a question is offered. Prepended to every step's transcript,
+    # so each extra one is paid for again at every turn.
+    retrieval_limit: int = Field(default=5, ge=1, le=20)
+    # The JQL the reindex route walks. A setting rather than a request field: a
+    # caller who chooses the query chooses what enters the tenant's index.
+    reindex_jql: str = Field(default="ORDER BY created DESC", min_length=1, max_length=4_000)
+
     # Atlassian 3LO. Off by default: a deployment that has not registered an OAuth
     # app must not expose a sign-in route that can only fail.
     atlassian_oauth_enabled: bool = False
@@ -91,8 +135,12 @@ class Settings(BaseSettings):
     # Must match the app registration exactly. Not derived from the request, because
     # a redirect target taken from a Host header is a redirect an attacker can aim.
     atlassian_oauth_redirect_uri: str | None = Field(default=None, min_length=1, max_length=500)
-    # Where the browser lands once signed in. A path, never a full URL and never a
-    # caller-supplied "next": an open redirect is the classic hole in this flow.
+    # Where the browser lands once signed in. Never a caller-supplied "next" -- an
+    # open redirect is the classic hole in this flow. A path stays the common case;
+    # an absolute URL is accepted only at an origin already listed in
+    # PKA_FRONTEND_ORIGINS, which is what lets a front end served from another port
+    # be returned to. The field keeps its "path" name so deployments that set
+    # PKA_ATLASSIAN_OAUTH_POST_LOGIN_PATH keep working unchanged.
     atlassian_oauth_post_login_path: str = Field(default="/", min_length=1, max_length=200)
     # Pins which site becomes the tenant when a grant covers several. Absent, a
     # multi-site grant is refused rather than resolved by picking one.
@@ -116,6 +164,10 @@ class Settings(BaseSettings):
     database_pool_timeout_seconds: int = Field(default=2, ge=1, le=10)
     database_statement_timeout_ms: int = Field(default=2_000, ge=100, le=30_000)
     mcp_reads_enabled: bool = False
+    # How long an approval stays spendable. Short on purpose: the human approved what
+    # was on screen, and the further the target drifts from that moment the less the
+    # approval means. Fifteen minutes covers a read-check-approve round trip.
+    approval_ttl_seconds: int = Field(default=900, ge=60, le=3_600)
     mcp_mutations_enabled: bool = False
     mcp_atlassian_enabled: bool = False
     mcp_jira_enabled: bool = False
@@ -216,7 +268,10 @@ class Settings(BaseSettings):
                 str(self.atlassian_oauth_redirect_uri),
                 environment=self.environment,
             )
-            _validate_post_login_path(self.atlassian_oauth_post_login_path)
+            _validate_post_login_target(
+                self.atlassian_oauth_post_login_path,
+                allowed_origins=self.frontend_origins,
+            )
 
         if self.mcp_jira_enabled and not self.mcp_atlassian_enabled:
             raise ValueError("The Jira MCP binding requires the Atlassian provider")

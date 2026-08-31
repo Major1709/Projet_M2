@@ -26,7 +26,7 @@ from app.conversations.adapters.postgres import PostgresConversationRepository
 from app.conversations.domain import Conversation, ConversationCreate
 from app.core.config import Settings
 from app.core.database import create_database_engine, create_session_factory
-from app.core.identity import SecurityContext
+from app.core.identity import DEV_HEADERS_MODE, SecurityContext
 from app.main import create_app
 from app.mcp.domain import SourceSystem, ToolActionClass
 from app.persistence.schema import action_proposals, audit_events
@@ -47,6 +47,14 @@ def postgres_engine(postgres_settings: Settings) -> Iterator[Engine]:
     yield engine
     engine.dispose()
 
+
+class StubToolPin:
+    """Stands in for the mutation registry, which does not exist yet: the production
+    adapter denies every tool by design, so these tests supply a fixed fingerprint."""
+
+    def schema_sha256(self, *, source_system, tool_name) -> str:
+        del source_system, tool_name
+        return "a" * 64
 
 def unique_context(label: str) -> SecurityContext:
     run_id = uuid4().hex
@@ -120,11 +128,25 @@ def test_round_trip_audit_persistence_isolation_and_one_time_token(
             ConversationCreate(title="Synthetic persistent conversation"),
             context,
         )
-        issued = first_container.approvals.propose(
+        assert first_container.engine is not None
+        # The container's own workflow carries NoMutationToolsPin, which denies every
+        # tool by design: nothing can be proposed through a real deployment until a
+        # mutation registry exists. This test is about persistence and tenant
+        # isolation rather than about that gate, so it supplies the fingerprint the
+        # registry will one day provide -- over the very engine the container uses,
+        # so what is written is still written by the production adapters.
+        sessions = create_session_factory(first_container.engine)
+        proposing = ApprovalWorkflow(
+            PostgresApprovalUnitOfWorkFactory(sessions),
+            PostgresConversationRepository(sessions),
+            StubToolPin(),
+            900,
+            DEV_HEADERS_MODE,
+        )
+        issued = proposing.propose(
             proposal_command(conversation.id, f"integration-{uuid4().hex}"),
             context,
         )
-        assert first_container.engine is not None
         with first_container.engine.connect() as connection:
             stored_hash = connection.execute(
                 select(action_proposals.c.decision_token_hash).where(
@@ -222,7 +244,9 @@ def test_compare_and_swap_allows_only_one_winner(postgres_engine: Engine) -> Non
     sessions = create_session_factory(postgres_engine)
     conversations = PostgresConversationRepository(sessions)
     unit_of_work_factory = PostgresApprovalUnitOfWorkFactory(sessions)
-    workflow = ApprovalWorkflow(unit_of_work_factory, conversations)
+    workflow = ApprovalWorkflow(
+        unit_of_work_factory, conversations, StubToolPin(), 900, DEV_HEADERS_MODE
+    )
     context = unique_context("cas")
     conversation_record = Conversation(
         tenant_id=context.tenant_id,
@@ -266,7 +290,9 @@ def test_audit_failure_rolls_back_proposal_transition(postgres_engine: Engine) -
     sessions = create_session_factory(postgres_engine)
     conversations = PostgresConversationRepository(sessions)
     unit_of_work_factory = PostgresApprovalUnitOfWorkFactory(sessions)
-    workflow = ApprovalWorkflow(unit_of_work_factory, conversations)
+    workflow = ApprovalWorkflow(
+        unit_of_work_factory, conversations, StubToolPin(), 900, DEV_HEADERS_MODE
+    )
     context = unique_context("rollback")
     conversation = Conversation(
         tenant_id=context.tenant_id,

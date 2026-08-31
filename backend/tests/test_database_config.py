@@ -111,3 +111,39 @@ def test_database_engine_has_bounded_connection_and_pool_timeouts(
 def test_memory_repository_does_not_build_a_database_url() -> None:
     with pytest.raises(ValueError, match="postgres repository"):
         build_database_url(Settings(environment="test", repository_backend="memory"))
+
+
+def test_every_action_proposal_column_is_written_by_the_repository() -> None:
+    """Column drift is invisible until a real database refuses the insert.
+
+    The PostgreSQL integration tests skip without a live server, so a column added to
+    the table and forgotten in the mapper passes the whole suite and fails in
+    deployment -- which is exactly how tool_schema_sha256 and expires_at were nearly
+    shipped unwritten. This compares the two without needing a database.
+    """
+
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from app.approvals.adapters.postgres import _proposal_values
+    from app.approvals.domain import ActionProposal
+    from app.mcp.domain import SourceSystem, ToolActionClass
+    from app.persistence.schema import action_proposals
+
+    proposal = ActionProposal(
+        tenant_id="tenant-a",
+        conversation_id=uuid4(),
+        proposed_by_user_id="user-a",
+        source_system=SourceSystem.CONFLUENCE,
+        tool_name="confluence.create_page",
+        action_class=ToolActionClass.CREATE,
+        target={"source_system": SourceSystem.CONFLUENCE, "resource_type": "page"},
+        payload_json="{}",
+        payload_hash="0" * 64,
+        correlation_id="corr-1",
+        execution_context_hash="1" * 64,
+        tool_schema_sha256="2" * 64,
+        expires_at=datetime.now(UTC),
+    )
+
+    assert set(_proposal_values(proposal)) == {column.name for column in action_proposals.columns}
