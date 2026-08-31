@@ -312,16 +312,21 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
         </section>
       ) : (
         <section className="welcome" aria-labelledby="welcome-title">
-              <h1 id="welcome-title">
-                Bienvenue sur NEXIA
-                <Image
-                  className="welcome__hand"
-                  src="/figma-assets/welcome-hand.png"
-                  width={33}
-                  height={33}
-                  alt=""
-                />
-              </h1>
+          <h1 id="welcome-title">
+            Bienvenue sur NEXIA
+            <Image
+              className="welcome__hand"
+              src="/figma-assets/welcome-hand.png"
+              width={33}
+              height={33}
+              alt=""
+            />
+          </h1>
+          <div className="source-logos" aria-label="Sources connectées">
+            <Image src="/figma-assets/figma.svg" width={32} height={32} alt="Figma" />
+            <Image src="/figma-assets/jira.svg" width={32} height={32} alt="Jira" />
+            <Image src="/figma-assets/confluence.svg" width={32} height={32} alt="Confluence" />
+          </div>
           <p>Votre assistant intelligent pour naviguer entre vos outils collaboratifs</p>
 
           <div className="capabilities" aria-label="Fonctionnalités de NEXIA">
@@ -340,12 +345,6 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
               <h2>Recherche instantanée</h2>
               <p>Trouvez l’information dont vous avez besoin en quelques secondes</p>
             </article>
-          </div>
-
-          <div className="source-logos" aria-label="Sources connectées">
-            <Image src="/figma-assets/figma.svg" width={28} height={28} alt="Figma" />
-            <Image src="/figma-assets/jira.svg" width={28} height={28} alt="Jira" />
-            <Image src="/figma-assets/confluence.svg" width={28} height={28} alt="Confluence" />
           </div>
         </section>
       )}

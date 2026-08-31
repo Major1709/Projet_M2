@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -40,7 +40,17 @@ describe("NexiaChat", () => {
     const user = userEvent.setup();
     render(<NexiaChat gateway={createGateway()} />);
 
-    expect(screen.getByRole("heading", { name: /Bienvenue sur NEXIA/i })).toBeInTheDocument();
+    const heading = screen.getByRole("heading", { name: /Bienvenue sur NEXIA/i });
+    const logos = heading.nextElementSibling as HTMLElement;
+    const subtitle = screen.getByText(
+      "Votre assistant intelligent pour naviguer entre vos outils collaboratifs",
+    );
+
+    expect(logos).toHaveClass("source-logos");
+    expect(logos.nextElementSibling).toBe(subtitle);
+    expect(within(logos).getByRole("img", { name: "Figma" })).toBeInTheDocument();
+    expect(within(logos).getByRole("img", { name: "Jira" })).toBeInTheDocument();
+    expect(within(logos).getByRole("img", { name: "Confluence" })).toBeInTheDocument();
     const profile = screen.getByRole("button", { name: "Ouvrir le menu du profil" });
     expect(profile).toHaveAttribute("aria-expanded", "false");
 
