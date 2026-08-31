@@ -4,6 +4,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict
 
+from app.core.errors import IDENTITY_RESPONSES, responses_for
 from app.core.identity import SecurityContext, get_security_context
 from app.mcp.api import translate_read_error
 from app.mcp.errors import MCPReadError
@@ -44,7 +45,11 @@ def get_indexer(request: Request) -> JiraIndexer:
     )
 
 
-@router.post("/reindex", response_model=ReindexResult)
+@router.post(
+    "/reindex",
+    response_model=ReindexResult,
+    responses=responses_for((), *IDENTITY_RESPONSES),
+)
 async def reindex(
     request: Request,
     context: Annotated[SecurityContext, Depends(get_security_context)],

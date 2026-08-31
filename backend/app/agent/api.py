@@ -22,6 +22,7 @@ from app.agent.read_workflow import AgentAnswer, AgentQuestion, AgentReadWorkflo
 from app.conversations.domain import CitedSource, MessageRole, MessageStatus
 from app.conversations.errors import ConversationNotFound
 from app.conversations.workflow import ConversationWorkflow
+from app.core.errors import IDENTITY_RESPONSES, coded, responses_for
 from app.core.identity import SecurityContext, get_security_context
 from app.mcp.api import translate_read_error
 from app.mcp.errors import MCPReadError
@@ -105,6 +106,30 @@ def _record(
         )
 
 
+# Beside the chain below, and the source of the documented responses, so a new
+# LLM failure cannot be handled at runtime while staying absent from the contract.
+STATUS_BY_ERROR: tuple[tuple[type[Exception], int], ...] = (
+    (AgentAuditUnavailable, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (LLMAuditUnavailable, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (LLMCredentialUnavailable, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (LLMRateLimited, status.HTTP_429_TOO_MANY_REQUESTS),
+    (LLMRequestTooLarge, status.HTTP_413_CONTENT_TOO_LARGE),
+    (LLMCallTimeout, status.HTTP_504_GATEWAY_TIMEOUT),
+    (LLMDNSRejected, status.HTTP_502_BAD_GATEWAY),
+    (LLMTransportFailure, status.HTTP_502_BAD_GATEWAY),
+    (LLMProviderRefused, status.HTTP_502_BAD_GATEWAY),
+    (LLMInvalidResponse, status.HTTP_502_BAD_GATEWAY),
+    (LLMResponseTooLarge, status.HTTP_502_BAD_GATEWAY),
+)
+
+ERROR_RESPONSES = responses_for(
+    STATUS_BY_ERROR,
+    *IDENTITY_RESPONSES,
+    (status.HTTP_403_FORBIDDEN, "LLM_PROVIDER_DISABLED"),
+    (status.HTTP_404_NOT_FOUND, ConversationNotFound.code),
+)
+
+
 def translate_llm_error(error: LLMError) -> HTTPException:
     if isinstance(
         error, (AgentAuditUnavailable, LLMAuditUnavailable, LLMCredentialUnavailable)
@@ -139,7 +164,7 @@ def translate_llm_error(error: LLMError) -> HTTPException:
     )
 
 
-@router.post("/questions", response_model=AgentAnswer)
+@router.post("/questions", response_model=AgentAnswer, responses=ERROR_RESPONSES)
 async def answer_question(
     question: AgentQuestion,
     context: Annotated[SecurityContext, Depends(get_security_context)],
@@ -154,9 +179,10 @@ async def answer_question(
         try:
             conversations.get(thread, context)
         except ConversationNotFound as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conversation not found",
+            raise coded(
+                status.HTTP_404_NOT_FOUND,
+                ConversationNotFound.code,
+                "Conversation not found",
             ) from error
         # Written first, so a question survives a provider refusal. A turn with no
         # answer beside it describes exactly what happened.

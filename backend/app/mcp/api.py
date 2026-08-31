@@ -2,6 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.core.errors import IDENTITY_RESPONSES, responses_for
 from app.core.identity import SecurityContext, get_security_context
 from app.mcp.domain import MCPReadBatch, MCPReadBatchResult
 from app.mcp.errors import (
@@ -25,6 +26,30 @@ from app.mcp.errors import (
 from app.mcp.read_workflow import MCPReadWorkflow
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
+
+
+# The status each read failure deserves, as data beside the chain that applies it.
+# Listed here rather than typed into ``responses=`` so a new error in the taxonomy
+# shows up in the API document instead of being silently undocumented.
+STATUS_BY_ERROR: tuple[tuple[type[MCPReadError], int], ...] = (
+    (MCPToolDenied, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    (MCPInputRejected, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    (MCPProviderDisabled, status.HTTP_403_FORBIDDEN),
+    (MCPAuditUnavailable, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (MCPBindingUnavailable, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (MCPGrantUnavailable, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (MCPRateLimited, status.HTTP_429_TOO_MANY_REQUESTS),
+    (MCPCallTimeout, status.HTTP_504_GATEWAY_TIMEOUT),
+    (MCPProtocolRejected, status.HTTP_502_BAD_GATEWAY),
+    (MCPDNSRejected, status.HTTP_502_BAD_GATEWAY),
+    (MCPSchemaRejected, status.HTTP_502_BAD_GATEWAY),
+    (MCPTransportFailure, status.HTTP_502_BAD_GATEWAY),
+    (MCPRemoteToolFailure, status.HTTP_502_BAD_GATEWAY),
+    (MCPInvalidResponse, status.HTTP_502_BAD_GATEWAY),
+    (MCPResponseTooLarge, status.HTTP_502_BAD_GATEWAY),
+)
+
+ERROR_RESPONSES = responses_for(STATUS_BY_ERROR, *IDENTITY_RESPONSES)
 
 
 def get_read_workflow(request: Request) -> MCPReadWorkflow:
@@ -69,7 +94,7 @@ def translate_read_error(error: MCPReadError) -> HTTPException:
     )
 
 
-@router.post("/reads", response_model=MCPReadBatchResult)
+@router.post("/reads", response_model=MCPReadBatchResult, responses=ERROR_RESPONSES)
 async def execute_mcp_reads(
     batch: MCPReadBatch,
     context: Annotated[SecurityContext, Depends(get_security_context)],
