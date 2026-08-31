@@ -1,0 +1,789 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #171717;
+  background: #f9f7f7;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #f9f7f7;
+}
+
+button,
+textarea,
+a {
+  font: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 3px solid #596f83;
+  outline-offset: 3px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+.sr-only,
+.composer__count {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.nexia-shell {
+  position: relative;
+  min-height: 100svh;
+  overflow: hidden;
+  background: #f9f7f7;
+}
+
+.nexia-header {
+  position: absolute;
+  z-index: 30;
+  top: 31px;
+  right: clamp(28px, 7.5vw, 108px);
+}
+
+.profile {
+  position: relative;
+}
+
+.profile__trigger {
+  display: grid;
+  width: 41px;
+  height: 41px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: #ffffff;
+  background: #273746;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 1px 3px 1px rgb(0 0 0 / 15%);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.profile__trigger:hover {
+  background: #364b5e;
+}
+
+.profile__menu {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: 0;
+  width: min(280px, calc(100vw - 32px));
+  overflow: hidden;
+  border: 1px solid rgb(39 55 70 / 10%);
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: 0 12px 36px rgb(39 55 70 / 16%);
+}
+
+.profile__identity {
+  margin: 0;
+  padding: 17px 18px 12px;
+  border-bottom: 1px solid #ece9e9;
+  color: #6c6565;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.profile__menu button {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 18px;
+  border: 0;
+  color: #273746;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.profile__menu button:hover,
+.profile__menu button:focus-visible {
+  background: #f6f6f2;
+}
+
+.profile__menu button + button {
+  border-top: 1px solid #f1eeee;
+  color: #9c3232;
+}
+
+.profile__menu button:disabled {
+  opacity: 0.55;
+}
+
+.welcome {
+  position: absolute;
+  top: 24.5%;
+  left: 50%;
+  width: min(704px, calc(100% - 48px));
+  transform: translateX(-50%);
+  text-align: center;
+}
+
+.welcome h1 {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  margin: 0;
+  color: #000000;
+  font-size: clamp(28px, 2.5vw, 40px);
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.2;
+}
+
+.welcome__hand {
+  display: inline-block;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.welcome > p {
+  margin: 11px 0 0;
+  color: #6c6565;
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.capabilities {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  margin-top: 72px;
+}
+
+.capability-card {
+  min-width: 0;
+  text-align: left;
+}
+
+.capability-card > img {
+  display: block;
+  width: 24px;
+  height: 24px;
+  margin-bottom: 17px;
+  object-fit: contain;
+}
+
+.capability-card h2 {
+  margin: 0;
+  color: #1f1f1f;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.capability-card p {
+  margin: 8px 0 0;
+  color: #6c6565;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.source-logos {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  margin-top: 50px;
+}
+
+.source-logos img {
+  display: block;
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
+
+.conversation {
+  position: absolute;
+  inset: 230px 0 226px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.conversation__messages {
+  display: flex;
+  width: min(706px, calc(100% - 48px));
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 66px 0 28px;
+  flex-direction: column;
+  gap: 38px;
+}
+
+.message-row {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  gap: 18px;
+}
+
+.message-row--user {
+  flex-direction: row-reverse;
+}
+
+.message-avatar {
+  display: grid;
+  width: 50px;
+  height: 50px;
+  flex: 0 0 50px;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.message-avatar--user {
+  color: #ffffff;
+  background: #273746;
+}
+
+.message-avatar--assistant {
+  color: #273746;
+  background: #deded9;
+}
+
+.message-content {
+  display: flex;
+  max-width: min(540px, calc(100% - 68px));
+  flex-direction: column;
+  gap: 14px;
+}
+
+.message-row--user .message-content {
+  align-items: flex-end;
+}
+
+.message-bubble {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 18px 22px;
+  border-radius: 20px;
+  font-size: 15px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.message-bubble--user {
+  color: #ffffff;
+  background: #273746;
+}
+
+.message-bubble--assistant {
+  color: #171717;
+  background: #f6f6f2;
+}
+
+.message-bubble--loading {
+  display: flex;
+  width: 78px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.message-bubble--loading span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #786969;
+  animation: nexia-pulse 1.1s infinite ease-in-out;
+}
+
+.message-bubble--loading span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.message-bubble--loading span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes nexia-pulse {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+.message-sources {
+  width: min(346px, 100%);
+  padding: 14px 16px;
+  border: 1px solid #e7e4e0;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+
+.message-sources > p {
+  margin: 0 0 8px;
+  color: #6c6565;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.message-sources ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.message-sources a,
+.message-sources span {
+  color: #273746;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.composer {
+  position: absolute;
+  z-index: 20;
+  bottom: clamp(32px, 15.2vh, 156px);
+  left: 50%;
+  display: grid;
+  width: min(833px, calc(100% - 48px));
+  min-height: 89px;
+  padding: 20px 20px 20px 35px;
+  transform: translateX(-50%);
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  border-radius: 40px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 1px 3px 1px rgb(0 0 0 / 15%);
+}
+
+.nexia-shell--chat .composer {
+  bottom: clamp(30px, 13.4vh, 137px);
+  min-height: 73px;
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+.composer__wand {
+  display: block;
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.composer textarea {
+  width: 100%;
+  max-height: 92px;
+  padding: 10px 0;
+  resize: none;
+  overflow-y: auto;
+  border: 0;
+  outline: 0;
+  color: #273746;
+  background: transparent;
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.composer textarea::placeholder {
+  color: #786969;
+  opacity: 1;
+}
+
+.composer textarea:disabled {
+  opacity: 0.62;
+}
+
+.composer__actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.composer__reset,
+.composer__send {
+  display: grid;
+  width: 41px;
+  height: 41px;
+  padding: 0;
+  place-items: center;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 140ms ease, opacity 140ms ease, background 140ms ease;
+}
+
+.composer__reset {
+  border: 1px solid #dedad8;
+  color: #273746;
+  background: #f6f6f2;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.composer__send {
+  border: 0;
+  background: #000000;
+}
+
+.composer__send img {
+  display: block;
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.composer__reset:hover:not(:disabled),
+.composer__send:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.composer__reset:hover:not(:disabled) {
+  background: #ecece7;
+}
+
+.composer__reset:disabled,
+.composer__send:disabled {
+  opacity: 0.36;
+}
+
+.nexia-error {
+  position: fixed;
+  z-index: 50;
+  top: 92px;
+  left: 50%;
+  display: flex;
+  width: min(520px, calc(100% - 32px));
+  min-height: 48px;
+  padding: 12px 12px 12px 18px;
+  transform: translateX(-50%);
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #efc1c1;
+  border-radius: 14px;
+  color: #7d2929;
+  background: #fff8f8;
+  box-shadow: 0 8px 24px rgb(39 55 70 / 12%);
+  font-size: 14px;
+}
+
+.nexia-error button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 50%;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.nexia-disconnected {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: min(520px, calc(100% - 48px));
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+
+.nexia-disconnected h1 {
+  margin: 0;
+  font-size: clamp(28px, 4vw, 40px);
+}
+
+.nexia-disconnected p {
+  margin: 13px 0 28px;
+  color: #6c6565;
+  line-height: 1.5;
+}
+
+.nexia-disconnected__link {
+  display: inline-flex;
+  min-height: 44px;
+  padding: 0 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 22px;
+  color: #ffffff;
+  background: #273746;
+  text-decoration: none;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  z-index: 70;
+  inset: 0;
+  display: grid;
+  padding: 24px;
+  place-items: center;
+  background: rgb(39 55 70 / 28%);
+}
+
+.history-dialog {
+  position: relative;
+  width: min(480px, 100%);
+  padding: 32px;
+  border-radius: 24px;
+  background: #ffffff;
+  box-shadow: 0 20px 60px rgb(39 55 70 / 24%);
+}
+
+.history-dialog h2 {
+  margin: 0;
+  padding-right: 32px;
+  color: #273746;
+  font-size: 24px;
+  line-height: 1.25;
+}
+
+.history-dialog__empty {
+  margin: 28px 0 0;
+  padding: 28px 20px;
+  border: 1px dashed #d8d2d2;
+  border-radius: 16px;
+  color: #6c6565;
+  background: #f9f7f7;
+  text-align: center;
+  line-height: 1.5;
+}
+
+.history-dialog__close {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: #273746;
+  background: #f6f6f2;
+  cursor: pointer;
+  font-size: 22px;
+}
+
+@media (max-height: 780px) and (min-width: 701px) {
+  .welcome {
+    top: 17%;
+  }
+
+  .capabilities {
+    margin-top: 42px;
+  }
+
+  .source-logos {
+    margin-top: 32px;
+  }
+
+  .composer,
+  .nexia-shell--chat .composer {
+    bottom: 28px;
+  }
+
+  .conversation {
+    inset: 130px 0 126px;
+  }
+
+  .conversation__messages {
+    padding-top: 20px;
+  }
+}
+
+@media (max-width: 700px) {
+  .nexia-shell {
+    min-height: 100dvh;
+    overflow: hidden;
+  }
+
+  .nexia-header {
+    top: 18px;
+    right: 18px;
+  }
+
+  .welcome {
+    top: 104px;
+    width: calc(100% - 36px);
+  }
+
+  .welcome h1 {
+    font-size: 28px;
+  }
+
+  .welcome > p {
+    max-width: 330px;
+    margin-right: auto;
+    margin-left: auto;
+    font-size: 14px;
+  }
+
+  .capabilities {
+    width: min(390px, 100%);
+    margin: 42px auto 0;
+    grid-template-columns: 1fr;
+    gap: 22px;
+  }
+
+  .capability-card {
+    display: grid;
+    grid-template-columns: 30px 1fr;
+    column-gap: 12px;
+  }
+
+  .capability-card > img {
+    margin: 1px 0 0;
+    grid-row: 1 / span 2;
+  }
+
+  .capability-card p {
+    margin-top: 3px;
+  }
+
+  .source-logos {
+    margin-top: 34px;
+  }
+
+  .conversation {
+    inset: 84px 0 126px;
+  }
+
+  .conversation__messages {
+    width: calc(100% - 28px);
+    padding: 20px 0;
+    gap: 24px;
+  }
+
+  .message-row {
+    gap: 10px;
+  }
+
+  .message-avatar {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
+    font-size: 12px;
+  }
+
+  .message-content {
+    max-width: calc(100% - 46px);
+  }
+
+  .message-bubble {
+    padding: 13px 16px;
+    font-size: 14px;
+  }
+
+  .composer,
+  .nexia-shell--chat .composer {
+    bottom: max(14px, env(safe-area-inset-bottom));
+    width: calc(100% - 24px);
+    min-height: 64px;
+    padding: 10px 10px 10px 16px;
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    gap: 10px;
+    border-radius: 32px;
+  }
+
+  .composer__wand {
+    width: 20px;
+    height: 20px;
+  }
+
+  .composer textarea {
+    min-height: 40px;
+    max-height: 40px;
+    padding: 0;
+    overflow-y: hidden;
+    font-size: 14px;
+    line-height: 20px;
+  }
+
+  .composer__actions {
+    gap: 6px;
+  }
+
+  .composer__reset,
+  .composer__send {
+    width: 38px;
+    height: 38px;
+  }
+
+  .history-dialog {
+    padding: 28px 22px 22px;
+  }
+}
+
+@media (max-width: 410px), (max-height: 700px) {
+  .welcome {
+    top: 82px;
+  }
+
+  .capabilities {
+    margin-top: 28px;
+    gap: 16px;
+  }
+
+  .source-logos {
+    margin-top: 22px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
