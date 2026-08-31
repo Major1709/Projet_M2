@@ -18,6 +18,7 @@ from app.approvals.errors import (
     ProposalConversationNotFound,
     ProposalExpired,
     ProposalNotFound,
+    SessionRequired,
     VersionConflict,
 )
 from app.approvals.ports import (
@@ -28,7 +29,12 @@ from app.approvals.ports import (
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
 from app.conversations.ports import ConversationRepository
-from app.core.identity import SecurityContext, security_context_fingerprint
+from app.core.identity import (
+    DEV_HEADERS_MODE,
+    SecurityContext,
+    security_context_fingerprint,
+)
+from app.mcp.domain import ToolActionClass
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,11 +59,13 @@ class ApprovalWorkflow:
         conversation_repository: ConversationRepository,
         tool_pin: MutationToolPin,
         approval_ttl_seconds: int,
+        auth_mode: str,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._conversations = conversation_repository
         self._tool_pin = tool_pin
         self._approval_ttl = timedelta(seconds=approval_ttl_seconds)
+        self._auth_mode = auth_mode
 
     def propose(
         self,
@@ -65,6 +73,7 @@ class ApprovalWorkflow:
         context: SecurityContext,
     ) -> IssuedActionProposal:
         self._require_owned_conversation(command.conversation_id, context)
+        self._require_session_for_mutation(command.action_class, context)
         decision_token = secrets.token_urlsafe(32)
         proposal = ActionProposal.from_command(
             command=command,
@@ -171,6 +180,9 @@ class ApprovalWorkflow:
             )
             self._validate_decision(current, decision)
             self._require_owned_conversation(current.conversation_id, context)
+            # Re-checked rather than inherited: a revision is a fresh proposal, and it
+            # is bound to the session revising it, not to the one that first proposed.
+            self._require_session_for_mutation(current.action_class, context)
 
             replacement_command = ActionProposalCreate(
                 conversation_id=current.conversation_id,
@@ -232,6 +244,36 @@ class ApprovalWorkflow:
             replacement=replacement,
             decision_token=decision_token,
         )
+
+    def _require_session_for_mutation(
+        self,
+        action_class: ToolActionClass,
+        context: SecurityContext,
+    ) -> None:
+        """Refuse to mint consent that no sign-in can later be matched against.
+
+        The fingerprint already carries the session, so a proposal made without one
+        still binds -- to the empty session, which every request in that mode
+        reproduces. That is a binding in form only, so it is refused outright, and at
+        proposal time rather than at execution: the human must never be shown a
+        decision that could not have been honoured.
+
+        Exempt under ``dev_headers``, where the caller already names their own tenant
+        in a header. There is no sign-in to bind to, and demanding one would only
+        remove the approval path from local development while adding no guarantee --
+        that mode has none to add. The settings already forbid it in production, and
+        the test is written as a single exemption rather than as a list of modes that
+        require binding, so a mode added later inherits the requirement.
+
+        Reads are untouched throughout: they are not spent, so nothing binds.
+        """
+
+        if self._auth_mode == DEV_HEADERS_MODE:
+            return
+        if action_class.is_external_mutation and context.session_id is None:
+            raise SessionRequired(
+                "A mutation must be proposed from an authenticated session"
+            )
 
     def _require_owned_conversation(
         self,

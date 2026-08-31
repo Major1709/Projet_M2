@@ -17,12 +17,21 @@ from app.approvals import (
     VersionConflict,
 )
 from app.approvals.adapters.memory import InMemoryApprovalUnitOfWork
-from app.approvals.errors import ProposalConversationNotFound, ProposalExpired
+from app.approvals.errors import (
+    ProposalConversationNotFound,
+    ProposalExpired,
+    SessionRequired,
+)
 from app.audit.adapters.memory import InMemoryAuditSink
 from app.audit.domain import AuditEventType
 from app.conversations.adapters.memory import InMemoryConversationRepository
 from app.conversations.domain import Conversation
-from app.core.identity import SecurityContext
+from app.core.identity import (
+    DEV_HEADERS_MODE,
+    SESSION_MODE,
+    SecurityContext,
+    security_context_fingerprint,
+)
 from app.mcp import (
     MCPExecutionResult,
     PermissionDecision,
@@ -32,6 +41,7 @@ from app.mcp import (
 from app.mcp.adapters.idempotency import InMemoryMutationIdempotencyStore
 
 CONVERSATION_ID = uuid4()
+SESSION_ID = uuid4()
 PINNED_SCHEMA = "a" * 64
 APPROVAL_TTL_SECONDS = 900
 
@@ -53,12 +63,22 @@ class StubToolPin:
         return self.digest
 
 
-def workflow_for(unit_of_work, conversations, *, tool_pin=None, ttl=APPROVAL_TTL_SECONDS):
+def workflow_for(
+    unit_of_work,
+    conversations,
+    *,
+    tool_pin=None,
+    ttl=APPROVAL_TTL_SECONDS,
+    auth_mode=SESSION_MODE,
+):
+    # Session mode by default: these tests exercise the rules a real deployment runs
+    # under, and dev_headers exempts itself from the session binding.
     return ApprovalWorkflow(
         unit_of_work,
         conversations,
         tool_pin or StubToolPin(),
         ttl,
+        auth_mode,
     )
 
 
@@ -88,7 +108,7 @@ def setup() -> tuple[
 ]:
     unit_of_work = InMemoryApprovalUnitOfWork()
     audit = unit_of_work.audit
-    context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
+    context = SecurityContext(tenant_id="tenant-a", user_id="user-a", session_id=SESSION_ID)
     conversations = InMemoryConversationRepository()
     conversations.add(
         Conversation(
@@ -174,7 +194,7 @@ def test_repository_detects_a_stale_direct_replacement(setup: tuple) -> None:
 def test_proposal_and_audit_roll_back_together(monkeypatch: pytest.MonkeyPatch) -> None:
     unit_of_work = InMemoryApprovalUnitOfWork()
     conversations = InMemoryConversationRepository()
-    context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
+    context = SecurityContext(tenant_id="tenant-a", user_id="user-a", session_id=SESSION_ID)
     conversations.add(
         Conversation(
             id=CONVERSATION_ID,
@@ -200,7 +220,7 @@ def test_proposal_and_audit_roll_back_together(monkeypatch: pytest.MonkeyPatch) 
 
 def test_proposal_requires_an_owned_conversation() -> None:
     unit_of_work = InMemoryApprovalUnitOfWork()
-    context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
+    context = SecurityContext(tenant_id="tenant-a", user_id="user-a", session_id=SESSION_ID)
     service = workflow_for(unit_of_work, InMemoryConversationRepository())
 
     with pytest.raises(ProposalConversationNotFound, match="Conversation not found"):
@@ -775,3 +795,76 @@ def test_a_dispatch_is_recorded_before_the_provider_is_contacted(setup: tuple) -
     assert len(dispatched) == 1
     assert dispatched[0].details["idempotency_key"] == failing.idempotency_keys[0]
     assert dispatched[0].details["state"] == ActionProposalState.EXECUTING
+
+
+def test_two_sessions_of_one_user_do_not_share_a_fingerprint() -> None:
+    """The session is part of the identity, so it must change the binding."""
+
+    signed_in = SecurityContext(
+        tenant_id="tenant-a", user_id="user-a", session_id=SESSION_ID
+    )
+    signed_in_again = signed_in.model_copy(update={"session_id": uuid4()})
+
+    assert security_context_fingerprint(signed_in) != security_context_fingerprint(
+        signed_in_again
+    )
+
+
+def test_a_mutation_cannot_be_proposed_without_a_sign_in() -> None:
+    """Consent nothing can be held to is not consent, so it is never minted."""
+
+    unit_of_work = InMemoryApprovalUnitOfWork()
+    context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
+    conversations = InMemoryConversationRepository()
+    conversations.add(
+        Conversation(
+            id=CONVERSATION_ID,
+            tenant_id=context.tenant_id,
+            owner_user_id=context.user_id,
+        )
+    )
+    service = workflow_for(unit_of_work, conversations)
+
+    with pytest.raises(SessionRequired, match="authenticated session"):
+        service.propose(make_command(), context)
+
+    assert unit_of_work.proposals.snapshot() == ()
+
+
+def test_dev_headers_is_exempt_because_it_has_no_sign_in_to_bind() -> None:
+    """The caller already names their own tenant in a header there; demanding a
+    session would remove the approval path from local development and guarantee
+    nothing in exchange."""
+
+    unit_of_work = InMemoryApprovalUnitOfWork()
+    context = SecurityContext(tenant_id="tenant-a", user_id="user-a")
+    conversations = InMemoryConversationRepository()
+    conversations.add(
+        Conversation(
+            id=CONVERSATION_ID,
+            tenant_id=context.tenant_id,
+            owner_user_id=context.user_id,
+        )
+    )
+    service = workflow_for(unit_of_work, conversations, auth_mode=DEV_HEADERS_MODE)
+
+    assert service.propose(make_command(), context).proposal is not None
+
+
+def test_an_approval_cannot_be_spent_from_a_different_session(setup: tuple) -> None:
+    """Signing out and back in ends the consent given in the session before it, and a
+    stolen cookie stops being enough once the user has a new session."""
+
+    service, unit_of_work, _, context = setup
+    approved = approved_proposal(service, context)
+    elsewhere = context.model_copy(update={"session_id": uuid4()})
+    gateway = RecordingGateway()
+
+    with pytest.raises(InvalidTransition, match="execution context"):
+        runner_for(unit_of_work, gateway, InMemoryMutationIdempotencyStore()).execute(
+            proposal_id=approved.id,
+            expected_version=approved.version,
+            context=elsewhere,
+        )
+
+    assert gateway.mutation_calls == 0
