@@ -4,8 +4,10 @@ from datetime import timedelta
 
 from sqlalchemy import Engine
 
+from app.agent.adapters.gemini import GeminiLLMProvider
 from app.agent.adapters.groq import GroqLLMProvider
 from app.agent.audit import AuditedLLMProvider
+from app.agent.domain import LLMProvider
 from app.agent.read_workflow import AgentReadWorkflow
 from app.approvals.adapters.memory import InMemoryApprovalUnitOfWork
 from app.approvals.adapters.postgres import PostgresApprovalUnitOfWorkFactory
@@ -208,13 +210,39 @@ def _build_semantic_index(settings: Settings, store: EmbeddingStore) -> Semantic
     )
 
 
+def _build_llm_provider(settings: Settings) -> LLMProvider | None:
+    """The one place a provider is chosen, so the choice is readable in one screen.
+
+    Returning ``None`` rather than raising is the existing contract for "no model
+    configured": the agent route is then simply absent, and the rest of the API --
+    reads, approvals, the audit trail -- comes up as usual. Settings validation has
+    already refused the ambiguous case where both providers are enabled, so the
+    order of these branches carries no meaning.
+    """
+
+    if settings.llm_groq_enabled and settings.llm_groq_api_key_file is not None:
+        return GroqLLMProvider(
+            api_key_file=settings.llm_groq_api_key_file,
+            model=settings.llm_groq_model,
+            max_completion_tokens=settings.llm_groq_max_completion_tokens,
+        )
+    if settings.llm_gemini_enabled and settings.llm_gemini_api_key_file is not None:
+        return GeminiLLMProvider(
+            api_key_file=settings.llm_gemini_api_key_file,
+            model=settings.llm_gemini_model,
+            max_completion_tokens=settings.llm_gemini_max_completion_tokens,
+        )
+    return None
+
+
 def _build_agent(
     settings: Settings,
     audit_sink: AuditSink,
     mcp_reads: MCPReadWorkflow,
     semantic_index: SemanticIndex | None = None,
 ) -> AgentReadWorkflow | None:
-    if not settings.llm_groq_enabled or settings.llm_groq_api_key_file is None:
+    provider = _build_llm_provider(settings)
+    if provider is None:
         return None
     return AgentReadWorkflow(
         # The audit decorator is applied here rather than left to the caller: an
@@ -222,11 +250,7 @@ def _build_agent(
         # reachable, and the only way to guarantee that is for the unwrapped
         # provider never to enter the container.
         provider=AuditedLLMProvider(
-            provider=GroqLLMProvider(
-                api_key_file=settings.llm_groq_api_key_file,
-                model=settings.llm_groq_model,
-                max_completion_tokens=settings.llm_groq_max_completion_tokens,
-            ),
+            provider=provider,
             audit_sink=audit_sink,
         ),
         reads=mcp_reads,

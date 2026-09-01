@@ -41,6 +41,12 @@ x-backend-environment: &backend-environment
   PKA_LLM_GROQ_ENABLED: ${PKA_LLM_GROQ_ENABLED:-false}
   PKA_LLM_GROQ_API_KEY_FILE: /run/secrets/groq_api_key
   PKA_LLM_GROQ_MODEL: ${PKA_LLM_GROQ_MODEL:-qwen/qwen3.6-27b}
+  # Gemini, on the same terms: pinned endpoint, key from a file, never a base URL.
+  # Enabled beside Groq rather than instead of it, so the way back from a
+  # disappointing provider is one flag. Settings refuses both being true at once.
+  PKA_LLM_GEMINI_ENABLED: ${PKA_LLM_GEMINI_ENABLED:-false}
+  PKA_LLM_GEMINI_API_KEY_FILE: /run/secrets/gemini_api_key
+  PKA_LLM_GEMINI_MODEL: ${PKA_LLM_GEMINI_MODEL:-gemini-3.5-flash-lite}
   # Decided 2026-08-17 for the retrieval phase, and not read by any code yet: no
   # embedding provider exists. Kept aligned with the decision so the configuration
   # does not describe a model the project has ruled out.
@@ -66,6 +72,7 @@ x-backend-secrets: &backend-secrets
   - postgres_password
   - redis_password
   - groq_api_key
+  - gemini_api_key
   - token_encryption_key
   - session_signing_key
 
@@ -275,6 +282,8 @@ secrets:
     file: ${SECRETS_DIR:-./secrets/dev}/redis_password
   groq_api_key:
     file: ${SECRETS_DIR:-./secrets/dev}/groq_api_key
+  gemini_api_key:
+    file: ${SECRETS_DIR:-./secrets/dev}/gemini_api_key
   token_encryption_key:
     file: ${SECRETS_DIR:-./secrets/dev}/token_encryption_key
   session_signing_key:

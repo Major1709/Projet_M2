@@ -56,8 +56,15 @@ Compose `data` et ne publie pas de port sur l'hote.
    - `postgres_password` ;
    - `redis_password` ;
    - `groq_api_key` ;
+   - `gemini_api_key` ;
    - `token_encryption_key` ;
    - `session_signing_key`.
+
+   Les deux cles de fournisseur de modele font exception a la phrase suivante : ce
+   sont des valeurs emises par Groq et par Google, pas des valeurs a tirer au hasard.
+   Le fichier doit exister meme si le fournisseur est desactive, sinon Compose refuse
+   de demarrer l'ensemble des services : une ligne quelconque suffit tant que
+   `PKA_LLM_*_ENABLED` vaut `false`.
 
    Utiliser des valeurs aleatoires distinctes. Ne jamais copier leur contenu dans `.env`, les logs, une image ou un prompt. Les fichiers sont ignores par `infra/.gitignore`.
 

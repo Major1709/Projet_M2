@@ -310,7 +310,12 @@ async def test_rate_limiting_logs_retry_after_and_nothing_else(
     with caplog.at_level(logging.WARNING), pytest.raises(LLMRateLimited):
         await provider.generate(request=REQUEST, context=CONTEXT)
 
-    record = next(r for r in caplog.records if r.message == "Groq is rate limiting this credential")
+    record = next(
+        r
+        for r in caplog.records
+        if r.message == "The model provider is rate limiting this credential"
+    )
+    assert record.llm_provider == "groq"
     assert record.retry_after == 42
     assert "gsk" not in caplog.text
 
@@ -767,7 +772,12 @@ async def test_a_hostile_retry_after_is_not_written_verbatim_to_the_log(
     with caplog.at_level(logging.WARNING), pytest.raises(LLMRateLimited):
         await provider.generate(request=REQUEST, context=CONTEXT)
 
-    record = next(r for r in caplog.records if r.message == "Groq is rate limiting this credential")
+    record = next(
+        r
+        for r in caplog.records
+        if r.message == "The model provider is rate limiting this credential"
+    )
+    assert record.llm_provider == "groq"
     assert record.retry_after is None
     assert "intrus" not in caplog.text
 
