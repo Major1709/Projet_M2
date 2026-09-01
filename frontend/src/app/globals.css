@@ -224,12 +224,25 @@ button:disabled {
   flex-wrap: nowrap;
 }
 
-.source-logos img {
-  display: block;
+.source-logo {
+  display: grid;
   width: 32px;
   height: 32px;
   flex: 0 0 32px;
+  place-items: center;
+  overflow: hidden;
+}
+
+.source-logo img {
+  display: block;
+  width: 32px;
+  height: 32px;
   object-fit: contain;
+}
+
+.source-logo--confluence img {
+  width: 24px;
+  height: 24px;
 }
 
 .conversation {
@@ -695,10 +708,20 @@ button:disabled {
     margin-top: 20px;
   }
 
-  .source-logos img {
+  .source-logo {
     width: 28px;
     height: 28px;
     flex-basis: 28px;
+  }
+
+  .source-logo img {
+    width: 28px;
+    height: 28px;
+  }
+
+  .source-logo--confluence img {
+    width: 21px;
+    height: 21px;
   }
 
   .conversation {

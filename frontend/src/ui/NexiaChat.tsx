@@ -323,9 +323,15 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
             />
           </h1>
           <div className="source-logos" aria-label="Sources connectées">
-            <Image src="/figma-assets/figma.svg" width={32} height={32} alt="Figma" />
-            <Image src="/figma-assets/jira.svg" width={32} height={32} alt="Jira" />
-            <Image src="/figma-assets/confluence.svg" width={32} height={32} alt="Confluence" />
+            <span className="source-logo">
+              <Image src="/figma-assets/figma.svg" width={32} height={32} alt="Figma" />
+            </span>
+            <span className="source-logo">
+              <Image src="/figma-assets/jira.svg" width={32} height={32} alt="Jira" />
+            </span>
+            <span className="source-logo source-logo--confluence">
+              <Image src="/figma-assets/confluence.svg" width={24} height={24} alt="Confluence" />
+            </span>
           </div>
           <p>Votre assistant intelligent pour naviguer entre vos outils collaboratifs</p>
 
