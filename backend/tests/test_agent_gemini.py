@@ -213,3 +213,112 @@ def test_the_configured_model_is_the_one_the_provider_asks_for(tmp_path: Path) -
     )
 
     assert _build_llm_provider(settings).model_name == "gemini-3.5-flash-lite"
+
+
+# --- La signature de pensee -------------------------------------------------------
+#
+# Gemini 3.x raisonne avant d'appeler un outil, renvoie une signature opaque avec
+# l'appel, et refuse en HTTP 400 le tour suivant si elle ne lui revient pas. Le format
+# OpenAI n'a pas de champ pour cela : Google le passe dans ``extra_content``. Constate
+# contre l'API reelle le 01/09/2026, apres une lecture MCP pourtant reussie -- l'echec
+# ne se voyait donc qu'au second appel.
+
+
+def tool_call_with(extra: Any) -> dict[str, Any]:
+    call: dict[str, Any] = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "getJiraIssue", "arguments": '{"issueIdOrKey":"KAN-2"}'},
+    }
+    if extra is not None:
+        call["extra_content"] = extra
+    return call
+
+
+def completion_with(call: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": "gemini-3.5-flash-lite",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {"role": "assistant", "tool_calls": [call]},
+            }
+        ],
+    }
+
+
+SIGNATURE = {"google": {"thought_signature": "El4KXAERTTIP3xRP"}}
+
+
+@pytest.mark.anyio
+async def test_the_thought_signature_is_captured_whole(tmp_path: Path) -> None:
+    """Kept as the provider sent it, not reached into. The adapter does not know what
+    is in there and must not learn."""
+
+    handler, _ = recording_handler(completion_with(tool_call_with(SIGNATURE)))
+
+    answer = await provider_for(tmp_path, handler).generate(request=REQUEST, context=CONTEXT)
+
+    assert answer.tool_calls[0].provider_continuation == SIGNATURE
+
+
+@pytest.mark.anyio
+async def test_the_signature_returns_on_the_next_turn(tmp_path: Path) -> None:
+    """The property that fixes the 400. Built through the real workflow helper rather
+    than asserted on a hand-written dictionary, because the helper is what runs."""
+
+    from app.agent.read_workflow import AgentReadWorkflow
+
+    handler, _ = recording_handler(completion_with(tool_call_with(SIGNATURE)))
+    answer = await provider_for(tmp_path, handler).generate(request=REQUEST, context=CONTEXT)
+
+    turn = AgentReadWorkflow._assistant_turn(answer.text, answer.tool_calls)
+
+    assert turn["tool_calls"][0]["extra_content"] == SIGNATURE
+
+
+@pytest.mark.anyio
+async def test_a_provider_that_sends_no_signature_produces_no_field(tmp_path: Path) -> None:
+    """Groq sends nothing here, and an empty ``extra_content`` is not the same as none:
+    the key must be absent, not present and null."""
+
+    from app.agent.read_workflow import AgentReadWorkflow
+
+    handler, _ = recording_handler(completion_with(tool_call_with(None)))
+    answer = await provider_for(tmp_path, handler).generate(request=REQUEST, context=CONTEXT)
+
+    assert answer.tool_calls[0].provider_continuation is None
+    assert "extra_content" not in AgentReadWorkflow._assistant_turn("", answer.tool_calls)[
+        "tool_calls"
+    ][0]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("hostile", ["une chaine", ["une", "liste"], 42])
+async def test_a_signature_that_is_not_an_object_is_refused(
+    tmp_path: Path, hostile: Any
+) -> None:
+    """It goes back into a request, so its shape is checked even though its content is
+    never read."""
+
+    from app.agent.errors import LLMInvalidResponse
+
+    handler, _ = recording_handler(completion_with(tool_call_with(hostile)))
+
+    with pytest.raises(LLMInvalidResponse):
+        await provider_for(tmp_path, handler).generate(request=REQUEST, context=CONTEXT)
+
+
+@pytest.mark.anyio
+async def test_an_unbounded_signature_is_refused(tmp_path: Path) -> None:
+    """"The provider sent it" is not a reason to buffer an unbounded string."""
+
+    from app.agent.adapters.openai_compatible import MAX_TOOL_CONTINUATION_CHARACTERS
+    from app.agent.errors import LLMResponseTooLarge
+
+    enorme = {"google": {"thought_signature": "A" * (MAX_TOOL_CONTINUATION_CHARACTERS + 1)}}
+    handler, _ = recording_handler(completion_with(tool_call_with(enorme)))
+
+    with pytest.raises(LLMResponseTooLarge):
+        await provider_for(tmp_path, handler).generate(request=REQUEST, context=CONTEXT)

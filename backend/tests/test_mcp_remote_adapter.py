@@ -10,6 +10,7 @@ from app.core.identity import SecurityContext
 from app.mcp.adapters.grants import BearerGrant
 from app.mcp.adapters.http_guard import (
     CALL_TIMEOUT_SECONDS,
+    CONNECT_TIMEOUT_SECONDS,
     MAX_WIRE_RESPONSE_BYTES,
     LimitedAsyncByteStream,
     reject_oversized_response,
@@ -373,8 +374,14 @@ def test_remote_transport_uses_fixed_endpoint_no_redirects_and_bounded_timeouts(
         "Accept-Encoding": "identity",
         "Authorization": f"Bearer {broker.token}",
     }
-    assert http_kwargs["timeout"].connect == 3.0
-    assert http_kwargs["timeout"].read == 30.0
+    # Rattache aux constantes plutot qu'a des litteraux. Le sujet de ce test est que
+    # des plafonds soient poses et propages jusqu'au client, pas qu'ils vaillent trois
+    # et trente secondes : le delai de connexion depend de la liaison et a deja du etre
+    # releve une fois. Fige en dur, il transformait un reglage reseau en test rouge.
+    assert http_kwargs["timeout"].connect == CONNECT_TIMEOUT_SECONDS
+    assert http_kwargs["timeout"].read == CALL_TIMEOUT_SECONDS
+    # La propriete qui compte vraiment, et qu'une constante mal ecrite briserait.
+    assert 0 < CONNECT_TIMEOUT_SECONDS <= CALL_TIMEOUT_SECONDS
     assert captured["client_kwargs"]["cache"] is None
     assert captured["client_kwargs"]["mode"] == "auto"
     assert resolver.calls == [("mcp.atlassian.com", 443)]

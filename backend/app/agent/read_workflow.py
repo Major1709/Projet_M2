@@ -435,6 +435,15 @@ class AgentReadWorkflow:
                         "name": call.tool_name,
                         "arguments": json.dumps(call.arguments, sort_keys=True),
                     },
+                    # Handed back verbatim when the provider gave one, absent when it
+                    # did not. Not a field this workflow understands: it is the
+                    # provider's own state, and the adapter that captured it is the
+                    # only thing that knows what it means.
+                    **(
+                        {"extra_content": call.provider_continuation}
+                        if call.provider_continuation
+                        else {}
+                    ),
                 }
                 for call in calls
             ],

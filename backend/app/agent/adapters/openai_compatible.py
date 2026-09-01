@@ -78,6 +78,11 @@ MAX_TOOL_NAME_CHARACTERS: Final = 200
 # without it -- which is why a tool call arriving without one is a malformed answer
 # rather than something to paper over with a generated identifier.
 MAX_TOOL_CALL_ID_CHARACTERS: Final = 128
+# Opaque provider state echoed back on the next turn -- a Gemini thought signature is
+# roughly 130 characters, and a turn carrying several calls repeats one per call. The
+# ceiling is generous because the value is never interpreted, and present at all
+# because "the provider sent it" is not a reason to buffer an unbounded string.
+MAX_TOOL_CONTINUATION_CHARACTERS: Final = 8_192
 
 MIN_API_KEY_BYTES: Final = 16
 MAX_API_KEY_BYTES: Final = 4096
@@ -204,6 +209,17 @@ def _tool_calls_of(
         # a parse, not a cast. Anything that is not an object is refused rather than
         # coerced: a bare list or scalar reaching the read workflow would fail its
         # schema check later and much less clearly.
+        # Captured before the arguments, and kept whole rather than reached into. The
+        # adapter does not know what a given provider stores here and must not learn:
+        # its only job is to give the value back on the next turn. Bounded and shape-
+        # checked all the same, because it arrives from outside.
+        continuation = raw_call.get("extra_content")
+        if continuation is not None:
+            if not isinstance(continuation, dict):
+                raise LLMInvalidResponse()
+            if len(json.dumps(continuation)) > MAX_TOOL_CONTINUATION_CHARACTERS:
+                raise LLMResponseTooLarge()
+
         raw_arguments = function.get("arguments", "{}")
         if not isinstance(raw_arguments, str):
             raise LLMInvalidResponse()
@@ -230,6 +246,7 @@ def _tool_calls_of(
                 # anything else must not be able to widen its own authority.
                 action_class=ToolActionClass.READ,
                 arguments=arguments,
+                provider_continuation=continuation,
             )
         )
     return tuple(calls)
