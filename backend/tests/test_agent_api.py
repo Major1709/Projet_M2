@@ -33,7 +33,7 @@ class StubAgent:
         self.error = error
         self.questions: list[Any] = []
 
-    async def answer(self, *, question: Any, context: Any) -> AgentAnswer:
+    async def answer(self, *, question: Any, context: Any, history: Any = ()) -> AgentAnswer:
         del context
         self.questions.append(question)
         if self.error is not None:
