@@ -10,6 +10,7 @@ from app.auth.api import router as auth_router
 from app.bootstrap import ApplicationContainer, build_container
 from app.conversations.api import router as conversations_router
 from app.core.config import Settings, get_settings
+from app.core.logging import install_log_redaction
 from app.health.api import router as health_router
 from app.mcp.api import router as mcp_router
 from app.semantics.api import router as semantics_router
@@ -29,6 +30,12 @@ def create_app(
     settings: Settings | None = None,
     container: ApplicationContainer | None = None,
 ) -> FastAPI:
+    # Pose avant toute autre chose, et ici plutot que dans un script de demarrage :
+    # l'application ne peut pas etre construite sans que le filtre le soit aussi.
+    # Un filtre installe par la commande de lancement serait absent des tests, absent
+    # d'un lancement fait a la main, et present uniquement la ou personne ne regarde.
+    install_log_redaction()
+
     resolved_settings = settings or get_settings()
     resolved_container = container or build_container(resolved_settings)
 
