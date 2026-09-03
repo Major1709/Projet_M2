@@ -14,8 +14,10 @@
 html,
 body {
   min-width: 320px;
+  height: 100%;
   min-height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
 body {
@@ -62,6 +64,16 @@ button:disabled {
   min-height: 100svh;
   overflow: hidden;
   background: #f9f7f7;
+}
+
+.nexia-shell--chat {
+  display: grid;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  padding: clamp(84px, 22.5dvh, 230px) 0 clamp(30px, 13.4dvh, 137px);
+  grid-template-rows: minmax(0, 1fr) auto;
+  row-gap: 16px;
 }
 
 .nexia-header {
@@ -252,6 +264,13 @@ button:disabled {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+.nexia-shell--chat .conversation {
+  position: relative;
+  inset: auto;
+  min-height: 0;
+  grid-row: 1;
 }
 
 .conversation__messages {
@@ -446,10 +465,15 @@ button:disabled {
 }
 
 .nexia-shell--chat .composer {
-  bottom: clamp(30px, 13.4vh, 137px);
+  position: relative;
+  inset: auto;
+  left: auto;
   min-height: 73px;
   padding-top: 12px;
   padding-bottom: 12px;
+  transform: none;
+  grid-row: 2;
+  justify-self: center;
 }
 
 .composer__wand {
@@ -655,6 +679,12 @@ button:disabled {
 }
 
 @media (max-height: 780px) and (min-width: 701px) {
+  .nexia-shell--chat {
+    padding-top: 84px;
+    padding-bottom: 28px;
+    row-gap: 12px;
+  }
+
   .welcome {
     top: 17%;
   }
@@ -672,6 +702,10 @@ button:disabled {
     bottom: 28px;
   }
 
+  .nexia-shell--chat .composer {
+    bottom: auto;
+  }
+
   .conversation {
     inset: 130px 0 126px;
   }
@@ -685,6 +719,13 @@ button:disabled {
   .nexia-shell {
     min-height: 100dvh;
     overflow: hidden;
+  }
+
+  .nexia-shell--chat {
+    height: 100dvh;
+    min-height: 0;
+    padding: 84px 0 max(14px, env(safe-area-inset-bottom));
+    row-gap: 16px;
   }
 
   .nexia-header {
@@ -790,6 +831,10 @@ button:disabled {
     grid-template-columns: 20px minmax(0, 1fr) auto;
     gap: 10px;
     border-radius: 32px;
+  }
+
+  .nexia-shell--chat .composer {
+    bottom: auto;
   }
 
   .composer__wand {
