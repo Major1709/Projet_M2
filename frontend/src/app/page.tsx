@@ -1,5 +1,5 @@
-import { ProjectAssistantScreen } from "@/features/project-assistant";
+import { NexiaChat } from "@/ui/NexiaChat";
 
-export default function HomePage() {
-  return <ProjectAssistantScreen />;
+export default function Home() {
+  return <NexiaChat />;
 }

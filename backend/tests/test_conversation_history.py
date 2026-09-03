@@ -38,10 +38,14 @@ class StubAgent:
         self.answer_value = answer
         self.error = error
         self.questions: list[Any] = []
+        # L'historique tel que la route l'a reellement transmis. Capture plutot
+        # qu'ignore : c'est la seule facon de prouver ce que le modele a revu.
+        self.histories: list[tuple[Any, ...]] = []
 
-    async def answer(self, *, question: Any, context: Any) -> AgentAnswer:
+    async def answer(self, *, question: Any, context: Any, history: Any = ()) -> AgentAnswer:
         del context
         self.questions.append(question)
+        self.histories.append(tuple(history))
         if self.error is not None:
             raise self.error
         assert self.answer_value is not None
@@ -256,3 +260,61 @@ def test_the_order_does_not_depend_on_the_clock() -> None:
         "corr-2",
     ]
     assert [turn["sequence"] for turn in turns] == [0, 1, 2, 3]
+
+
+def test_the_second_question_sees_the_first_exchange() -> None:
+    """Le defaut que cette tranche corrige, vu depuis la route.
+
+    Les tours etaient ecrits et jamais relus : demander l'etat d'un ticket apres en
+    avoir demande le contenu faisait redemander de quel ticket on parlait.
+    """
+
+    agent = StubAgent(answer=an_answer(CITED))
+    client = client_for(agent)
+    conversation = a_conversation(client)
+
+    assert ask(client, conversation_id=conversation).status_code == 200
+    assert ask(
+        client,
+        conversation_id=conversation,
+        question="Et son statut ?",
+        correlation_id="corr-history-2",
+    ).status_code == 200
+
+    premiere, seconde = agent.histories
+    # La premiere question n'avait rien a revoir.
+    assert premiere == ()
+    assert [(t.role, t.content) for t in seconde] == [
+        ("user", "Que dit KAN-1 ?"),
+        ("assistant", "KAN-1 porte le resume test et le statut A faire."),
+    ]
+
+
+def test_the_current_question_is_not_replayed_to_itself() -> None:
+    """L'ordre lecture-puis-ecriture, prouve plutot que commente.
+
+    La route enregistre la question avant d'appeler le modele, pour qu'elle survive a
+    un refus du fournisseur. Relire l'historique apres cette ecriture ferait arriver
+    la question deux fois -- une fois comme souvenir, une fois comme question. Le bug
+    serait silencieux : le modele repondrait quand meme, en croyant qu'on se repete.
+    """
+
+    agent = StubAgent(answer=an_answer(CITED))
+    client = client_for(agent)
+    conversation = a_conversation(client)
+
+    assert ask(client, conversation_id=conversation).status_code == 200
+
+    (historique,) = agent.histories
+    assert "Que dit KAN-1 ?" not in [t.content for t in historique]
+
+
+def test_an_exchange_without_a_conversation_replays_nothing() -> None:
+    """Sans fil, rien a revoir -- et surtout aucune fuite d'un fil vers un autre."""
+
+    agent = StubAgent(answer=an_answer(CITED))
+    client = client_for(agent)
+
+    assert ask(client).status_code == 200
+
+    assert agent.histories == [()]

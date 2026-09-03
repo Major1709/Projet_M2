@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Sequence
 from typing import Annotated
 from uuid import UUID
 
@@ -18,8 +19,18 @@ from app.agent.errors import (
     LLMResponseTooLarge,
     LLMTransportFailure,
 )
-from app.agent.read_workflow import AgentAnswer, AgentQuestion, AgentReadWorkflow
-from app.conversations.domain import CitedSource, MessageRole, MessageStatus
+from app.agent.read_workflow import (
+    AgentAnswer,
+    AgentQuestion,
+    AgentReadWorkflow,
+    PriorTurn,
+)
+from app.conversations.domain import (
+    CitedSource,
+    ConversationMessage,
+    MessageRole,
+    MessageStatus,
+)
 from app.conversations.errors import ConversationNotFound
 from app.conversations.workflow import ConversationWorkflow
 from app.core.errors import IDENTITY_RESPONSES, coded, responses_for
@@ -62,6 +73,26 @@ def _cited(answer: AgentAnswer) -> tuple[CitedSource, ...]:
             truncated=source.truncated,
         )
         for source in answer.sources
+    )
+
+
+def _prior_turns(messages: Sequence[ConversationMessage]) -> tuple[PriorTurn, ...]:
+    """Les tours passes, tels que le modele les reverra.
+
+    Les tours en erreur sont ecartes. Une question enregistree juste avant un refus
+    du fournisseur n'a pas de reponse a cote d'elle : la rejouer telle quelle
+    montrerait au modele une question restee sans suite, et l'inviterait a croire
+    qu'il a omis d'y repondre.
+
+    Le depot rend deja les tours les plus recents, du plus ancien au plus recent.
+    Le decoupage a la fenetre revient au workflow, qui est aussi celui qui les
+    desamorce : deux endroits ou tronquer, c'est un endroit ou se tromper.
+    """
+
+    return tuple(
+        PriorTurn(role=message.role.value, content=message.content)
+        for message in messages
+        if message.status is MessageStatus.COMPLETE and message.content.strip()
     )
 
 
@@ -172,18 +203,26 @@ async def answer_question(
     conversations: Annotated[ConversationWorkflow, Depends(get_conversations)],
 ) -> AgentAnswer:
     thread = question.conversation_id
+    history: tuple[PriorTurn, ...] = ()
     if thread is not None:
-        # Proven before the model is called, not after: spending a call to then
-        # discover the thread is someone else's would waste a real budget, and the
-        # 404 is the honest answer either way.
+        # Lu avant que le tour courant soit ecrit, et l'ordre n'est pas negociable :
+        # l'enregistrement ci-dessous ajoute la question a l'historique, donc relire
+        # apres la rejouerait en double -- une fois comme souvenir, une fois comme
+        # question. Le bug serait discret, pas bruyant.
+        #
+        # ``list_messages`` verifie lui-meme le proprietaire et le locataire, c'est
+        # donc aussi le controle d'acces : prouve avant que le modele soit appele,
+        # pour ne pas depenser un budget reel avant de decouvrir que le fil est
+        # celui de quelqu'un d'autre.
         try:
-            conversations.get(thread, context)
+            prior = conversations.list_messages(thread, context)
         except ConversationNotFound as error:
             raise coded(
                 status.HTTP_404_NOT_FOUND,
                 ConversationNotFound.code,
                 "Conversation not found",
             ) from error
+        history = _prior_turns(prior)
         # Written first, so a question survives a provider refusal. A turn with no
         # answer beside it describes exactly what happened.
         _record(
@@ -196,7 +235,7 @@ async def answer_question(
         )
 
     try:
-        answer = await agent.answer(question=question, context=context)
+        answer = await agent.answer(question=question, context=context, history=history)
     except LLMError as error:
         raise translate_llm_error(error) from error
     except MCPReadError as error:

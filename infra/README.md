@@ -1,22 +1,24 @@
 # Infrastructure du MVP
 
-Ce dossier decrit le premier deploiement de la plateforme : frontend Next.js, API FastAPI, worker Celery, PostgreSQL avec pgvector et Redis. Jira, Confluence et Figma restent accessibles par des serveurs MCP distants ; Groq reste un service externe. Neo4j, MinIO et une pile d'observabilite locale ne font pas partie du premier increment.
+Ce dossier decrit l'infrastructure active de la plateforme : API FastAPI, worker Celery, PostgreSQL avec pgvector et Redis. Le frontend est temporairement absent et aucun service Compose ne le construit ni ne le demarre. Jira, Confluence et Figma restent accessibles par des serveurs MCP distants ; Groq reste un service externe. Neo4j, MinIO et une pile d'observabilite locale ne font pas partie du premier increment.
 
 Le fichier `compose.yaml` est un contrat d'integration. Le parcours backend pris en
 charge dans cet increment est `postgres -> migrate -> api`. Le service `worker`
 reste un contrat reserve a l'increment asynchrone : Celery et son point d'entree ne
-sont pas encore livres et ce service ne doit pas etre demarre.
+sont pas encore livres et ce service ne doit pas etre demarre. Le raccordement
+frontend devra etre reintroduit explicitement lorsqu'un nouveau scaffold sera
+disponible.
 
 ## Topologie
 
 ```text
-Navigateur -> frontend/BFF -> api -> PostgreSQL/pgvector
-                              |  -> Redis <- worker
-                              |
-                              +  -> Groq et MCP via reseau egress
+Client de test local -> api -> PostgreSQL/pgvector
+                          |  -> Redis <- worker
+                          |
+                          +  -> Groq et MCP via reseau egress
 ```
 
-- `edge` relie le frontend et l'API. Seuls leurs ports sont publies, sur `127.0.0.1` par defaut.
+- `edge` accueille l'API et reste reserve au futur raccordement frontend. Seul le port API est publie, sur `127.0.0.1` par defaut.
 - `data` est un reseau interne sans sortie Internet pour PostgreSQL et Redis.
 - `egress` donne a l'API et au worker un chemin sortant. Compose ne filtre pas les domaines : en preproduction/production, un pare-feu ou proxy doit limiter la sortie aux endpoints Groq, OIDC et MCP approuves.
 - PostgreSQL et Redis ne publient aucun port hote.
@@ -26,15 +28,9 @@ Navigateur -> frontend/BFF -> api -> PostgreSQL/pgvector
 
 ## Pre-requis des scaffolds
 
-Le Compose attend les fichiers et conventions suivants :
+Le Compose attend les fichiers et conventions backend suivants :
 
 ```text
-frontend/Dockerfile
-  - image de production Next.js
-  - ecoute sur 0.0.0.0:3000
-  - route GET /api/health
-  - lecture serveur de API_INTERNAL_URL et des variables *_FILE
-
 backend/Dockerfile
   - image Python commune a api, worker et migrate
   - CMD par defaut lancant FastAPI sur 0.0.0.0:8000
@@ -60,9 +56,15 @@ Compose `data` et ne publie pas de port sur l'hote.
    - `postgres_password` ;
    - `redis_password` ;
    - `groq_api_key` ;
+   - `gemini_api_key` ;
    - `token_encryption_key` ;
-   - `session_signing_key` ;
-   - `oidc_client_secret`.
+   - `session_signing_key`.
+
+   Les deux cles de fournisseur de modele font exception a la phrase suivante : ce
+   sont des valeurs emises par Groq et par Google, pas des valeurs a tirer au hasard.
+   Le fichier doit exister meme si le fournisseur est desactive, sinon Compose refuse
+   de demarrer l'ensemble des services : une ligne quelconque suffit tant que
+   `PKA_LLM_*_ENABLED` vaut `false`.
 
    Utiliser des valeurs aleatoires distinctes. Ne jamais copier leur contenu dans `.env`, les logs, une image ou un prompt. Les fichiers sont ignores par `infra/.gitignore`.
 
@@ -105,8 +107,9 @@ docker compose --env-file infra/.env -f infra/compose.yaml logs --tail 100 api
 ```
 
 Le port API `http://localhost:8000` est publie uniquement pour le diagnostic local.
-Le navigateur devra normalement passer par le BFF et une origine unique lorsque
-le parcours frontend sera lance.
+Le futur navigateur devra normalement passer par un BFF et une origine unique
+lorsque le frontend sera reintroduit. La liste CORS `PKA_FRONTEND_ORIGINS` reste
+donc configuree sans qu'un service frontend actif soit declare.
 
 Pour verifier la persistance, creer une conversation synthetique, conserver son
 identifiant, recreer uniquement l'API, puis relire la conversation :
@@ -368,7 +371,7 @@ Plan de deploiement :
 3. appliquer les migrations compatibles ;
 4. deployer API et worker avec mutations coupees ;
 5. executer healthchecks et smoke tests de lecture/RAG ;
-6. deployer le frontend et verifier session, SSE, citations et approbations sans execution ;
+6. apres reintroduction approuvee du frontend, le deployer et verifier session, SSE, citations et approbations sans execution ;
 7. activer progressivement les MCP de lecture par tenant pilote apres les preuves
    OAuth, `cloudId`, contract pack et admission Figma applicables ;
 8. conserver `PKA_MCP_MUTATIONS_ENABLED=false` : les mutations sont hors de ce lot
@@ -413,6 +416,7 @@ Plan de deploiement :
 ## Limites connues du squelette
 
 - Le worker Celery et son point d'entree ne sont pas disponibles dans cette tranche ; ne pas demarrer le service `worker`.
+- Aucun service frontend n'est declare dans Compose ; sa reintroduction exigera de restaurer explicitement son image, ses variables, ses secrets et ses controles de sante.
 - Le parcours frontend complet et les connecteurs externes ne font pas partie de cette validation PostgreSQL.
 - Les versions/digests d'images devront etre pinnees et verifiees avant un deploiement partage.
 - Les endpoints MCP et les cibles de ce lot sont fixes. Les audiences OAuth,

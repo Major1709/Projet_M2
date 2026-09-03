@@ -38,6 +38,16 @@ class ProposedToolCall(BaseModel):
     tool_name: str
     action_class: ToolActionClass
     arguments: dict[str, Any]
+    # Opaque state a provider requires handed back with this call on the following
+    # turn, or it refuses the request. Gemini's reasoning models are the concrete
+    # case: they return a thought signature and reject a tool result that omits it.
+    #
+    # Deliberately untyped and never interpreted. This is not information about the
+    # call -- nothing here is read, matched, logged or shown to a user. It travels
+    # from one provider response back into the next request to that same provider
+    # and nowhere else, which is why it is bounded by the adapter that reads it and
+    # carries no meaning to any code between.
+    provider_continuation: dict[str, Any] | None = None
 
 
 class LLMResponse(BaseModel):

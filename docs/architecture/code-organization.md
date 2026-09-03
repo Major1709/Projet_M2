@@ -8,30 +8,19 @@ La règle principale est la suivante : le domaine et les workflows dépendent de
 
 ## Frontend
 
-```text
-frontend/src/
-  app/                                  composition Next.js et styles globaux
-  features/
-    project-assistant/
-      domain/                           types et vocabulaire métier
-      application/                      état, cas d'usage et port du gateway
-      adapters/                         implémentations HTTP/SSE ou démonstration
-      ui/                               composants de présentation
-      demo/                             fixtures et composition de démonstration
-      index.ts                          interface publique de la feature
-```
+L'implémentation frontend précédente a été retirée le 30 août 2026. Il n'existe
+temporairement aucun dossier `frontend/` et aucune organisation de code frontend
+livrée ne fait autorité.
 
-Conventions :
+La reconstruction devra être précédée d'une spécification approuvée et d'une
+revue de la maquette. L'Architecte figera alors les contrats de requête, réponse,
+erreur, permission et exemple avant tout travail parallèle. Les décisions de
+structure seront documentées ici une fois validées ; elles ne seront pas déduites
+de l'ancienne implémentation supprimée.
 
-- `src/app` compose les features, sans contenir leurs règles métier ;
-- `domain` n'importe ni React, ni Next.js, ni client HTTP ;
-- `application` expose un petit nombre d'actions utilisateur et dépend du port `ProjectAssistantGateway` ;
-- `adapters` traduit un protocole externe vers ce port ;
-- `ui` reçoit l'état et les actions du module applicatif ;
-- les autres features importent uniquement le fichier public `index.ts` ;
-- les tests de règles d'état restent près du module testé avec le suffixe `.test.ts` ou `.test.tsx`.
-
-Le futur client backend remplacera `demo-assistant-gateway.ts` par un adaptateur HTTP/SSE sans modifier les composants ni les règles d'état.
+Les invariants durables restent applicables : l'interface n'est pas une frontière
+d'autorisation, elle n'invente ni permission ni donnée, et toute mutation externe
+doit présenter l'action exacte avant approbation puis revalidation côté backend.
 
 ## Backend
 

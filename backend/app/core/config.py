@@ -213,6 +213,17 @@ class Settings(BaseSettings):
     # Bounded by the model's own completion ceiling so no configuration can raise it
     # past what the provider will actually produce.
     llm_groq_max_completion_tokens: int = Field(default=16_384, ge=256, le=16_384)
+    # Gemini sits beside Groq rather than replacing it, and that is deliberate: the
+    # way back from a provider that disappoints is then a boolean, not a redeploy of
+    # a configuration nobody wrote down. Exactly one may be enabled at a time -- see
+    # the check below, which refuses the ambiguity instead of picking a winner.
+    llm_gemini_enabled: bool = False
+    llm_gemini_model: str = Field(default="gemini-3.5-flash-lite", min_length=1, max_length=200)
+    llm_gemini_api_key_file: Path | None = None
+    # Lower than Groq's, and bounded by the adapter's own conservative ceiling: the
+    # flash-lite output limit has not been measured here, so configuration is not
+    # allowed to assert one.
+    llm_gemini_max_completion_tokens: int = Field(default=8_192, ge=256, le=8_192)
 
     @field_validator(
         "atlassian_oauth_client_id",
@@ -348,6 +359,19 @@ class Settings(BaseSettings):
 
         if self.llm_groq_enabled and self.llm_groq_api_key_file is None:
             raise ValueError("The Groq provider requires PKA_LLM_GROQ_API_KEY_FILE")
+
+        if self.llm_gemini_enabled and self.llm_gemini_api_key_file is None:
+            raise ValueError("The Gemini provider requires PKA_LLM_GEMINI_API_KEY_FILE")
+
+        # Refused rather than resolved by precedence. A silent winner is how an
+        # operator ends up reading one provider's dashboard while the other answers
+        # the questions, and the switch this setting exists for is precisely the
+        # moment both flags are most likely to be true at once.
+        if self.llm_groq_enabled and self.llm_gemini_enabled:
+            raise ValueError(
+                "Enable exactly one model provider: PKA_LLM_GROQ_ENABLED and "
+                "PKA_LLM_GEMINI_ENABLED are both true"
+            )
 
         for origin in self.frontend_origins:
             parsed = urlsplit(origin)

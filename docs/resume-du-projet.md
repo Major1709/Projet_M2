@@ -1,5 +1,10 @@
 # Résumé du projet
 
+> Ce document conserve le bilan historique du Sprint 0. Depuis le 30 août 2026,
+> l'implémentation frontend décrite ci-dessous a été retirée du dépôt afin d'être
+> reconstruite depuis une base propre. Les commandes et parcours frontend de ce
+> bilan ne décrivent donc plus l'état exécutable courant.
+
 ## Objectif
 
 Nous avons préparé la base d’un assistant web qui rassemble les connaissances de

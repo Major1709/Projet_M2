@@ -22,7 +22,15 @@ import httpx2
 
 from app.mcp.errors import MCPInvalidResponse, MCPResponseTooLarge
 
-CONNECT_TIMEOUT_SECONDS = 3.0
+# Mesure le 01/09/2026 depuis le conteneur : l'etablissement TCP prend 1,7 a 4,3 s
+# vers Google et jusqu'a 2,5 s vers Atlassian a froid. A 3 s, ce plafond se declenchait
+# par intermittence et se presentait comme un LLMCallTimeout ou un MCPTransportFailure
+# -- soit un probleme de fournisseur, alors que la cause etait la liaison locale.
+#
+# Ce delai existe pour abandonner vite une adresse qui ne repond pas, pas pour imposer
+# une latence maximale. Rien de ce qui borne reellement l'exposition ne bouge ici : le
+# plafond d'appel, le plafond d'octets et l'epinglage d'adresse sont inchanges.
+CONNECT_TIMEOUT_SECONDS = 15.0
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_WIRE_RESPONSE_BYTES = 12 * 1024 * 1024
 # Every outbound destination is contacted on the standard HTTPS port. Fixing it

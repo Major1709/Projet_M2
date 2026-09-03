@@ -8,20 +8,15 @@ Pour une présentation simple de ce qui a été réalisé, voir [docs/resume-du-
 
 ## Applications
 
-- `frontend/` : interface Next.js et module fonctionnel du chat projet ;
 - `backend/` : monolithe modulaire FastAPI et contrats des intégrations ;
-- `infra/` : contrat Docker Compose du MVP ;
+- `infra/` : contrat Docker Compose des services actuellement exécutables ;
 - `docs/` : produit, architecture, sécurité et stratégie QA.
 
+Le frontend précédent a été retiré intentionnellement le 30 août 2026 afin de
+repartir d'une implémentation neuve. Aucun dossier `frontend/` ni commande de
+démarrage frontend ne fait partie de l'état courant du dépôt.
+
 ## Démarrage local
-
-Frontend :
-
-```powershell
-cd frontend
-npm install
-npm run dev
-```
 
 Backend :
 
@@ -35,15 +30,11 @@ python -m venv .venv
 ## Vérifications
 
 ```powershell
-cd frontend
-npm run test
-npm run typecheck
-npm run lint
-npm run build
-
-cd ..\backend
+cd backend
 .venv\Scripts\python -m pytest
 .venv\Scripts\ruff check app tests
 ```
 
-Les adaptateurs Jira, Confluence, Figma, Groq et PostgreSQL ne sont pas encore implémentés. Le mode actuel utilise des données de démonstration côté frontend et des repositories en mémoire côté backend.
+Le nouveau frontend sera spécifié et reconstruit séparément à partir de la
+maquette approuvée et des contrats backend existants. Les documents historiques
+restent disponibles dans `docs/` et dans le journal de développement Notion.

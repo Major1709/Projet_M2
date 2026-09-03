@@ -1,9 +1,20 @@
 FROM python:3.12-slim-bookworm
 
+# PIP_DEFAULT_TIMEOUT et PIP_RETRIES passent par l'environnement, et non par des
+# drapeaux sur la commande, parce que l'isolation de build PEP 517 lance son PROPRE
+# pip pour installer hatchling : un --timeout donne a la commande n'atteint pas ce
+# sous-processus, alors qu'une variable d'environnement en est heritee.
+#
+# Le defaut de quinze secondes echoue ici de facon reproductible, et le symptome
+# trompe : l'echec porte le nom de hatchling, 78 ko, simplement parce que c'est le
+# premier telechargement du sous-processus -- pas parce que ce paquet a un
+# probleme.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10
 
 WORKDIR /app
 

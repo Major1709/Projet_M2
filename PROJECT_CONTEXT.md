@@ -190,6 +190,14 @@ Le rapport de référence est `docs/architecture/sprint-0-integration-report.md`
 
 ## Organisation actuelle du code
 
-Le frontend est structuré par feature sous `frontend/src/features/project-assistant/` avec les couches `domain`, `application`, `adapters`, `ui` et `demo`. Le backend est un monolithe modulaire structuré par domaines (`approvals`, `conversations`, `agent`, `mcp`, `knowledge`, `audit`) ; chaque domaine sépare modèles, ports, workflows et adaptateurs.
+Le frontend précédent a été retiré du dépôt le 30 août 2026 puis reconstruit
+depuis une base propre dans `frontend/`. L'application Next.js implémente le
+parcours conversationnel NEXIA défini par les maquettes `Screen - Chat` et
+`Begin Chat`, tout en conservant les contrats et invariants de sécurité du
+projet.
+
+Le backend reste un monolithe modulaire structuré par domaines (`approvals`,
+`conversations`, `agent`, `mcp`, `knowledge`, `audit`) ; chaque domaine sépare
+modèles, ports, workflows et adaptateurs.
 
 Les règles détaillées et la procédure d'ajout d'une intégration sont conservées dans `docs/architecture/code-organization.md`.

@@ -18,7 +18,7 @@ import json
 import logging
 from collections.abc import Sequence
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import anyio.to_thread
@@ -28,6 +28,7 @@ from app.agent.citations import AgentSource, ReadRecord, sources_from
 from app.agent.domain import LLMProvider, LLMRequest, ProposedToolCall
 from app.agent.errors import AgentAuditUnavailable
 from app.agent.markup import reduce_markup
+from app.agent.untrusted import neutralise
 from app.agent.untrusted import wrap as wrap_untrusted
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
@@ -194,6 +195,31 @@ REPEATED_READ_NOTICE = (
 )
 
 
+# Quatre echanges. Le prompt systeme et le catalogue coutent deja environ 2 065
+# tokens, et une reponse Jira detaillee en pese trois cents : au-dela, on repaie du
+# contexte pour un benefice qui decroit vite. Compte en messages, pas en echanges,
+# parce que c'est ce qui part sur le fil.
+MAX_HISTORY_MESSAGES = 8
+# Par tour rejoue. Un tour ancien sert a se souvenir de quoi on parlait, pas a
+# reconstituer un ticket : pour le detail, le modele relit la source, et cette
+# lecture-la est tracee. Un souvenir ne l'est pas.
+MAX_HISTORY_CHARACTERS = 1_500
+
+
+class PriorTurn(BaseModel):
+    """Un tour passe, rejoue au modele.
+
+    Volontairement reduit a un role et un texte. Ni citations, ni horodatage, ni
+    identifiant : tout ce qui n'est pas rejoue ne peut pas etre mal rejoue, et le
+    reste est deja en base pour qui veut l'afficher.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1)
+
+
 class AgentStopReason(StrEnum):
     ANSWERED = "answered"
     STEP_LIMIT_REACHED = "step_limit_reached"
@@ -313,11 +339,15 @@ class AgentReadWorkflow:
         *,
         question: AgentQuestion,
         context: SecurityContext,
+        history: Sequence[PriorTurn] = (),
     ) -> AgentAnswer:
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": question.question},
-        ]
+        # Passe par parametre plutot que lu ici. Ce workflow ne connait pas le depot
+        # de conversations et n'a pas a le connaitre : l'appelant sait deja de quel
+        # fil il s'agit, et c'est lui qui doit lire AVANT d'ecrire le tour courant,
+        # sous peine de le rejouer en double.
+        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages.extend(self._replayed(history))
+        messages.append({"role": "user", "content": question.question})
         pistes = await self._retrieve(question=question, context=context)
         if pistes:
             # Inserted as a system turn, after the question. Not as a user turn:
@@ -420,6 +450,31 @@ class AgentReadWorkflow:
         }
 
     @staticmethod
+    def _replayed(history: Sequence[PriorTurn]) -> list[dict[str, Any]]:
+        """Rejoue les derniers tours, bornes et desamorces.
+
+        Le risque que cette methode traite n'est pas evident : une reponse passee a
+        pu citer un ticket, donc du contenu ecrit par quelqu'un d'autre. A la lecture,
+        ce contenu etait encadre par ``untrusted.wrap`` et le modele savait le lire
+        comme de la donnee. Rejoue depuis la base, il reviendrait nu -- et sous le
+        role ``assistant``, c'est-a-dire avec l'autorite de ce que le modele croit
+        avoir dit lui-meme. Une consigne glissee dans un ticket serait ainsi blanchie
+        d'un tour a l'autre.
+
+        ``neutralise`` retire cette possibilite : un texte rejoue ne peut plus former
+        ni fermer un encadrement. Il reste du texte, il ne redevient pas une consigne.
+        """
+
+        recent = list(history)[-MAX_HISTORY_MESSAGES:]
+        return [
+            {
+                "role": turn.role,
+                "content": neutralise(turn.content[:MAX_HISTORY_CHARACTERS]),
+            }
+            for turn in recent
+        ]
+
+    @staticmethod
     def _assistant_turn(
         text: str,
         calls: Sequence[ProposedToolCall],
@@ -435,6 +490,15 @@ class AgentReadWorkflow:
                         "name": call.tool_name,
                         "arguments": json.dumps(call.arguments, sort_keys=True),
                     },
+                    # Handed back verbatim when the provider gave one, absent when it
+                    # did not. Not a field this workflow understands: it is the
+                    # provider's own state, and the adapter that captured it is the
+                    # only thing that knows what it means.
+                    **(
+                        {"extra_content": call.provider_continuation}
+                        if call.provider_continuation
+                        else {}
+                    ),
                 }
                 for call in calls
             ],
@@ -701,6 +765,8 @@ __all__ = [
     "DEFAULT_MAX_READS_PER_QUESTION",
     "DEFAULT_MAX_STEPS",
     "EMPTY_ANSWER_MESSAGE",
+    "MAX_HISTORY_CHARACTERS",
+    "MAX_HISTORY_MESSAGES",
     "MAX_OBSERVATION_CHARACTERS",
     "READ_LIMIT_NOTICE",
     "REPEATED_READ_NOTICE",
@@ -712,5 +778,6 @@ __all__ = [
     "AgentReadWorkflow",
     "AgentSource",
     "AgentStopReason",
+    "PriorTurn",
     "tool_catalogue",
 ]
