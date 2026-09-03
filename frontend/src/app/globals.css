@@ -392,11 +392,38 @@ button:disabled {
   list-style: none;
 }
 
-.message-sources a,
-.message-sources span {
+.message-source {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   color: #273746;
   font-size: 13px;
   line-height: 1.4;
+}
+
+.message-source__icon {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  place-items: center;
+}
+
+.message-source__icon img {
+  display: block;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+
+.message-source__icon--figma img,
+.message-source__icon--jira img {
+  width: 22px;
+  height: 22px;
+}
+
+.message-source__label {
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 

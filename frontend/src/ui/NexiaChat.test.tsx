@@ -104,6 +104,70 @@ describe("NexiaChat", () => {
     });
   });
 
+  it("affiche l’icône de chaque source avant sa référence sans changer les liens", async () => {
+    const gateway = createGateway({
+      askQuestion: vi.fn().mockResolvedValue({
+        answer: "Voici les références.",
+        sources: [
+          {
+            title: "Ticket Jira lié",
+            url: "https://jira.example.test/browse/DESIGN-1",
+            provider: "FIGMA_MCP",
+          },
+          {
+            title: "PROJ-42",
+            url: "https://jira.example.test/browse/PROJ-42",
+            provider: "Atlassian Jira",
+          },
+          {
+            title: "Cahier des charges Confluence",
+            url: "https://docs.example.test/spec",
+          },
+          {
+            title: "Référence externe",
+            provider: "knowledge",
+          },
+        ],
+      }),
+    });
+    const user = userEvent.setup();
+    render(<NexiaChat gateway={gateway} />);
+
+    await user.type(screen.getByRole("textbox", { name: "Votre message" }), "Montre les sources");
+    await user.click(screen.getByRole("button", { name: "Envoyer le message" }));
+
+    const sources = await screen.findByLabelText("Sources de la réponse");
+    const references = within(sources).getAllByRole("listitem");
+    const expected = [
+      ["Source Figma", "Ticket Jira lié", "/figma-assets/figma.svg"],
+      ["Source Jira", "PROJ-42", "/figma-assets/jira.svg"],
+      ["Source Confluence", "Cahier des charges Confluence", "/figma-assets/confluence.svg"],
+      ["Source externe", "Référence externe", "/figma-assets/link.svg"],
+    ];
+
+    references.forEach((reference, index) => {
+      const icon = within(reference).getByRole("img", { name: expected[index][0] });
+      const label = within(reference).getByText(expected[index][1]);
+      expect(icon).toHaveAttribute("src", expected[index][2]);
+      expect(icon.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    const linkedReferences = references.slice(0, 3).map((reference) =>
+      within(reference).getByRole("link"),
+    );
+    expect(linkedReferences[0]).toHaveAttribute(
+      "href",
+      "https://jira.example.test/browse/DESIGN-1",
+    );
+    expect(linkedReferences[1]).toHaveAttribute("href", "https://jira.example.test/browse/PROJ-42");
+    expect(linkedReferences[2]).toHaveAttribute("href", "https://docs.example.test/spec");
+    linkedReferences.forEach((reference) => {
+      expect(reference).toHaveAttribute("target", "_blank");
+      expect(reference).toHaveAttribute("rel", "noreferrer");
+    });
+    expect(within(references[3]).queryByRole("link")).not.toBeInTheDocument();
+  });
+
   it("réinitialise localement et crée paresseusement un nouveau fil au prochain message", async () => {
     const gateway = createGateway();
     const user = userEvent.setup();

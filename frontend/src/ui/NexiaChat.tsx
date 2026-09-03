@@ -22,6 +22,35 @@ type ChatMessage =
 
 const MAX_QUESTION_LENGTH = 4000;
 
+type SourceIcon = {
+  kind: "figma" | "jira" | "confluence" | "link";
+  label: string;
+  src: string;
+};
+
+const SOURCE_ICONS: Record<SourceIcon["kind"], SourceIcon> = {
+  figma: {
+    kind: "figma",
+    label: "Figma",
+    src: "/figma-assets/figma.svg",
+  },
+  jira: {
+    kind: "jira",
+    label: "Jira",
+    src: "/figma-assets/jira.svg",
+  },
+  confluence: {
+    kind: "confluence",
+    label: "Confluence",
+    src: "/figma-assets/confluence.svg",
+  },
+  link: {
+    kind: "link",
+    label: "externe",
+    src: "/figma-assets/link.svg",
+  },
+};
+
 function messageId(role: ChatMessage["role"]): string {
   return `${role}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -30,6 +59,20 @@ function sourceLabel(source: NexiaAnswer["sources"][number], index: number): str
   if (source.title?.trim()) return source.title;
   if (source.url?.trim()) return source.url;
   return `Source ${index + 1}`;
+}
+
+function sourceIcon(source: NexiaAnswer["sources"][number]): SourceIcon {
+  const candidates = [source.provider, source.title, source.url];
+
+  for (const candidate of candidates) {
+    const normalized = candidate?.trim().toLowerCase();
+    if (!normalized) continue;
+    if (normalized.includes("figma")) return SOURCE_ICONS.figma;
+    if (normalized.includes("jira")) return SOURCE_ICONS.jira;
+    if (normalized.includes("confluence")) return SOURCE_ICONS.confluence;
+  }
+
+  return SOURCE_ICONS.link;
 }
 
 type NexiaChatProps = {
@@ -279,17 +322,45 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
                     <div className="message-sources" aria-label="Sources de la réponse">
                       <p>Sources</p>
                       <ul>
-                        {message.sources.map((source, index) => (
-                          <li key={`${source.url ?? source.title ?? "source"}-${index}`}>
-                            {source.url ? (
-                              <a href={source.url} target="_blank" rel="noreferrer">
-                                {sourceLabel(source, index)}
-                              </a>
-                            ) : (
-                              <span>{sourceLabel(source, index)}</span>
-                            )}
-                          </li>
-                        ))}
+                        {message.sources.map((source, index) => {
+                          const icon = sourceIcon(source);
+                          const label = sourceLabel(source, index);
+                          const content = (
+                            <>
+                              <span
+                                className={`message-source__icon message-source__icon--${icon.kind}`}
+                              >
+                                <Image
+                                  src={icon.src}
+                                  width={18}
+                                  height={18}
+                                  alt={`Source ${icon.label}`}
+                                />
+                              </span>
+                              <span className="message-source__label">
+                                {label}
+                              </span>
+                            </>
+                          );
+
+                          return (
+                            <li key={`${source.url ?? source.title ?? "source"}-${index}`}>
+                              {source.url ? (
+                                <a
+                                  className="message-source"
+                                  href={source.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  aria-label={label}
+                                >
+                                  {content}
+                                </a>
+                              ) : (
+                                <span className="message-source">{content}</span>
+                              )}
+                            </li>
+                          );
+                        })}
                       </ul>
                     </div>
                   ) : null}
