@@ -65,12 +65,31 @@ _NON_VALIDATION_SCHEMA_KEYS = frozenset(
 )
 
 
+# Sous ces mots-cles, les cles ne sont pas des mots-cles JSON Schema mais des NOMS
+# choisis par le fournisseur. La distinction n'est pas theorique : createJiraIssue
+# declare une propriete nommee "description", et getPagesInConfluenceSpace une
+# propriete nommee "title". Sans elle, ces champs disparaissaient de l'empreinte, et
+# un fournisseur pouvait les changer ou les retirer sans que le controle de derive ne
+# voie quoi que ce soit -- c'est-a-dire exactement ce que ce controle existe pour
+# empecher.
+_SCHEMA_MAP_KEYS = frozenset(
+    {"properties", "$defs", "definitions", "patternProperties", "dependentSchemas"}
+)
+
+
 def _semantic_schema(value: Any, *, parent_key: str | None = None) -> Any:
     """Canonicalize validation semantics while excluding documentation-only drift."""
 
     if isinstance(value, dict):
         if set(value) == {"json"} and isinstance(value["json"], dict):
             return _semantic_schema(value["json"])
+        if parent_key in _SCHEMA_MAP_KEYS:
+            # Une carte de noms. Rien n'y est filtre, et chaque valeur redevient un
+            # objet de schema ordinaire -- d'ou le parent_key remis a None.
+            return {
+                key: _semantic_schema(child, parent_key=None)
+                for key, child in sorted(value.items())
+            }
         return {
             key: _semantic_schema(child, parent_key=key)
             for key, child in sorted(value.items())

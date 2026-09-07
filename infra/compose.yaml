@@ -57,7 +57,10 @@ x-backend-environment: &backend-environment
   OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-https://identity.example.invalid}
   OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-projet-m2-web}
   PKA_MCP_READS_ENABLED: ${PKA_MCP_READS_ENABLED:-false}
-  PKA_MCP_MUTATIONS_ENABLED: "false"
+  # Les ecritures ne sont plus refusees par principe : Settings exige desormais les
+  # lectures, PostgreSQL et un liant Jira avant de les autoriser. Le defaut reste
+  # "false" -- une surface d'ecriture s'ouvre par decision, jamais par oubli.
+  PKA_MCP_MUTATIONS_ENABLED: ${PKA_MCP_MUTATIONS_ENABLED:-false}
   PKA_MCP_ATLASSIAN_ENABLED: ${PKA_MCP_ATLASSIAN_ENABLED:-false}
   PKA_MCP_JIRA_ENABLED: ${PKA_MCP_JIRA_ENABLED:-false}
   PKA_MCP_CONFLUENCE_ENABLED: ${PKA_MCP_CONFLUENCE_ENABLED:-false}

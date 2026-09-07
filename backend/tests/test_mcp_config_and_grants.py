@@ -34,9 +34,68 @@ def test_mcp_configuration_is_default_deny() -> None:
     assert settings.mcp_grant_backend == "disabled"
 
 
-def test_mcp_mutations_cannot_be_enabled() -> None:
-    with pytest.raises(ValidationError, match="MCP mutations cannot be enabled"):
+# Le refus inconditionnel des mutations est leve. Ce qui le remplace n'est pas une
+# absence de regle mais trois dependances reelles du chemin d'ecriture : chacune est
+# ce sans quoi une ecriture s'execute quand meme, mais sans ce qui la rend rattrapable.
+
+CLOUD = "a761589f-69b8-4373-9c30-7561c2d45a39"
+
+POSTGRES = {
+    "repository_backend": "postgres",
+    "database_host": "db.exemple.invalid",
+    "database_name": "projet_m2",
+    "database_user": "projet_m2",
+    "database_password_file": "/run/secrets/postgres_password",
+    "database_port": 5432,
+}
+
+
+def test_mutations_require_reads() -> None:
+    """La revalidation de permission juste avant une ecriture EST une lecture. Sans
+    elle, on ecrit sans avoir reconfirme que la cible existe et que le mandat la
+    voit encore."""
+
+    with pytest.raises(ValidationError, match="require PKA_MCP_READS_ENABLED"):
         Settings(environment="test", mcp_mutations_enabled=True)
+
+
+def test_mutations_require_durable_storage() -> None:
+    """Un depot en memoire perd, au redemarrage, la seule trace disant sous quelle cle
+    une ecriture est partie -- ce qu'on va precisement chercher apres une coupure."""
+
+    with pytest.raises(ValidationError, match="require the PostgreSQL repository"):
+        Settings(environment="test", mcp_mutations_enabled=True, mcp_reads_enabled=True)
+
+
+def test_mutations_require_a_jira_binding_when_jira_is_enabled() -> None:
+    """Sans liant, aucune ecriture Jira ne peut designer son site."""
+
+    with pytest.raises(ValidationError, match="require PKA_MCP_ATLASSIAN_JIRA_CLOUD_ID"):
+        Settings(
+            environment="test",
+            mcp_mutations_enabled=True,
+            mcp_reads_enabled=True,
+            mcp_atlassian_enabled=True,
+            mcp_jira_enabled=True,
+            **POSTGRES,
+        )
+
+
+def test_mutations_are_accepted_once_every_precondition_holds() -> None:
+    """Le pendant des trois refus : la regle autorise, elle n'interdit pas par
+    principe."""
+
+    settings = Settings(
+        environment="test",
+        mcp_mutations_enabled=True,
+        mcp_reads_enabled=True,
+        mcp_atlassian_enabled=True,
+        mcp_jira_enabled=True,
+        mcp_atlassian_jira_cloud_id=CLOUD,
+        **POSTGRES,
+    )
+
+    assert settings.mcp_mutations_enabled is True
 
 
 def test_enabled_mcp_reads_require_postgres_audit_repository() -> None:

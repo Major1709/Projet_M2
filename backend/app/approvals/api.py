@@ -3,6 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.agent.mutation_workflow import ApprovedMutationRunner
 from app.approvals.domain import (
     ActionDecision,
     ActionProposalCreate,
@@ -10,6 +11,8 @@ from app.approvals.domain import (
     ActionProposalView,
     ActionRevision,
     ActionRevisionView,
+    MutationExecution,
+    MutationExecutionView,
 )
 from app.approvals.errors import (
     ApprovalError,
@@ -165,3 +168,87 @@ def revise_action_proposal(
         )
     except ApprovalError as error:
         raise translate_domain_error(error) from error
+
+
+def get_mutations(request: Request) -> ApprovedMutationRunner:
+    """Le chemin d'ecriture, ou un refus de politique s'il n'est pas ouvert.
+
+    403 et non 404, comme la route d'assistant quand aucun modele n'est configure :
+    une surface desactivee est une decision de deploiement, et l'annoncer franchement
+    vaut mieux que de simuler une absence que le document OpenAPI trahirait de toute
+    facon.
+    """
+
+    runner = request.app.state.container.mutations
+    if runner is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "MCP_MUTATIONS_DISABLED",
+                "message": "External writes are not enabled",
+            },
+        )
+    return runner
+
+
+EXECUTE_RESPONSES = {
+    **_responses(
+        ProposalNotFound,
+        ProposalExpired,
+        InvalidTransition,
+        VersionConflict,
+        SessionRequired,
+    ),
+    # Deux statuts qu'aucune table de traduction ne produit : l'un vient de la
+    # dependance qui refuse une surface desactivee, l'autre d'un appel dont l'issue
+    # est inconnue.
+    **responses_for(
+        (),
+        (status.HTTP_403_FORBIDDEN, "MCP_MUTATIONS_DISABLED"),
+        (status.HTTP_502_BAD_GATEWAY, "MUTATION_OUTCOME_UNKNOWN"),
+    ),
+}
+
+
+@router.post(
+    "/{proposal_id}/execute",
+    response_model=MutationExecutionView,
+    responses=EXECUTE_RESPONSES,
+)
+def execute_action_proposal(
+    proposal_id: UUID,
+    command: MutationExecution,
+    context: Annotated[SecurityContext, Depends(get_security_context)],
+    runner: Annotated[ApprovedMutationRunner, Depends(get_mutations)],
+) -> MutationExecutionView:
+    """Depenser une approbation.
+
+    ``expected_version`` est exige dans le corps et n'a rien d'une formalite : entre
+    le moment ou une interface affiche une proposition et celui ou quelqu'un clique,
+    la proposition a pu etre revisee, rejetee ou deja executee. Sans cette version,
+    le second clic depenserait une approbation qui n'est plus celle qui a ete
+    montree.
+    """
+
+    try:
+        result = runner.execute(
+            proposal_id=proposal_id,
+            expected_version=command.expected_version,
+            context=context,
+        )
+    except ApprovalError as error:
+        raise translate_domain_error(error) from error
+    except Exception as error:
+        # L'issue est INCONNUE, et c'est ce que le code doit dire. L'appel est parti
+        # et rien n'est revenu : le ticket a peut-etre ete cree. Un 500 laisserait un
+        # client conclure a l'echec et reessayer, ce qui creerait le doublon que la
+        # reservation d'idempotence existe pour eviter. La reservation reste ouverte
+        # exprès -- la reprise honnete represente la meme cle, elle ne recommence pas
+        # de zero.
+        raise coded(
+            status.HTTP_502_BAD_GATEWAY,
+            "MUTATION_OUTCOME_UNKNOWN",
+            "The write was dispatched and its outcome is unknown; do not retry blindly",
+        ) from error
+
+    return MutationExecutionView.from_domain(result)

@@ -25,7 +25,11 @@ from app.bootstrap import ApplicationContainer, build_container
 from app.conversations.adapters.postgres import PostgresConversationRepository
 from app.conversations.domain import Conversation, ConversationCreate
 from app.core.config import Settings
-from app.core.database import create_database_engine, create_session_factory
+from app.core.database import (
+    create_database_engine,
+    create_session_factory,
+    database_is_ready,
+)
 from app.core.identity import DEV_HEADERS_MODE, SecurityContext
 from app.main import create_app
 from app.mcp.domain import SourceSystem, ToolActionClass
@@ -332,3 +336,30 @@ def test_audit_failure_rolls_back_proposal_transition(postgres_engine: Engine) -
     persisted = workflow.get(proposal.id, context)
     assert persisted.version == 1
     assert persisted.state == ActionProposalState.PENDING_APPROVAL
+
+
+@pytest.mark.integration
+def test_a_real_database_at_head_is_ready(postgres_engine) -> None:
+    """Contre une vraie base, parce que le defaut d'origine venait precisement d'un
+    ecart entre ce que le code croyait et ce que la base portait."""
+
+    assert database_is_ready(postgres_engine) is True
+
+
+@pytest.mark.integration
+def test_a_real_database_rolled_back_one_migration_is_not_ready(postgres_engine) -> None:
+    """La preuve la plus directe : on falsifie la version appliquee et la sonde doit
+    refuser, sans que la connexion cesse de fonctionner."""
+
+    with postgres_engine.begin() as connection:
+        vraie = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        connection.execute(text("UPDATE alembic_version SET version_num = '20260820_0005'"))
+    try:
+        assert database_is_ready(postgres_engine) is False
+    finally:
+        with postgres_engine.begin() as connection:
+            connection.execute(
+                text("UPDATE alembic_version SET version_num = :v"), {"v": vraie}
+            )
+
+    assert database_is_ready(postgres_engine) is True

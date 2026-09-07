@@ -8,10 +8,11 @@ from app.agent.adapters.gemini import GeminiLLMProvider
 from app.agent.adapters.groq import GroqLLMProvider
 from app.agent.audit import AuditedLLMProvider
 from app.agent.domain import LLMProvider
+from app.agent.mutation_workflow import ApprovedMutationRunner
 from app.agent.read_workflow import AgentReadWorkflow
 from app.approvals.adapters.memory import InMemoryApprovalUnitOfWork
 from app.approvals.adapters.postgres import PostgresApprovalUnitOfWorkFactory
-from app.approvals.adapters.tool_pin import NoMutationToolsPin
+from app.approvals.adapters.tool_pin import NoMutationToolsPin, RegistryMutationToolPin
 from app.approvals.workflow import ApprovalWorkflow
 from app.audit.adapters.postgres import PostgresAppendOnlyAuditWriter
 from app.audit.ports import AuditSink
@@ -45,6 +46,9 @@ from app.mcp.adapters.grants import (
     DevelopmentGrantBinding,
     UnavailableGrantBroker,
 )
+from app.mcp.adapters.idempotency import PostgresMutationIdempotencyStore
+from app.mcp.adapters.mutation_gateway import MCPMutationGateway
+from app.mcp.adapters.permission import SourceReadPermissionVerifier
 from app.mcp.adapters.remote import SDKRemoteMCPTransport
 from app.mcp.adapters.routing import ProviderRoutedTransport
 from app.mcp.domain import MCPBindingKind, MCPProvider, MCPReadSourceSystem
@@ -87,6 +91,12 @@ class ApplicationContainer:
     # refuses rather than existing and always failing.
     semantic_index: SemanticIndex | None = None
     engine: Engine | None = None
+    # Absent tant que les ecritures ne sont pas activees. La route existe alors
+    # quand meme et repond 403 avec un code de politique, comme le fait la route
+    # d'assistant quand aucun modele n'est configure : une surface desactivee est
+    # une decision de deploiement, et l'annoncer franchement vaut mieux que de
+    # simuler une absence que la documentation OpenAPI trahirait de toute facon.
+    mutations: ApprovedMutationRunner | None = None
 
 
 def build_container(settings: Settings) -> ApplicationContainer:
@@ -102,7 +112,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
             approvals=ApprovalWorkflow(
                 approval_uow_factory,
                 conversation_repository,
-                NoMutationToolsPin(),
+                _mutation_tool_pin(settings),
                 settings.approval_ttl_seconds,
                 settings.auth_mode,
             ),
@@ -133,7 +143,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
         approvals=ApprovalWorkflow(
                 approval_uow_factory,
                 conversation_repository,
-                NoMutationToolsPin(),
+                _mutation_tool_pin(settings),
                 settings.approval_ttl_seconds,
                 settings.auth_mode,
             ),
@@ -142,6 +152,9 @@ def build_container(settings: Settings) -> ApplicationContainer:
         mcp_reads=mcp_reads,
         agent=_build_agent(settings, audit_writer, mcp_reads, semantic_index),
         semantic_index=semantic_index,
+        mutations=_build_mutations(
+            settings, approval_uow_factory, mcp_reads, session_factory
+        ),
         readiness_probe=lambda: database_is_ready(engine),
         sessions=session_store,
         settings=settings,
@@ -230,6 +243,49 @@ def _offered_systems(settings: Settings) -> frozenset[MCPReadSourceSystem]:
         MCPReadSourceSystem.FIGMA: settings.mcp_figma_enabled,
     }
     return frozenset(systeme for systeme, actif in actifs.items() if actif)
+
+
+def _mutation_tool_pin(settings: Settings):
+    """L'epinglage suit la configuration, pas la disponibilite du registre.
+
+    Un deploiement qui n'ouvre pas les ecritures refuse par le nom de son adaptateur
+    plutot que par un registre qui se trouverait vide : l'intention se lit, au lieu de
+    se deduire d'une collection.
+    """
+
+    if not settings.mcp_mutations_enabled:
+        return NoMutationToolsPin()
+    return RegistryMutationToolPin()
+
+
+def _build_mutations(
+    settings: Settings,
+    approval_uow_factory,
+    mcp_reads: MCPReadWorkflow,
+    session_factory,
+) -> ApprovedMutationRunner | None:
+    """Le chemin d'ecriture, monte seulement quand la configuration l'autorise.
+
+    La verification des preconditions n'est pas refaite ici : Settings les a deja
+    tranchees, et deux endroits qui verifient la meme regle finissent par en verifier
+    deux differentes.
+    """
+
+    if not settings.mcp_mutations_enabled:
+        return None
+    return ApprovedMutationRunner(
+        unit_of_work=approval_uow_factory,
+        gateway=MCPMutationGateway(
+            settings=settings,
+            transport=mcp_reads._transport,
+        ),
+        # Le meme workflow de lecture que celui de l'assistant : la revalidation juste
+        # avant l'ecriture doit passer par les memes autorisations et laisser la meme
+        # trace qu'une lecture ordinaire.
+        permission_verifier=SourceReadPermissionVerifier(reads=mcp_reads),
+        tool_pin=RegistryMutationToolPin(),
+        idempotency=PostgresMutationIdempotencyStore(session_factory),
+    )
 
 
 def _build_llm_provider(settings: Settings) -> LLMProvider | None:
