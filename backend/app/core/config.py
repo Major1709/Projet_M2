@@ -251,7 +251,25 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_runtime_adapters(self) -> "Settings":
         if self.mcp_mutations_enabled:
-            raise ValueError("MCP mutations cannot be enabled by this release")
+            # Le refus inconditionnel est leve, remplace par les conditions qui le
+            # justifiaient. Chacune est une dependance reelle du chemin d'ecriture, et
+            # non une precaution : sans elles, l'ecriture s'execute quand meme mais
+            # sans ce qui la rend rattrapable.
+            #
+            # Les lectures, parce que la revalidation de permission juste avant une
+            # ecriture EST une lecture. Sans elle, on ecrit sans avoir reconfirme que
+            # la cible existe et que le mandat la voit encore.
+            if not self.mcp_reads_enabled:
+                raise ValueError("MCP mutations require PKA_MCP_READS_ENABLED")
+            # PostgreSQL, parce que la reservation d'idempotence et l'audit doivent
+            # survivre au processus. Un depot en memoire perd, au redemarrage, la
+            # seule trace disant sous quelle cle une ecriture est partie -- et c'est
+            # exactement ce qu'on va chercher quand un appel s'est interrompu.
+            if self.repository_backend != "postgres":
+                raise ValueError("MCP mutations require the PostgreSQL repository")
+            # Un liant Jira, sinon aucune ecriture Jira ne peut designer son site.
+            if self.mcp_jira_enabled and self.mcp_atlassian_jira_cloud_id is None:
+                raise ValueError("MCP mutations require PKA_MCP_ATLASSIAN_JIRA_CLOUD_ID")
         if self.mcp_reads_enabled and self.repository_backend != "postgres":
             raise ValueError("Enabled MCP reads require the PostgreSQL audit repository")
 
