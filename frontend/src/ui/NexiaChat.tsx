@@ -15,10 +15,17 @@ import {
   type NexiaGateway,
   nexiaApi,
 } from "@/adapters/nexia-api";
+import { MutationApprovalPreview } from "@/ui/MutationApprovalPreview";
 
 type ChatMessage =
   | { id: string; role: "user"; text: string }
-  | { id: string; role: "assistant"; text: string; sources: NexiaAnswer["sources"] };
+  | {
+      id: string;
+      role: "assistant";
+      text: string;
+      sources: NexiaAnswer["sources"];
+      approval?: NexiaAnswer["approval"];
+    };
 
 const MAX_QUESTION_LENGTH = 4000;
 
@@ -185,6 +192,7 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
           role: "assistant",
           text: answer.answer,
           sources: answer.sources,
+          approval: answer.approval,
         },
       ]);
     } catch (caught) {
@@ -316,7 +324,13 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
                 <div className={`message-avatar message-avatar--${message.role}`} aria-hidden="true">
                   {message.role === "user" ? "U" : "N"}
                 </div>
-                <div className="message-content">
+                <div
+                  className={`message-content ${
+                    message.role === "assistant" && message.approval
+                      ? "message-content--approval"
+                      : ""
+                  }`}
+                >
                   <p className={`message-bubble message-bubble--${message.role}`}>{message.text}</p>
                   {message.role === "assistant" && message.sources.length > 0 ? (
                     <div className="message-sources" aria-label="Sources de la réponse">
@@ -363,6 +377,13 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
                         })}
                       </ul>
                     </div>
+                  ) : null}
+                  {message.role === "assistant" && message.approval ? (
+                    <MutationApprovalPreview
+                      approval={message.approval}
+                      gateway={gateway}
+                      onSessionRequired={() => setIsDisconnected(true)}
+                    />
                   ) : null}
                 </div>
               </article>

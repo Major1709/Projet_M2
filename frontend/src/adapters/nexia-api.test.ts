@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   NexiaApiError,
   askQuestion,
+  approveActionProposal,
   createConversation,
+  createActionProposal,
+  executeActionProposal,
+  rejectActionProposal,
   signOut,
 } from "./nexia-api";
 
@@ -133,6 +137,53 @@ describe("askQuestion", () => {
       status: 200,
     });
   });
+
+  it("projette une proposition d’écriture pour l’aperçu inline du chat", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      text: "J’ai préparé le ticket, vérifiez la proposition.",
+      sources: [],
+      approval: {
+        source_system: "jira",
+        action_class: "CREATE",
+        target: {
+          source_system: "jira",
+          resource_type: "User Story",
+          container_id: "PKA",
+        },
+        payload: {
+          projectKey: "PKA",
+          summary: "Stabiliser le viewport du chat",
+          description: "Conserver la zone de saisie visible.",
+        },
+        expiresInMinutes: 14,
+      },
+    }));
+
+    await expect(askQuestion({
+      question: "Prépare un ticket Jira",
+      correlationId: "correlation-123",
+      conversationId: "conversation-123",
+    })).resolves.toEqual({
+      answer: "J’ai préparé le ticket, vérifiez la proposition.",
+      sources: [],
+      approval: {
+        target: "jira",
+        action: "Créer un ticket",
+        actionClass: "CREATE",
+        destination: "Jira · PKA",
+        objectType: "User Story",
+        project: "PKA",
+        title: "Stabiliser le viewport du chat",
+        description: "Conserver la zone de saisie visible.",
+        payload: {
+          projectKey: "PKA",
+          summary: "Stabiliser le viewport du chat",
+          description: "Conserver la zone de saisie visible.",
+        },
+        expiresInMinutes: 14,
+      },
+    });
+  });
 });
 
 describe("signOut", () => {
@@ -146,6 +197,141 @@ describe("signOut", () => {
     expect(init).toMatchObject({ method: "POST", credentials: "include" });
     expect(init?.body).toBeUndefined();
     expect(init?.headers).toEqual({ Accept: "application/json" });
+  });
+});
+
+describe("actions d’écriture", () => {
+  const proposalResponse = {
+    id: "proposal-123",
+    decision_token: "decision-token-123456789012345",
+    version: 1,
+    state: "PENDING_APPROVAL",
+    source_system: "jira",
+    action_class: "CREATE",
+    tool_name: "createJiraIssue",
+    target: { source_system: "jira", resource_type: "User Story", container_id: "PKA" },
+    payload: {
+      projectKey: "PKA",
+      issueTypeName: "User Story",
+      summary: "Stabiliser le viewport du chat",
+      description: "Conserver la zone de saisie visible.",
+      ignored: "ne doit pas être affiché",
+    },
+    explanation: "La demande explicite de l’utilisateur correspond à cette création.",
+  };
+
+  it("crée une proposition et conserve le decision_token côté client", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(proposalResponse, 201));
+
+    await expect(createActionProposal({
+      conversationId: "conversation-123",
+      sourceSystem: "jira",
+      toolName: "createJiraIssue",
+      actionClass: "CREATE",
+      target: {
+        source_system: "jira",
+        resource_type: "User Story",
+        container_id: "PKA",
+      },
+      payload: {
+        projectKey: "PKA",
+        issueTypeName: "User Story",
+        summary: "Stabiliser le viewport du chat",
+        description: "Conserver la zone de saisie visible.",
+      },
+      explanation: "La demande explicite de l’utilisateur correspond à cette création.",
+      correlationId: "correlation-123",
+    })).resolves.toMatchObject({
+      proposalId: "proposal-123",
+      decisionToken: "decision-token-123456789012345",
+      version: 1,
+      state: "PENDING_APPROVAL",
+      payload: {
+        projectKey: "PKA",
+        issueTypeName: "User Story",
+        summary: "Stabiliser le viewport du chat",
+        description: "Conserver la zone de saisie visible.",
+      },
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init).toMatchObject({
+      method: "POST",
+      credentials: "include",
+      body: JSON.stringify({
+        conversation_id: "conversation-123",
+        source_system: "jira",
+        tool_name: "createJiraIssue",
+        action_class: "CREATE",
+        target: {
+          source_system: "jira",
+          resource_type: "User Story",
+          container_id: "PKA",
+        },
+        payload: {
+          projectKey: "PKA",
+          issueTypeName: "User Story",
+          summary: "Stabiliser le viewport du chat",
+          description: "Conserver la zone de saisie visible.",
+        },
+        explanation: "La demande explicite de l’utilisateur correspond à cette création.",
+        correlation_id: "correlation-123",
+      }),
+    });
+  });
+
+  it("envoie la version attendue et le token pour approuver ou refuser", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ ...proposalResponse, version: 2, state: "APPROVED" }))
+      .mockResolvedValueOnce(jsonResponse({ ...proposalResponse, version: 2, state: "REJECTED" }));
+
+    await approveActionProposal({
+      proposalId: "proposal/123",
+      expectedVersion: 1,
+      decisionToken: "decision-token-123456789012345",
+    });
+    await rejectActionProposal({
+      proposalId: "proposal/123",
+      expectedVersion: 2,
+      decisionToken: "decision-token-123456789012345",
+      reason: "Besoin clarifié",
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toBe("https://api.nexia.test/api/actions/proposal%2F123/approve");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        expected_version: 1,
+        decision_token: "decision-token-123456789012345",
+      }),
+    });
+    expect(fetchMock.mock.calls[1][0]).toBe("https://api.nexia.test/api/actions/proposal%2F123/reject");
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        expected_version: 2,
+        decision_token: "decision-token-123456789012345",
+        reason: "Besoin clarifié",
+      }),
+    });
+  });
+
+  it("n’autorise pas une nouvelle tentative après un résultat d’exécution inconnu", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      detail: {
+        code: "MUTATION_OUTCOME_UNKNOWN",
+        message: "Détail interne à ne pas afficher",
+      },
+    }, 502));
+
+    await expect(executeActionProposal({
+      proposalId: "proposal-123",
+      expectedVersion: 2,
+    })).rejects.toEqual(expect.objectContaining({
+      code: "MUTATION_OUTCOME_UNKNOWN",
+      message: "L’écriture a été envoyée, mais sa confirmation est inconnue. Vérifiez dans Jira avant toute nouvelle tentative.",
+      status: 502,
+    }));
   });
 });
 
