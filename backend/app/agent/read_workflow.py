@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Collection, Sequence
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
@@ -30,7 +31,11 @@ from app.agent.errors import AgentAuditUnavailable
 from app.agent.markup import reduce_markup
 from app.agent.untrusted import neutralise
 from app.agent.untrusted import wrap as wrap_untrusted
-from app.approvals.domain import ActionProposalCreate, ActionTarget
+from app.approvals.domain import (
+    ActionProposalCreate,
+    ActionProposalState,
+    ActionTarget,
+)
 from app.approvals.workflow import ApprovalWorkflow
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
@@ -282,11 +287,16 @@ class AgentAnswer(BaseModel):
     # workflow's provenance, never from the model's account of what it read -- a
     # model that hallucinates a citation cannot make one appear here.
     sources: tuple[AgentSource, ...] = ()
-    # Presente uniquement avec APPROVAL_REQUIRED. Porte ce dont une interface a
-    # besoin pour afficher l'ecran d'approbation, jeton de decision compris -- celui-ci
-    # n'est rendu qu'ici et nulle part ailleurs, donc un client qui ne le garde pas ne
-    # pourra plus approuver.
-    proposal: "ProposedMutationView | None" = None
+    # Presente uniquement avec APPROVAL_REQUIRED. Nommee "approval" et non
+    # "proposal" parce que c'est le nom que le frontend lit deja : les deux cotes ont
+    # ete ecrits en parallele et ont choisi des mots differents, et renommer ici
+    # coutait une ligne la ou renommer la-bas aurait fait retravailler du code deja
+    # eprouve.
+    #
+    # Porte ce dont une interface a besoin pour afficher l'ecran, jeton de decision
+    # compris -- celui-ci n'est rendu qu'ici et nulle part ailleurs, donc un client
+    # qui ne le garde pas ne pourra plus approuver.
+    approval: "ProposedMutationView | None" = None
 
 
 class ProposedMutationView(BaseModel):
@@ -306,6 +316,16 @@ class ProposedMutationView(BaseModel):
     source_system: SourceSystem
     action_class: ToolActionClass
     payload: dict[str, Any]
+    # L'etat pilote ce que l'interface propose : des boutons tant que la proposition
+    # attend, un compte rendu une fois qu'elle est tranchee. Sans lui, une interface
+    # doit deviner, et devinera mal apres un rechargement.
+    state: ActionProposalState
+    # Une proposition expire. L'echeance est envoyee pour que l'interface puisse le
+    # dire avant le clic plutot que de laisser l'utilisateur decouvrir un 410 GONE.
+    expires_at: datetime
+    # Ce que le modele a avance pour justifier l'ecriture, quand il en donne une.
+    # Affichee a part de la charge : c'est son argument, pas un fait.
+    explanation: str | None = None
 
 
 def tool_catalogue(
@@ -687,7 +707,7 @@ class AgentReadWorkflow:
             stop_reason=AgentStopReason.APPROVAL_REQUIRED,
             steps_used=step,
             sources=sources_from(tuple(records)),
-            proposal=ProposedMutationView(
+            approval=ProposedMutationView(
                 id=proposal.id,
                 version=proposal.version,
                 decision_token=issued.decision_token,
@@ -695,6 +715,9 @@ class AgentReadWorkflow:
                 source_system=proposal.source_system,
                 action_class=proposal.action_class,
                 payload=proposal.payload,
+                state=proposal.state,
+                expires_at=proposal.expires_at,
+                explanation=proposal.explanation,
             ),
         )
 

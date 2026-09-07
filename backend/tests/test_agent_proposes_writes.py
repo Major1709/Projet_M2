@@ -111,9 +111,9 @@ async def test_a_write_becomes_a_proposal_and_stops_the_loop() -> None:
 
     assert answer.stop_reason is AgentStopReason.APPROVAL_REQUIRED
     assert answer.text == PROPOSAL_MESSAGE
-    assert answer.proposal is not None
-    assert answer.proposal.tool_name == "createJiraIssue"
-    assert answer.proposal.payload == PAYLOAD
+    assert answer.approval is not None
+    assert answer.approval.tool_name == "createJiraIssue"
+    assert answer.approval.payload == PAYLOAD
     # Un seul appel au modele : la boucle s'arrete, elle ne redemande pas.
     assert len(provider.requests) == 1
 
@@ -130,8 +130,8 @@ async def test_the_decision_token_comes_back_with_the_proposal() -> None:
         question=a_question(a_conversation(repository)), context=CONTEXT
     )
 
-    assert answer.proposal is not None
-    assert len(answer.proposal.decision_token) > 20
+    assert answer.approval is not None
+    assert len(answer.approval.decision_token) > 20
 
 
 @pytest.mark.anyio
@@ -151,8 +151,8 @@ async def test_the_action_class_comes_from_the_contract_and_not_from_the_model()
         question=a_question(a_conversation(repository)), context=CONTEXT
     )
 
-    assert answer.proposal is not None
-    assert answer.proposal.action_class is ToolActionClass.CREATE
+    assert answer.approval is not None
+    assert answer.approval.action_class is ToolActionClass.CREATE
 
 
 @pytest.mark.anyio
@@ -172,8 +172,8 @@ async def test_only_the_first_write_of_a_turn_survives() -> None:
         question=a_question(a_conversation(repository)), context=CONTEXT
     )
 
-    assert answer.proposal is not None
-    assert answer.proposal.payload["summary"] == "premier"
+    assert answer.approval is not None
+    assert answer.approval.payload["summary"] == "premier"
 
 
 @pytest.mark.anyio
@@ -186,7 +186,7 @@ async def test_a_write_outside_a_conversation_is_refused_not_invented() -> None:
 
     answer = await workflow.answer(question=a_question(None), context=CONTEXT)
 
-    assert answer.proposal is None
+    assert answer.approval is None
     assert answer.text == NO_CONVERSATION_MESSAGE
     assert answer.stop_reason is AgentStopReason.ANSWERED
 
@@ -248,3 +248,80 @@ async def test_the_write_tool_is_named_in_the_catalogue_the_model_receives() -> 
     request = provider.requests[0]
     assert "createJiraIssue" in {t["function"]["name"] for t in request.tools}
     assert "createJiraIssue" in request.allowed_tool_names
+
+
+# --- Le contrat de fil, tel que le frontend le lit ---------------------------------
+#
+# Les deux cotes ont ete ecrits en parallele et avaient choisi des noms differents :
+# le backend envoyait "proposal", le frontend lisait "approval". Rien ne cassait --
+# parseApproval recevait undefined et rendait undefined -- et l'ecran d'approbation
+# restait simplement vide. Un desaccord silencieux, trouve en essayant l'interface.
+#
+# Ces tests figent les noms que ``parseApproval`` lit reellement, pour qu'un
+# renommage futur echoue ici plutot que dans l'interface.
+
+
+@pytest.mark.anyio
+async def test_the_wire_field_is_named_approval() -> None:
+    """Le nom que le frontend lit. Nomme "proposal", il redevient invisible."""
+
+    import json
+
+    provider = StubProvider(a_response(a_call()))
+    workflow, repository = workflow_for(provider)
+
+    answer = await workflow.answer(
+        question=a_question(a_conversation(repository)), context=CONTEXT
+    )
+    envoye = json.loads(answer.model_dump_json())
+
+    assert "approval" in envoye
+    assert "proposal" not in envoye
+
+
+@pytest.mark.anyio
+async def test_every_field_the_front_end_reads_is_present() -> None:
+    """Releve dans ``parseApproval`` le 07/09/2026. Un champ absent ne casse rien
+    visiblement : il disparait simplement de l'ecran, ce qui est pire."""
+
+    import json
+
+    provider = StubProvider(a_response(a_call()))
+    workflow, repository = workflow_for(provider)
+
+    answer = await workflow.answer(
+        question=a_question(a_conversation(repository)), context=CONTEXT
+    )
+    approval = json.loads(answer.model_dump_json())["approval"]
+
+    for champ in (
+        "id",
+        "decision_token",
+        "version",
+        "state",
+        "action_class",
+        "tool_name",
+        "payload",
+        "explanation",
+        "expires_at",
+        "source_system",
+    ):
+        assert champ in approval, champ
+
+
+@pytest.mark.anyio
+async def test_the_payload_carries_what_the_approval_screen_displays() -> None:
+    """Le projet et le titre sont ce qui dit a l'humain OU l'ecriture atterrira."""
+
+    import json
+
+    provider = StubProvider(a_response(a_call()))
+    workflow, repository = workflow_for(provider)
+
+    answer = await workflow.answer(
+        question=a_question(a_conversation(repository)), context=CONTEXT
+    )
+    payload = json.loads(answer.model_dump_json())["approval"]["payload"]
+
+    assert payload["projectKey"] == "KAN"
+    assert payload["summary"] == "Le courriel ne part pas"
