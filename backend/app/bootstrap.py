@@ -47,7 +47,7 @@ from app.mcp.adapters.grants import (
 )
 from app.mcp.adapters.remote import SDKRemoteMCPTransport
 from app.mcp.adapters.routing import ProviderRoutedTransport
-from app.mcp.domain import MCPBindingKind, MCPProvider
+from app.mcp.domain import MCPBindingKind, MCPProvider, MCPReadSourceSystem
 from app.mcp.read_workflow import MCPReadWorkflow
 from app.mcp.registry import (
     ATLASSIAN_TOKEN_ENDPOINT,
@@ -210,6 +210,28 @@ def _build_semantic_index(settings: Settings, store: EmbeddingStore) -> Semantic
     )
 
 
+def _offered_systems(settings: Settings) -> frozenset[MCPReadSourceSystem]:
+    """Les connecteurs qu'il est honnete de proposer au modele.
+
+    Derive des memes drapeaux qui autorisent une lecture, et d'eux seuls : deux
+    listes decrivant la meme decision divergent, et celle qui diverge ici offrirait
+    un outil que l'autre refuse.
+
+    ATLASSIAN designe les outils communs aux deux produits -- l'identite du compte et
+    la liste des ressources accessibles -- et suit donc le drapeau du socle, pas celui
+    d'un produit. Les rattacher a Jira les aurait fait disparaitre d'un deploiement
+    Confluence seul.
+    """
+
+    actifs = {
+        MCPReadSourceSystem.ATLASSIAN: settings.mcp_atlassian_enabled,
+        MCPReadSourceSystem.JIRA: settings.mcp_jira_enabled,
+        MCPReadSourceSystem.CONFLUENCE: settings.mcp_confluence_enabled,
+        MCPReadSourceSystem.FIGMA: settings.mcp_figma_enabled,
+    }
+    return frozenset(systeme for systeme, actif in actifs.items() if actif)
+
+
 def _build_llm_provider(settings: Settings) -> LLMProvider | None:
     """The one place a provider is chosen, so the choice is readable in one screen.
 
@@ -254,6 +276,10 @@ def _build_agent(
             audit_sink=audit_sink,
         ),
         reads=mcp_reads,
+        # Filtre ce qui est PRESENTE, jamais ce qui est autorise : le registre reste
+        # l'autorite, et un outil cache ici aurait de toute facon ete refuse par son
+        # connecteur eteint.
+        offered_systems=_offered_systems(settings),
         # The same sink the provider and the reads write to, so a question and
         # everything it caused share one trail.
         audit_sink=audit_sink,

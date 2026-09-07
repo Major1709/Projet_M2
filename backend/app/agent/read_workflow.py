@@ -16,7 +16,7 @@ a read of a source the delegated credential already covers.
 import hashlib
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
@@ -33,7 +33,7 @@ from app.agent.untrusted import wrap as wrap_untrusted
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
 from app.core.identity import SecurityContext
-from app.mcp.domain import MCPReadToolCall, ToolActionClass
+from app.mcp.domain import MCPReadSourceSystem, MCPReadToolCall, ToolActionClass
 from app.mcp.errors import (
     MCPInputRejected,
     MCPReadError,
@@ -256,14 +256,42 @@ class AgentAnswer(BaseModel):
     sources: tuple[AgentSource, ...] = ()
 
 
-def tool_catalogue(registry: MCPToolRegistry) -> tuple[dict[str, Any], ...]:
+def tool_catalogue(
+    registry: MCPToolRegistry,
+    offered: Collection[MCPReadSourceSystem] | None = None,
+) -> tuple[dict[str, Any], ...]:
     """Describe the approved reads to the model, from public schemas only.
 
     ``public_input_schema`` rather than ``provider_input_schema``: the bindings --
     cloud ids, sites -- are injected server-side after the model has chosen, so the
     catalogue reveals no tenant and offers no argument that could select one.
+
+    ``offered`` restreint ce qui est PRESENTE, jamais ce qui est autorise. Le registre
+    reste l'autorite : une lecture vers un connecteur eteint est refusee par lui, avec
+    sa raison, et ce filtre ne peut donc rien elargir -- au pire il cache un outil qui
+    aurait de toute facon echoue.
+
+    Ce qui est en jeu n'est pas la propriete mais le cout et la franchise. Les quatre
+    outils Figma etaient offerts alors que le connecteur est eteint : environ 425
+    tokens payes a chaque appel, sur un prompt qui en coute 2 065, et surtout un choix
+    propose au modele qui ne pouvait qu'echouer. Lui offrir une porte fermee n'est pas
+    neutre, c'est l'inviter a la prendre.
+
+    Le type est celui que porte le contrat -- ``MCPReadSourceSystem``, qui compte un
+    ``ATLASSIAN`` de plus que ``SourceSystem`` pour les outils communs aux deux
+    produits. La distinction n'est pas cosmetique : les deux enumerations sont des
+    ``StrEnum``, donc un filtre ecrit sur la mauvaise laissait passer jira et
+    confluence par simple egalite de chaines, et faisait tomber en silence les outils
+    Atlassian communs.
+
+    ``None`` offre tout, ce qui est le comportement d'avant ce parametre.
     """
 
+    contracts = (
+        registry.contracts
+        if offered is None
+        else tuple(c for c in registry.contracts if c.source_system in offered)
+    )
     return tuple(
         {
             "type": "function",
@@ -273,7 +301,7 @@ def tool_catalogue(registry: MCPToolRegistry) -> tuple[dict[str, Any], ...]:
                 "parameters": contract.public_input_schema,
             },
         }
-        for contract in registry.contracts
+        for contract in contracts
     )
 
 
@@ -305,6 +333,7 @@ class AgentReadWorkflow:
         reads: MCPReadWorkflow,
         audit_sink: AuditSink,
         registry: MCPToolRegistry | None = None,
+        offered_systems: Collection[MCPReadSourceSystem] | None = None,
         max_reads_per_question: int = DEFAULT_MAX_READS_PER_QUESTION,
         semantic_index: SemanticIndex | None = None,
         retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
@@ -331,7 +360,12 @@ class AgentReadWorkflow:
         self._audit_sink = audit_sink
         self._registry = registry or MCPToolRegistry()
         self._contracts = _index_by_tool_name(self._registry)
-        self._catalogue = tool_catalogue(self._registry)
+        # Le catalogue est filtre, pas le registre : ``self._contracts`` et
+        # ``_allowed_tool_names`` continuent de couvrir tout ce que le registre
+        # autorise. Un modele qui nommerait un outil non offert est donc encore
+        # reconnu, et refuse par le connecteur eteint avec sa vraie raison, plutot
+        # que traite en outil inconnu.
+        self._catalogue = tool_catalogue(self._registry, offered_systems)
         self._allowed_tool_names = tuple(self._contracts)
 
     async def answer(
