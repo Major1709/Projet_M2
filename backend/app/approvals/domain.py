@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.mcp.domain import SourceSystem, ToolActionClass
+from app.mcp.domain import MCPExecutionResult, SourceSystem, ToolActionClass
 
 
 def utc_now() -> datetime:
@@ -364,3 +364,50 @@ def canonical_json(value: Any) -> str:
 
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+class MutationExecution(BaseModel):
+    """Ce qu'un client envoie pour depenser une approbation.
+
+    ``expected_version`` n'est pas une formalite. Entre le moment ou une interface
+    affiche une proposition et celui ou quelqu'un clique, elle a pu etre revisee,
+    rejetee ou deja executee. Sans cette version, le second clic depenserait une
+    approbation qui n'est plus celle qui a ete montree -- et la version est le seul
+    element que le client possede deja, donc l'exiger ne lui coute rien.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    expected_version: int = Field(ge=0)
+
+
+class MutationExecutionView(BaseModel):
+    """L'issue d'une ecriture, telle qu'une interface peut l'afficher.
+
+    Ne porte ni la reponse du fournisseur ni la cle d'idempotence. La premiere est du
+    contenu de source, qui a sa place dans une lecture tracee et pas dans le retour
+    d'une ecriture ; la seconde est un detail de reprise cote serveur, et un client
+    qui la verrait finirait par la renvoyer.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    succeeded: bool
+    partial: bool
+    # La cle du ticket cree, quand le fournisseur la nomme. Vide n'est pas un echec :
+    # rien n'oblige un fournisseur a nommer ce qu'il vient de creer.
+    external_ids: tuple[str, ...]
+    error_code: str | None
+    # Deja destinee a etre lue par un humain, et deja depourvue de detail interne :
+    # elle vient de la passerelle, qui ne met jamais la reponse du fournisseur dedans.
+    safe_message: str | None
+
+    @classmethod
+    def from_domain(cls, result: MCPExecutionResult) -> "MutationExecutionView":
+        return cls(
+            succeeded=result.succeeded,
+            partial=result.partial,
+            external_ids=result.external_ids,
+            error_code=result.error_code,
+            safe_message=result.safe_message,
+        )
