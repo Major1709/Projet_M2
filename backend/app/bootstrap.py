@@ -91,9 +91,11 @@ class ApplicationContainer:
     # refuses rather than existing and always failing.
     semantic_index: SemanticIndex | None = None
     engine: Engine | None = None
-    # Absent tant que les ecritures ne sont pas activees, et c'est le comportement
-    # voulu : une route de mutation qui existe et refuse toujours apprend a un
-    # attaquant que la surface est la. Absente, elle n'apprend rien.
+    # Absent tant que les ecritures ne sont pas activees. La route existe alors
+    # quand meme et repond 403 avec un code de politique, comme le fait la route
+    # d'assistant quand aucun modele n'est configure : une surface desactivee est
+    # une decision de deploiement, et l'annoncer franchement vaut mieux que de
+    # simuler une absence que la documentation OpenAPI trahirait de toute facon.
     mutations: ApprovedMutationRunner | None = None
 
 
