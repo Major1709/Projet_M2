@@ -52,6 +52,7 @@ from app.mcp.adapters.permission import SourceReadPermissionVerifier
 from app.mcp.adapters.remote import SDKRemoteMCPTransport
 from app.mcp.adapters.routing import ProviderRoutedTransport
 from app.mcp.domain import MCPBindingKind, MCPProvider, MCPReadSourceSystem
+from app.mcp.mutation_registry import MCPMutationRegistry
 from app.mcp.read_workflow import MCPReadWorkflow
 from app.mcp.registry import (
     ATLASSIAN_TOKEN_ENDPOINT,
@@ -108,19 +109,20 @@ def build_container(settings: Settings) -> ApplicationContainer:
         mcp_reads = _build_mcp_read_workflow(settings, approval_uow_factory.audit)
         semantic_index = _build_semantic_index(settings, InMemoryEmbeddingStore())
         grants: DelegatedGrantSink = _build_grant_sink(settings, None)
+        approvals = ApprovalWorkflow(
+            approval_uow_factory,
+            conversation_repository,
+            _mutation_tool_pin(settings),
+            settings.approval_ttl_seconds,
+            settings.auth_mode,
+        )
         return ApplicationContainer(
-            approvals=ApprovalWorkflow(
-                approval_uow_factory,
-                conversation_repository,
-                _mutation_tool_pin(settings),
-                settings.approval_ttl_seconds,
-                settings.auth_mode,
-            ),
+            approvals=approvals,
             audit=approval_uow_factory.audit,
             conversations=ConversationWorkflow(conversation_repository, message_repository),
             mcp_reads=mcp_reads,
             agent=_build_agent(
-                settings, approval_uow_factory.audit, mcp_reads, semantic_index
+                settings, approval_uow_factory.audit, mcp_reads, semantic_index, approvals
             ),
             semantic_index=semantic_index,
             readiness_probe=lambda: True,
@@ -139,18 +141,19 @@ def build_container(settings: Settings) -> ApplicationContainer:
     mcp_reads = _build_mcp_read_workflow(settings, audit_writer)
     semantic_index = _build_semantic_index(settings, PostgresEmbeddingStore(session_factory))
     grants = _build_grant_sink(settings, session_factory)
+    approvals = ApprovalWorkflow(
+        approval_uow_factory,
+        conversation_repository,
+        _mutation_tool_pin(settings),
+        settings.approval_ttl_seconds,
+        settings.auth_mode,
+    )
     return ApplicationContainer(
-        approvals=ApprovalWorkflow(
-                approval_uow_factory,
-                conversation_repository,
-                _mutation_tool_pin(settings),
-                settings.approval_ttl_seconds,
-                settings.auth_mode,
-            ),
+        approvals=approvals,
         audit=audit_writer,
         conversations=ConversationWorkflow(conversation_repository, message_repository),
         mcp_reads=mcp_reads,
-        agent=_build_agent(settings, audit_writer, mcp_reads, semantic_index),
+        agent=_build_agent(settings, audit_writer, mcp_reads, semantic_index, approvals),
         semantic_index=semantic_index,
         mutations=_build_mutations(
             settings, approval_uow_factory, mcp_reads, session_factory
@@ -288,6 +291,17 @@ def _build_mutations(
     )
 
 
+def _writes_are_open(settings: Settings, approvals: ApprovalWorkflow | None) -> bool:
+    """Les ecritures sont-elles reellement proposables.
+
+    Les deux conditions comptent, et separement : la configuration dit ce que le
+    deploiement autorise, l'atelier dit ce que le conteneur sait recevoir. Un seul des
+    deux suffirait a offrir au modele un outil dont l'appel se perdrait.
+    """
+
+    return settings.mcp_mutations_enabled and approvals is not None
+
+
 def _build_llm_provider(settings: Settings) -> LLMProvider | None:
     """The one place a provider is chosen, so the choice is readable in one screen.
 
@@ -318,6 +332,7 @@ def _build_agent(
     audit_sink: AuditSink,
     mcp_reads: MCPReadWorkflow,
     semantic_index: SemanticIndex | None = None,
+    approvals: ApprovalWorkflow | None = None,
 ) -> AgentReadWorkflow | None:
     provider = _build_llm_provider(settings)
     if provider is None:
@@ -336,6 +351,12 @@ def _build_agent(
         # l'autorite, et un outil cache ici aurait de toute facon ete refuse par son
         # connecteur eteint.
         offered_systems=_offered_systems(settings),
+        # Les ecritures ne sont offertes au modele que si le deploiement les autorise
+        # ET si un atelier d'approbation existe pour les recevoir. Les deux vont
+        # ensemble : offrir un outil que personne ne peut transformer en proposition
+        # ferait promettre au modele une action qui n'arriverait jamais.
+        mutations=MCPMutationRegistry() if _writes_are_open(settings, approvals) else None,
+        approvals=approvals if _writes_are_open(settings, approvals) else None,
         # The same sink the provider and the reads write to, so a question and
         # everything it caused share one trail.
         audit_sink=audit_sink,

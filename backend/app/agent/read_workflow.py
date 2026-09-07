@@ -30,16 +30,24 @@ from app.agent.errors import AgentAuditUnavailable
 from app.agent.markup import reduce_markup
 from app.agent.untrusted import neutralise
 from app.agent.untrusted import wrap as wrap_untrusted
+from app.approvals.domain import ActionProposalCreate, ActionTarget
+from app.approvals.workflow import ApprovalWorkflow
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
 from app.core.identity import SecurityContext
-from app.mcp.domain import MCPReadSourceSystem, MCPReadToolCall, ToolActionClass
+from app.mcp.domain import (
+    MCPReadSourceSystem,
+    MCPReadToolCall,
+    SourceSystem,
+    ToolActionClass,
+)
 from app.mcp.errors import (
     MCPInputRejected,
     MCPReadError,
     MCPRemoteToolFailure,
     MCPResponseTooLarge,
 )
+from app.mcp.mutation_registry import MCPMutationRegistry
 from app.mcp.read_workflow import MCPReadWorkflow
 from app.mcp.registry import MCPToolRegistry, ToolContract
 from app.semantics.workflow import SemanticIndex
@@ -223,6 +231,26 @@ class PriorTurn(BaseModel):
 class AgentStopReason(StrEnum):
     ANSWERED = "answered"
     STEP_LIMIT_REACHED = "step_limit_reached"
+    # La boucle s'est arretee parce qu'une ecriture a ete demandee. Ce n'est ni un
+    # succes ni un echec : c'est une question posee a un humain, et rien ne bougera
+    # tant qu'il n'aura pas repondu.
+    APPROVAL_REQUIRED = "approval_required"
+
+
+# Ce que le modele recoit quand il propose une ecriture. Ecrit au passe accompli --
+# la proposition existe -- et sans promesse : elle n'a pas ete executee.
+PROPOSAL_MESSAGE = (
+    "J'ai prepare cette action. Elle attend ton approbation et ne sera pas executee "
+    "avant que tu l'aies validee."
+)
+
+# Quand une ecriture est demandee hors d'un fil. Une proposition appartient a une
+# conversation : c'est ce qui permet de la retrouver, d'en verifier le proprietaire
+# et de l'afficher au bon endroit.
+NO_CONVERSATION_MESSAGE = (
+    "Cette action doit etre proposee depuis une conversation. Reformule ta demande "
+    "dans un fil pour que je puisse te la soumettre."
+)
 
 
 class AgentQuestion(BaseModel):
@@ -254,6 +282,30 @@ class AgentAnswer(BaseModel):
     # workflow's provenance, never from the model's account of what it read -- a
     # model that hallucinates a citation cannot make one appear here.
     sources: tuple[AgentSource, ...] = ()
+    # Presente uniquement avec APPROVAL_REQUIRED. Porte ce dont une interface a
+    # besoin pour afficher l'ecran d'approbation, jeton de decision compris -- celui-ci
+    # n'est rendu qu'ici et nulle part ailleurs, donc un client qui ne le garde pas ne
+    # pourra plus approuver.
+    proposal: "ProposedMutationView | None" = None
+
+
+class ProposedMutationView(BaseModel):
+    """Une proposition d'ecriture, telle qu'une interface la recoit.
+
+    Volontairement plate et minimale. Elle ne porte pas l'etat ni les empreintes
+    internes : ce qu'un humain doit voir pour decider, c'est l'outil, la cible et la
+    charge, pas la mecanique qui les encadre.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    version: int
+    decision_token: str
+    tool_name: str
+    source_system: SourceSystem
+    action_class: ToolActionClass
+    payload: dict[str, Any]
 
 
 def tool_catalogue(
@@ -305,6 +357,41 @@ def tool_catalogue(
     )
 
 
+def _mutation_catalogue(
+    registry: "MCPMutationRegistry | None",
+    offered: Collection[MCPReadSourceSystem] | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Les ecritures declarees, presentees au modele comme des outils ordinaires.
+
+    Le modele n'a pas a savoir qu'une ecriture est speciale : c'est la boucle qui
+    l'arrete et un humain qui tranche. Lui expliquer dans une description qu'il
+    "propose seulement" l'inviterait a raisonner sur la garantie plutot qu'a s'en
+    remettre a elle -- et la garantie ne vient pas de sa cooperation.
+
+    La description dit en revanche ce qui est vrai et utile : l'action attend une
+    approbation. Un modele qui l'ignore ne peut rien forcer ; un modele qui la lit
+    saura le dire a l'utilisateur au lieu d'annoncer un ticket cree.
+    """
+
+    if registry is None:
+        return ()
+    return tuple(
+        {
+            "type": "function",
+            "function": {
+                "name": contract.tool_name,
+                "description": (
+                    f"Ecriture {contract.source_system.value} : {contract.tool_name}. "
+                    "Soumise a l'approbation d'un humain avant execution."
+                ),
+                "parameters": contract.public_input_schema,
+            },
+        }
+        for contract in registry.contracts
+        if offered is None or contract.source_system in offered
+    )
+
+
 def _index_by_tool_name(registry: MCPToolRegistry) -> dict[str, ToolContract]:
     """Map a bare tool name back to its contract, and refuse an ambiguous one.
 
@@ -334,6 +421,13 @@ class AgentReadWorkflow:
         audit_sink: AuditSink,
         registry: MCPToolRegistry | None = None,
         offered_systems: Collection[MCPReadSourceSystem] | None = None,
+        # Absents quand le deploiement n'ouvre pas les ecritures. Les deux vont
+        # ensemble : un registre sans workflow offrirait au modele des outils que
+        # personne ne peut transformer en proposition, et un workflow sans registre
+        # n'aurait rien a proposer. L'un sans l'autre est une erreur de cablage, pas
+        # une configuration.
+        mutations: "MCPMutationRegistry | None" = None,
+        approvals: "ApprovalWorkflow | None" = None,
         max_reads_per_question: int = DEFAULT_MAX_READS_PER_QUESTION,
         semantic_index: SemanticIndex | None = None,
         retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
@@ -365,8 +459,20 @@ class AgentReadWorkflow:
         # autorise. Un modele qui nommerait un outil non offert est donc encore
         # reconnu, et refuse par le connecteur eteint avec sa vraie raison, plutot
         # que traite en outil inconnu.
-        self._catalogue = tool_catalogue(self._registry, offered_systems)
-        self._allowed_tool_names = tuple(self._contracts)
+        if (mutations is None) != (approvals is None):
+            raise ValueError("A mutation registry and an approval workflow go together")
+        self._mutations = mutations
+        self._approvals = approvals
+        self._mutation_contracts = (
+            {c.tool_name: c for c in mutations.contracts} if mutations is not None else {}
+        )
+        self._catalogue = tool_catalogue(self._registry, offered_systems) + _mutation_catalogue(
+            mutations, offered_systems
+        )
+        # Les ecritures entrent dans les noms autorises : sans cela l'adaptateur
+        # journalise "outil non offert" a chaque proposition, et le modele recevrait
+        # un signal disant qu'il a invente un nom qu'on lui a pourtant montre.
+        self._allowed_tool_names = tuple(self._contracts) + tuple(self._mutation_contracts)
 
     async def answer(
         self,
@@ -433,6 +539,26 @@ class AgentReadWorkflow:
             # passed the adapter's checks, and nothing the provider sent that we
             # never looked at.
             messages.append(self._assistant_turn(response.text, response.tool_calls))
+
+            # Une ecriture arrete la boucle, immediatement et avant toute lecture de
+            # ce tour. Continuer laisserait le modele enchainer plusieurs ecritures
+            # sur une seule question, alors que chacune doit etre vue et approuvee
+            # separement. La premiere l'emporte : s'il en a propose plusieurs, les
+            # autres n'ont jamais existe -- il les reproposera au tour suivant s'il
+            # les juge encore utiles, et l'humain aura vu la premiere entre-temps.
+            mutation = next(
+                (c for c in response.tool_calls if c.tool_name in self._mutation_contracts),
+                None,
+            )
+            if mutation is not None:
+                return await self._propose(
+                    call=mutation,
+                    question=question,
+                    context=context,
+                    step=step,
+                    records=records,
+                )
+
             for call in response.tool_calls:
                 if attempted_reads >= self._max_reads_per_question:
                     await self._record_skip(
@@ -482,6 +608,95 @@ class AgentReadWorkflow:
             "name": call.tool_name,
             "content": observation,
         }
+
+    async def _propose(
+        self,
+        *,
+        call: ProposedToolCall,
+        question: AgentQuestion,
+        context: SecurityContext,
+        step: int,
+        records: list[ReadRecord],
+    ) -> AgentAnswer:
+        """Transformer un appel d'ecriture en proposition, et s'arreter la.
+
+        Le modele choisit l'outil et les arguments ; il ne choisit rien d'autre. La
+        classe d'action et le systeme source viennent du contrat, jamais de ce qu'il
+        a renvoye -- c'est la meme regle que pour les lectures, et elle porte plus
+        loin ici : un modele qui pourrait nommer sa propre classe d'action pourrait
+        faire passer une suppression pour une creation dans l'ecran d'approbation.
+
+        Les sources deja consultees sont conservees. La proposition est souvent le
+        resultat de lectures -- "cree un ticket a partir de ce que dit KAN-2" -- et
+        les perdre priverait l'humain de ce sur quoi elle se fonde.
+        """
+
+        contract = self._mutation_contracts[call.tool_name]
+        if self._approvals is None:  # pragma: no cover - garanti par le constructeur
+            raise RuntimeError("A mutation was offered without an approval workflow")
+
+        if question.conversation_id is None:
+            # Refuse plutot que rattache a un fil invente. Une proposition appartient
+            # a une conversation : c'est ce qui permet d'en verifier le proprietaire.
+            logger.info(
+                "A write was proposed outside a conversation",
+                extra={
+                    "correlation_id": question.correlation_id,
+                    "tool_name": call.tool_name,
+                },
+            )
+            return AgentAnswer(
+                text=NO_CONVERSATION_MESSAGE,
+                stop_reason=AgentStopReason.ANSWERED,
+                steps_used=step,
+                sources=sources_from(tuple(records)),
+            )
+
+        issued = self._approvals.propose(
+            ActionProposalCreate(
+                conversation_id=question.conversation_id,
+                source_system=contract.source_system,
+                tool_name=contract.tool_name,
+                action_class=contract.action_class,
+                target=ActionTarget(
+                    source_system=contract.source_system,
+                    resource_type="issue",
+                    # Le conteneur et le titre sont tires de la charge validee par le
+                    # schema public, donc de valeurs que l'humain verra aussi. Aucune
+                    # information nouvelle n'entre ici.
+                    container_id=_as_text(call.arguments.get("projectKey")),
+                    title=_as_text(call.arguments.get("summary")),
+                ),
+                payload=call.arguments,
+                explanation=None,
+                correlation_id=question.correlation_id,
+            ),
+            context,
+        )
+        proposal = issued.proposal
+        logger.info(
+            "A write is waiting for approval",
+            extra={
+                "correlation_id": question.correlation_id,
+                "tool_name": contract.tool_name,
+                "proposal_id": str(proposal.id),
+            },
+        )
+        return AgentAnswer(
+            text=PROPOSAL_MESSAGE,
+            stop_reason=AgentStopReason.APPROVAL_REQUIRED,
+            steps_used=step,
+            sources=sources_from(tuple(records)),
+            proposal=ProposedMutationView(
+                id=proposal.id,
+                version=proposal.version,
+                decision_token=issued.decision_token,
+                tool_name=proposal.tool_name,
+                source_system=proposal.source_system,
+                action_class=proposal.action_class,
+                payload=proposal.payload,
+            ),
+        )
 
     @staticmethod
     def _replayed(history: Sequence[PriorTurn]) -> list[dict[str, Any]]:
@@ -815,3 +1030,14 @@ __all__ = [
     "PriorTurn",
     "tool_catalogue",
 ]
+
+
+def _as_text(value: Any) -> str | None:
+    """Une valeur de charge, si elle est un texte utilisable comme etiquette.
+
+    La charge a deja passe le schema public, donc ce controle ne protege de rien de
+    nouveau ; il evite seulement qu'un champ absent ou d'un autre type fasse echouer
+    la construction de la cible et emporte la proposition avec lui.
+    """
+
+    return value if isinstance(value, str) and value else None
