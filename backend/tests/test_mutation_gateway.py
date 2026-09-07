@@ -30,6 +30,7 @@ from app.mcp.adapters.mutation_gateway import (
 )
 from app.mcp.domain import MCPReadSourceSystem as SourceSystem
 from app.mcp.domain import MCPToolCall, ToolActionClass
+from app.mcp.errors import MCPRemoteToolFailure
 from app.mcp.mutation_registry import MCPMutationRegistry
 
 CLOUD = "a761589f-69b8-4373-9c30-7561c2d45a39"
@@ -54,11 +55,26 @@ class FakeTool:
         self.output_schema = None
 
 
+class FakeBlock:
+    def __init__(self, text: str | None) -> None:
+        self.kind = "text"
+        self.text = text
+
+
 class FakeRemoteResult:
-    def __init__(self, *, is_error: bool = False, structured: Any = None) -> None:
-        self.is_error = is_error
+    """Calque sur ``RemoteToolResult``, qui ne porte QUE ces deux champs.
+
+    Une version anterieure de ce double avait un ``is_error`` que le vrai type n'a
+    pas. La passerelle le lisait avec ``getattr(..., False)``, donc la branche de
+    refus etait du code mort -- et les tests la couvraient, ce qui la faisait passer
+    pour eprouvee. Un essai reel l'a montre : un refus du fournisseur arrive comme une
+    exception levee, pas comme un champ. Le double ne doit rien offrir que
+    l'original ne porte.
+    """
+
+    def __init__(self, *, structured: Any = None, blocks: tuple = ()) -> None:
         self.structured_content = structured
-        self.content = ()
+        self.content = blocks
 
 
 class FakeSession:
@@ -221,14 +237,47 @@ def test_an_unapproved_protocol_version_stops_the_write() -> None:
 
 
 def test_a_provider_refusal_is_a_known_outcome() -> None:
-    """Le fournisseur a repondu : l'ecriture n'a pas eu lieu et nous le savons."""
+    """Le fournisseur a repondu : l'ecriture n'a pas eu lieu et nous le savons.
 
-    session = a_session(result=FakeRemoteResult(is_error=True))
+    L'adaptateur distant LEVE quand l'outil rapporte une erreur. Laisser cette
+    exception remonter la ferait passer pour une coupure : l'utilisateur irait
+    chercher dans Jira un ticket qui n'a jamais existe, et la reservation resterait
+    ouverte indefiniment.
+    """
+
+    session = a_session(raises=MCPRemoteToolFailure())
 
     result = execute(gateway_for(session), a_call())
 
     assert result.succeeded is False
     assert result.error_code == "MUTATION_PROVIDER_REFUSED"
+
+
+def test_the_created_key_is_read_from_a_json_content_block() -> None:
+    """Constate lors d'un essai reel : createJiraIssue laisse ``structured_content``
+    vide et rend la cle dans un bloc de texte JSON. Ne regarder que le contenu
+    structure rendait une ecriture reussie sans dire ce qu'elle avait cree."""
+
+    session = a_session(
+        result=FakeRemoteResult(blocks=(FakeBlock('{"key": "KAN-32", "id": "10031"}'),))
+    )
+
+    result = execute(gateway_for(session), a_call())
+
+    assert result.succeeded is True
+    assert result.external_ids == ("KAN-32",)
+
+
+def test_a_malformed_receipt_does_not_turn_a_success_into_a_failure() -> None:
+    """Une ecriture reussie ne doit pas devenir un echec parce que son accuse de
+    reception est illisible."""
+
+    session = a_session(result=FakeRemoteResult(blocks=(FakeBlock("pas du json"),)))
+
+    result = execute(gateway_for(session), a_call())
+
+    assert result.succeeded is True
+    assert result.external_ids == ()
 
 
 def test_a_call_that_breaks_mid_flight_raises_instead_of_concluding() -> None:

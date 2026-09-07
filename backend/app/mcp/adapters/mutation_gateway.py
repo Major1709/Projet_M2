@@ -21,6 +21,7 @@ Se tromper de sens n'est pas une question de style : rendre un echec sur un appe
 interrompu declarerait qu'aucun ticket n'a ete cree, alors qu'il a peut-etre ete cree.
 """
 
+import json
 import logging
 from typing import Any
 
@@ -35,6 +36,7 @@ from app.mcp.domain import (
     MCPExecutionResult,
     MCPToolCall,
 )
+from app.mcp.errors import MCPRemoteToolFailure
 from app.mcp.mutation_registry import MCPMutationRegistry, MutationToolContract
 from app.mcp.ports import MCPReadTransport
 from app.mcp.registry import APPROVED_PROTOCOL_VERSIONS, schema_sha256
@@ -146,11 +148,19 @@ class MCPMutationGateway:
                 if schema_sha256(listed[0].input_schema) != contract.provider_input_schema_sha256:
                     return self._refused(SCHEMA_DRIFTED, call, idempotency_key)
 
-                # A partir d'ici, tout echec leve. L'ecriture est partie.
-                remote = await session.call_tool(
-                    tool_name=contract.tool_name,
-                    arguments=bound,
-                )
+                # A partir d'ici, une panne de transport signifie que l'ecriture est
+                # peut-etre partie : elle leve, et la reservation reste ouverte.
+                #
+                # Un refus rapporte par l'outil est autre chose. Le serveur a repondu,
+                # donc l'ecriture n'a pas eu lieu et cela se sait -- c'est la seule
+                # exception qui redevient une issue.
+                try:
+                    remote = await session.call_tool(
+                        tool_name=contract.tool_name,
+                        arguments=bound,
+                    )
+                except MCPRemoteToolFailure:
+                    return self._provider_refusal(contract, call, idempotency_key)
 
         return self._normalize(remote, contract, call, idempotency_key)
 
@@ -188,6 +198,37 @@ class MCPMutationGateway:
             raise _Refusal(INPUT_REJECTED)
         return bound
 
+    def _provider_refusal(
+        self,
+        contract: MutationToolContract,
+        call: MCPToolCall,
+        idempotency_key: str,
+    ) -> MCPExecutionResult:
+        """Le fournisseur a traite la demande et l'a refusee.
+
+        C'est une issue CONNUE, pas une issue inconnue, et la distinction se paie cher
+        si on la manque. L'adaptateur distant leve ``MCPRemoteToolFailure`` quand
+        l'outil rapporte une erreur -- projet inexistant, droits manquants -- ce qui
+        veut dire que le serveur a repondu et que l'ecriture n'a pas eu lieu. Laisser
+        cette exception remonter la ferait passer pour une coupure : l'utilisateur
+        irait chercher dans Jira un ticket qui n'a jamais existe, et la reservation
+        resterait ouverte indefiniment.
+        """
+
+        logger.warning(
+            "The provider refused an approved mutation",
+            extra={
+                "mcp_tool": contract.tool_name,
+                "correlation_id": call.correlation_id,
+                "idempotency_key": idempotency_key,
+            },
+        )
+        return MCPExecutionResult(
+            succeeded=False,
+            error_code="MUTATION_PROVIDER_REFUSED",
+            safe_message="The source system refused this write",
+        )
+
     def _normalize(
         self,
         remote: Any,
@@ -197,27 +238,9 @@ class MCPMutationGateway:
     ) -> MCPExecutionResult:
         """Conclure a partir de ce que le fournisseur a renvoye.
 
-        ``is_error`` est cru sur parole quand il dit l'echec, et jamais quand il se
-        tait : une reponse qui n'affirme rien est traitee comme un succes seulement si
-        elle porte du contenu. Le sens est asymetrique a dessein -- se tromper vers
-        l'echec laisse un ticket cree que l'audit nomme ; se tromper vers le succes
-        ferme une approbation sur une ecriture qui n'a pas eu lieu.
+        Arriver ici signifie que l'appel a abouti sans erreur rapportee : le refus a
+        deja ete traite plus haut, par l'exception que l'adaptateur distant leve.
         """
-
-        if getattr(remote, "is_error", False):
-            logger.warning(
-                "The provider refused an approved mutation",
-                extra={
-                    "mcp_tool": contract.tool_name,
-                    "correlation_id": call.correlation_id,
-                    "idempotency_key": idempotency_key,
-                },
-            )
-            return MCPExecutionResult(
-                succeeded=False,
-                error_code="MUTATION_PROVIDER_REFUSED",
-                safe_message="The source system refused this write",
-            )
 
         logger.info(
             "An approved mutation completed",
@@ -269,20 +292,50 @@ class _Refusal(Exception):
 def _external_ids(remote: Any) -> tuple[str, ...]:
     """La cle du ticket cree, quand le fournisseur la nomme.
 
-    Cherchee dans le contenu structure uniquement, et bornee. Ce que le fournisseur
-    renvoie reste de la donnee : cette valeur finit dans un audit et dans une
-    interface, jamais dans une decision.
+    Cherchee a DEUX endroits, parce qu'un essai reel a montre que le premier ne
+    suffit pas : createJiraIssue laisse ``structured_content`` vide et rend la cle
+    dans un bloc de texte JSON. Ne regarder que le contenu structure faisait rendre
+    une ecriture reussie sans dire ce qu'elle avait cree -- l'interface ne pouvait
+    alors pas offrir de lien vers le ticket.
+
+    Ce que le fournisseur renvoie reste de la donnee : la valeur est bornee, et elle
+    finit dans un audit et dans une interface, jamais dans une decision.
     """
 
-    structured = getattr(remote, "structured_content", None)
-    if not isinstance(structured, dict):
-        return ()
-    identifiants = [
-        valeur
-        for cle in ("key", "id", "issueKey")
-        if isinstance(valeur := structured.get(cle), str) and 0 < len(valeur) <= 200
-    ]
-    return tuple(dict.fromkeys(identifiants))
+    for candidat in (
+        getattr(remote, "structured_content", None),
+        _first_json_block(remote),
+    ):
+        if not isinstance(candidat, dict):
+            continue
+        # Le premier trouve, dans cet ordre, et un seul. Jira rend "key" (KAN-32) et
+        # "id" (10031) pour la meme ressource : les renvoyer tous les deux ferait
+        # afficher a une interface un identifiant interne qui ne dit rien a personne.
+        # L'ordre va donc du plus parlant au plus technique.
+        for cle in ("key", "issueKey", "id"):
+            valeur = candidat.get(cle)
+            if isinstance(valeur, str) and 0 < len(valeur) <= 200:
+                return (valeur,)
+    return ()
+
+
+def _first_json_block(remote: Any) -> Any:
+    """Le premier bloc de contenu, s'il porte un objet JSON.
+
+    Tolerant a dessein : un bloc illisible n'est pas une erreur ici, seulement une
+    reponse qui ne nomme pas ce qu'elle a cree. Une ecriture reussie ne doit pas
+    devenir un echec parce que son accuse de reception est mal forme.
+    """
+
+    for bloc in getattr(remote, "content", ()) or ():
+        texte = getattr(bloc, "text", None)
+        if not isinstance(texte, str) or not texte:
+            continue
+        try:
+            return json.loads(texte)
+        except (ValueError, RecursionError):
+            return None
+    return None
 
 
 __all__ = [
