@@ -247,7 +247,7 @@ button:disabled {
 
 .conversation {
   position: absolute;
-  inset: 230px 0 226px;
+  inset: 140px 0 180px;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
