@@ -40,6 +40,11 @@ from app.approvals.workflow import ApprovalWorkflow
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
 from app.core.identity import SecurityContext
+from app.mcp.adapters.permission import (
+    _payload_of,
+    _read_for_resource,
+    source_version_of,
+)
 from app.mcp.domain import (
     MCPReadSourceSystem,
     MCPReadToolCall,
@@ -52,7 +57,7 @@ from app.mcp.errors import (
     MCPRemoteToolFailure,
     MCPResponseTooLarge,
 )
-from app.mcp.mutation_registry import MCPMutationRegistry
+from app.mcp.mutation_registry import MCPMutationRegistry, MutationToolContract
 from app.mcp.read_workflow import MCPReadWorkflow
 from app.mcp.registry import MCPToolRegistry, ToolContract
 from app.semantics.workflow import SemanticIndex
@@ -255,6 +260,15 @@ PROPOSAL_MESSAGE = (
 NO_CONVERSATION_MESSAGE = (
     "Cette action doit etre proposee depuis une conversation. Reformule ta demande "
     "dans un fil pour que je puisse te la soumettre."
+)
+
+# Quand la ressource a modifier ne peut pas etre epinglee : elle n'existe pas, elle
+# n'est pas visible, ou la source ne dit pas sa version. Refuse plutot que propose :
+# une proposition sans version serait refusee a l'execution, apres que l'humain a
+# clique, ce qui est le pire moment pour apprendre que la cible etait introuvable.
+UNPINNABLE_TARGET_MESSAGE = (
+    "Je n'ai pas pu retrouver la ressource visee, ou elle ne m'est pas accessible. "
+    "Verifie son identifiant avant que je propose cette action."
 )
 
 
@@ -655,6 +669,71 @@ class AgentReadWorkflow:
         if self._approvals is None:  # pragma: no cover - garanti par le constructeur
             raise RuntimeError("A mutation was offered without an approval workflow")
 
+        resource_id = (
+            _as_text(call.arguments.get(contract.resource_argument))
+            if contract.resource_argument
+            else None
+        )
+        resource_version: str | None = None
+        if contract.action_class is not ToolActionClass.CREATE:
+            # Une modification doit epingler la version que l'humain aura sous les
+            # yeux. Juste avant d'ecrire, la revalidation compare cette version a
+            # celle du moment : c'est ce qui refuse d'ecraser un ticket que quelqu'un
+            # d'autre a modifie entre l'approbation et l'execution.
+            #
+            # Sans cette lecture, la proposition partirait sans version et la
+            # revalidation refuserait tout -- une panne qui ne se verrait qu'a la
+            # premiere execution, jamais a la proposition.
+            etat_actuel = await self._resource_state(
+                contract=contract,
+                resource_id=resource_id,
+                context=context,
+            )
+            resource_version = source_version_of(contract.source_system, etat_actuel)
+            if resource_version is None:
+                logger.info(
+                    "A write was refused: the target could not be pinned",
+                    extra={
+                        "correlation_id": question.correlation_id,
+                        "tool_name": call.tool_name,
+                    },
+                )
+                return AgentAnswer(
+                    text=UNPINNABLE_TARGET_MESSAGE,
+                    stop_reason=AgentStopReason.ANSWERED,
+                    steps_used=step,
+                    sources=sources_from(tuple(records)),
+                )
+
+        cible = ActionTarget(
+            source_system=contract.source_system,
+            resource_type=contract.resource_type,
+            resource_id=resource_id,
+            # Le conteneur et le titre sont tires de la charge validee par le schema
+            # public, donc de valeurs que l'humain verra aussi. Aucune information
+            # nouvelle n'entre ici.
+            container_id=(
+                _as_text(call.arguments.get(contract.container_argument))
+                if contract.container_argument
+                else None
+            ),
+            title=(
+                _as_text(call.arguments.get(contract.title_argument))
+                if contract.title_argument
+                else resource_id
+            ),
+            resource_version=resource_version,
+        )
+        # Le domaine refuse une proposition de modification sans diff, et il a raison :
+        # approuver "modifier KAN-2" sans voir ce qui change ne veut rien dire. Le diff
+        # est donc construit ici, a partir de la charge validee et de l'etat lu a
+        # l'instant -- jamais de ce que le modele raconte.
+        diff = (
+            None
+            if contract.action_class is ToolActionClass.CREATE
+            else _diff_for(contract, call.arguments, etat_actuel)
+        )
+
         if question.conversation_id is None:
             # Refuse plutot que rattache a un fil invente. Une proposition appartient
             # a une conversation : c'est ce qui permet d'en verifier le proprietaire.
@@ -678,16 +757,9 @@ class AgentReadWorkflow:
                 source_system=contract.source_system,
                 tool_name=contract.tool_name,
                 action_class=contract.action_class,
-                target=ActionTarget(
-                    source_system=contract.source_system,
-                    resource_type="issue",
-                    # Le conteneur et le titre sont tires de la charge validee par le
-                    # schema public, donc de valeurs que l'humain verra aussi. Aucune
-                    # information nouvelle n'entre ici.
-                    container_id=_as_text(call.arguments.get("projectKey")),
-                    title=_as_text(call.arguments.get("summary")),
-                ),
+                target=cible,
                 payload=call.arguments,
+                diff=diff,
                 explanation=None,
                 correlation_id=question.correlation_id,
             ),
@@ -720,6 +792,43 @@ class AgentReadWorkflow:
                 explanation=proposal.explanation,
             ),
         )
+
+    async def _resource_state(
+        self,
+        *,
+        contract: "MutationToolContract",
+        resource_id: str | None,
+        context: SecurityContext,
+    ) -> Any:
+        """L'etat que la source rend pour la ressource visee, ou None.
+
+        Lue par le chemin de lecture ordinaire, donc autorisee et tracee comme
+        n'importe quelle autre lecture. Une proposition qui epingle une version se
+        fonde ainsi sur une lecture que l'audit nomme, et non sur un souvenir.
+
+        Rend None sur tout echec, sans distinguer lequel. La suite est la meme dans
+        tous les cas -- pas de proposition -- et detailler ici apprendrait a un
+        appelant ou se trouve la frontiere entre "ticket inexistant" et "ticket
+        invisible pour ce mandat".
+        """
+
+        if not resource_id:
+            return None
+        read = _read_for_resource(contract.source_system, resource_id)
+        if read is None:
+            return None
+        try:
+            result = await self._reads.execute_call(call=read, context=context)
+        except MCPReadError:
+            return None
+        # Les helpers viennent du verificateur de permission, et c'est
+        # deliberement le meme code : la version epinglee a la proposition doit etre
+        # lue exactement comme celle relue juste avant l'ecriture. Deux extractions
+        # differentes finiraient par diverger, et la comparaison ne comparerait plus
+        # rien. Ils gagneraient a vivre dans un module partage plutot que derriere un
+        # underscore -- dette assumee, notee ici.
+        payload = result.structured_content
+        return _payload_of(result) if payload is None else payload
 
     @staticmethod
     def _replayed(history: Sequence[PriorTurn]) -> list[dict[str, Any]]:
@@ -1064,3 +1173,41 @@ def _as_text(value: Any) -> str | None:
     """
 
     return value if isinstance(value, str) and value else None
+
+
+def _diff_for(
+    contract: "MutationToolContract",
+    arguments: dict[str, Any],
+    etat: Any,
+) -> dict[str, Any]:
+    """Ce que l'ecriture changera, dit assez precisement pour qu'on puisse l'approuver.
+
+    Construit a partir de la charge validee et de l'etat lu a l'instant, jamais du
+    recit du modele. Un diff invente serait pire qu'aucun diff : il donnerait a
+    l'humain la sensation d'avoir verifie.
+
+    Chaque outil dit sa propre histoire, parce qu'il n'y en a pas de generique : un
+    commentaire ajoute et un statut deplace ne se resument pas de la meme facon.
+    """
+
+    champs = etat.get("fields") if isinstance(etat, dict) else None
+    champs = champs if isinstance(champs, dict) else {}
+
+    if contract.tool_name == "addCommentToJiraIssue":
+        return {"comment_added": arguments.get("commentBody")}
+
+    if contract.tool_name == "transitionJiraIssue":
+        statut = champs.get("status")
+        actuel = statut.get("name") if isinstance(statut, dict) else None
+        transition = arguments.get("transition")
+        cible = transition.get("id") if isinstance(transition, dict) else None
+        # Le statut d'arrivee n'est PAS resolu : nous n'avons que l'identifiant de la
+        # transition, et le nom qui va avec vit dans getTransitionsForJiraIssue, une
+        # lecture que le registre ne declare pas encore. Le diff le dit tel quel plutot
+        # que d'inventer un libelle -- un ecran qui annoncerait "vers Termine" sans
+        # l'avoir verifie mentirait a l'humain au moment ou il decide.
+        return {"status": {"from": actuel, "to_transition_id": cible}}
+
+    # Un outil de modification ajoute plus tard sans passer par ici produirait un diff
+    # vide, que le domaine accepterait. Le refus est donc explicite.
+    raise ValueError(f"No diff is defined for {contract.tool_name}")

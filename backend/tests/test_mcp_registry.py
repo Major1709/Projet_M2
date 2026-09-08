@@ -18,6 +18,9 @@ ATLASSIAN_TOOLS = {
     "searchJiraIssuesUsingJql",
     "getJiraIssue",
     "getJiraIssueRemoteIssueLinks",
+    # Ajoute avec transitionJiraIssue, et indispensable a lui : une transition se
+    # designe par un identifiant numerique que seule cette lecture publie.
+    "getTransitionsForJiraIssue",
     "getConfluenceSpaces",
     "getPagesInConfluenceSpace",
     "getConfluencePage",

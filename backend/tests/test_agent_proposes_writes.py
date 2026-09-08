@@ -325,3 +325,120 @@ async def test_the_payload_carries_what_the_approval_screen_displays() -> None:
 
     assert payload["projectKey"] == "KAN"
     assert payload["summary"] == "Le courriel ne part pas"
+
+
+# --- Epingler la version de la ressource pour une modification --------------------
+#
+# Une modification doit epingler la version que l'humain aura sous les yeux : juste
+# avant d'ecrire, la revalidation la compare a celle du moment, ce qui refuse
+# d'ecraser un ticket que quelqu'un d'autre a modifie entre-temps. Sans cette lecture,
+# la proposition partirait sans version et la revalidation refuserait TOUT -- une
+# panne qui ne se verrait qu'a la premiere execution, jamais a la proposition.
+
+
+class ReadsReturning:
+    """Un chemin de lecture qui rend la charge qu'on lui a donnee."""
+
+    def __init__(self, payload: Any = None, *, raises: Exception | None = None) -> None:
+        self._payload = payload
+        self._raises = raises
+        self.calls: list[Any] = []
+
+    async def execute_call(self, *, call, context):
+        self.calls.append(call)
+        if self._raises is not None:
+            raise self._raises
+        return _Result(self._payload)
+
+
+class _Result:
+    def __init__(self, payload: Any) -> None:
+        self.structured_content = payload
+        self.content = ()
+
+
+def workflow_with_reads(provider: StubProvider, reads: Any):
+    conversations = InMemoryConversationRepository()
+    uow = InMemoryApprovalUnitOfWork()
+    approvals = ApprovalWorkflow(uow, conversations, RegistryMutationToolPin(), 900, "session")
+    workflow = AgentReadWorkflow(
+        provider=provider,
+        reads=reads,
+        audit_sink=uow.audit,
+        mutations=MCPMutationRegistry(),
+        approvals=approvals,
+    )
+    return workflow, conversations
+
+
+def a_comment_call() -> ProposedToolCall:
+    return ProposedToolCall(
+        call_id="call_1",
+        tool_name="addCommentToJiraIssue",
+        action_class=ToolActionClass.READ,
+        arguments={"issueIdOrKey": "KAN-2", "commentBody": "Correctif deploye."},
+    )
+
+
+@pytest.mark.anyio
+async def test_an_update_pins_the_version_the_source_states() -> None:
+    provider = StubProvider(a_response(a_comment_call()))
+    reads = ReadsReturning({"fields": {"updated": "2026-09-07T20:24:41.681+0300"}})
+    workflow, repository = workflow_with_reads(provider, reads)
+
+    answer = await workflow.answer(
+        question=a_question(a_conversation(repository)), context=CONTEXT
+    )
+
+    assert answer.stop_reason is AgentStopReason.APPROVAL_REQUIRED
+    # La lecture a bien eu lieu, par le chemin ordinaire donc tracee.
+    assert reads.calls[0].tool_name == "getJiraIssue"
+    assert reads.calls[0].arguments["issueIdOrKey"] == "KAN-2"
+
+
+@pytest.mark.anyio
+async def test_a_creation_reads_nothing_because_it_has_no_target_yet() -> None:
+    """Une creation fabrique sa ressource : il n'y a rien a epingler, et une lecture
+    inutile couterait un appel a la source."""
+
+    provider = StubProvider(a_response(a_call()))
+    reads = ReadsReturning({})
+    workflow, repository = workflow_with_reads(provider, reads)
+
+    await workflow.answer(question=a_question(a_conversation(repository)), context=CONTEXT)
+
+    assert reads.calls == []
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_target_is_refused_before_the_human_is_asked() -> None:
+    """Une proposition sans version serait refusee a l'execution, APRES que l'humain a
+    clique -- le pire moment pour apprendre que la cible etait introuvable."""
+
+    from app.mcp.errors import MCPRemoteToolFailure
+
+    provider = StubProvider(a_response(a_comment_call()))
+    workflow, repository = workflow_with_reads(
+        provider, ReadsReturning(raises=MCPRemoteToolFailure())
+    )
+
+    answer = await workflow.answer(
+        question=a_question(a_conversation(repository)), context=CONTEXT
+    )
+
+    assert answer.approval is None
+    assert answer.stop_reason is AgentStopReason.ANSWERED
+
+
+@pytest.mark.anyio
+async def test_a_source_that_states_no_version_is_refused_too() -> None:
+    """"Nous n'avons pas pu savoir" ne doit jamais valoir "vas-y"."""
+
+    provider = StubProvider(a_response(a_comment_call()))
+    workflow, repository = workflow_with_reads(provider, ReadsReturning({"fields": {}}))
+
+    answer = await workflow.answer(
+        question=a_question(a_conversation(repository)), context=CONTEXT
+    )
+
+    assert answer.approval is None

@@ -358,6 +358,40 @@ _JIRA_CONTRACTS = (
         ),
         resource_reference_path="/browse/{issueIdOrKey}",
     ),
+    # Ajoute avec transitionJiraIssue, et indispensable a lui : une transition se
+    # designe par un identifiant numerique que seule cette lecture publie. Sans elle,
+    # le modele ne pourrait que deviner un numero, et un outil d'ecriture dont
+    # l'argument obligatoire est indevinable est un outil qui ne marche pas.
+    #
+    # Les drapeaux du fournisseur qui elargissent le resultat -- transitions
+    # indisponibles, contournement de conditions -- ne sont pas offerts : ce que le
+    # modele doit voir, ce sont les transitions REELLEMENT applicables, sinon il
+    # proposera un changement que Jira refusera.
+    ToolContract(
+        server_id="atlassian-rovo",
+        provider=MCPProvider.ATLASSIAN,
+        source_system=SourceSystem.JIRA,
+        source_origin=JIRA_SOURCE_ORIGIN,
+        tool_name="getTransitionsForJiraIssue",
+        binding_kind=MCPBindingKind.JIRA,
+        public_input_schema=_object_schema(
+            {"issueIdOrKey": _string(maximum=255)},
+            ("issueIdOrKey",),
+        ),
+        provider_input_schema=_object_schema(
+            {
+                "cloudId": _CLOUD_ID,
+                "issueIdOrKey": _REMOTE_STRING,
+                "expand": _REMOTE_STRING,
+                "transitionId": _REMOTE_STRING,
+                "skipRemoteOnlyCondition": {"type": "boolean"},
+                "includeUnavailableTransitions": {"type": "boolean"},
+                "sortByOpsBarAndStatus": {"type": "boolean"},
+            },
+            ("cloudId", "issueIdOrKey"),
+        ),
+        resource_reference_path="/browse/{issueIdOrKey}",
+    ),
     ToolContract(
         server_id="atlassian-rovo",
         provider=MCPProvider.ATLASSIAN,
