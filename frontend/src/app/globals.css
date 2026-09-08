@@ -256,7 +256,7 @@ button:disabled {
 
 .conversation__messages {
   display: flex;
-  width: min(706px, calc(100% - 48px));
+  width: min(1060px, calc(100% - 64px));
   min-height: 100%;
   margin: 0 auto;
   padding: 66px 0 28px;
@@ -298,7 +298,7 @@ button:disabled {
 
 .message-content {
   display: flex;
-  max-width: min(540px, calc(100% - 68px));
+  max-width: min(760px, calc(100% - 68px));
   flex-direction: column;
   gap: 14px;
 }
@@ -433,7 +433,7 @@ button:disabled {
   bottom: clamp(32px, 15.2vh, 156px);
   left: 50%;
   display: grid;
-  width: min(833px, calc(100% - 48px));
+  width: min(1040px, calc(100% - 64px));
   min-height: 89px;
   padding: 20px 20px 20px 35px;
   transform: translateX(-50%);
