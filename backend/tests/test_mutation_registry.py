@@ -308,7 +308,81 @@ def test_every_declared_fingerprint_is_the_live_one() -> None:
         "transitionJiraIssue": (
             "f054dd3f56c2cdf39f1fd178acede2cce5e1bad1580ea6a385029a6e0ccb95bc"
         ),
+        "createConfluencePage": (
+            "ecd3fadf71d215eec0a3d7c5465426d3010cd3e79819470b307e5fbba9367f8b"
+        ),
+        "updateConfluencePage": (
+            "88a6bfb22c7e9797c27324c80130da32693c1942752e830a1acb5cac9652debe"
+        ),
     }
 
     for contrat in MCPMutationRegistry().contracts:
         assert contrat.provider_input_schema_sha256 == attendues[contrat.tool_name]
+
+
+# --- Confluence -------------------------------------------------------------------
+
+
+def test_the_body_format_is_imposed_by_the_server_not_chosen_by_the_model() -> None:
+    """Le fournisseur interprete le corps en HTML par defaut. Laisser ce choix au
+    modele, c'est accepter qu'un jour il ecrive du markdown dans un champ lu comme du
+    HTML : la page s'affiche alors avec ses asterisques en clair, et personne ne l'a
+    decide."""
+
+    for outil in ("createConfluencePage", "updateConfluencePage"):
+        contrat = MCPMutationRegistry().get(SourceSystem.CONFLUENCE, outil)
+        assert contrat is not None
+        assert dict(contrat.fixed_provider_arguments) == {"contentFormat": "markdown"}
+        # Impose, donc jamais offert : sinon l'humain approuverait une valeur et une
+        # autre partirait.
+        assert "contentFormat" not in contrat.public_input_schema["properties"]
+
+
+def test_a_fixed_argument_may_not_also_be_offered() -> None:
+    with pytest.raises(ValueError, match="both fixes and offers"):
+        a_contract(fixed_provider_arguments={"projectKey": "KAN"})
+
+
+def test_a_new_page_cannot_be_made_private() -> None:
+    """Un humain qui approuve "creer une page dans l'espace ENG" ne s'attend pas a ce
+    qu'elle soit invisible pour l'equipe."""
+
+    contrat = MCPMutationRegistry().get(SourceSystem.CONFLUENCE, "createConfluencePage")
+    assert contrat is not None
+
+    accepte = contrat.provider_input_schema["properties"]
+    offert = contrat.public_input_schema["properties"]
+
+    assert "isPrivate" in accepte
+    for ecarte in ("isPrivate", "status", "contentType", "parentId", "subtype"):
+        assert ecarte not in offert
+    assert set(offert) == {"spaceId", "title", "body"}
+
+
+def test_an_update_cannot_move_the_page() -> None:
+    """Le refus le plus important de ce contrat : spaceId et parentId DEPLACENT la
+    page. L'humain approuve "mettre a jour cette page" et elle changerait d'espace
+    sans que rien ne l'annonce."""
+
+    contrat = MCPMutationRegistry().get(SourceSystem.CONFLUENCE, "updateConfluencePage")
+    assert contrat is not None
+
+    accepte = contrat.provider_input_schema["properties"]
+    offert = contrat.public_input_schema["properties"]
+
+    for deplacement in ("spaceId", "parentId"):
+        assert deplacement in accepte
+        assert deplacement not in offert
+    for autre in ("status", "versionMessage"):
+        assert autre not in offert
+
+
+def test_confluence_writes_use_the_confluence_binding() -> None:
+    """Le liant choisit le cloudId injecte. Se tromper ferait ecrire sur le mauvais
+    produit du meme site."""
+
+    for outil in ("createConfluencePage", "updateConfluencePage"):
+        contrat = MCPMutationRegistry().get(SourceSystem.CONFLUENCE, outil)
+        assert contrat is not None
+        assert contrat.binding_kind is MCPBindingKind.CONFLUENCE
+        assert contrat.resource_type == "page"

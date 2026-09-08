@@ -1208,6 +1208,40 @@ def _diff_for(
         # l'avoir verifie mentirait a l'humain au moment ou il decide.
         return {"status": {"from": actuel, "to_transition_id": cible}}
 
+    if contract.tool_name == "updateConfluencePage":
+        # Une mise a jour Confluence REMPLACE le corps entier : ce n'est pas un ajout.
+        # Montrer seulement le nouveau texte laisserait croire a un complement, alors
+        # que tout ce qui n'y figure pas disparait. Les deux versions sont donc
+        # presentees, et c'est le seul diff du fichier ou l'ancien etat compte autant
+        # que le nouveau.
+        ancien = etat.get("body") if isinstance(etat, dict) else None
+        titre_actuel = etat.get("title") if isinstance(etat, dict) else None
+        change: dict[str, Any] = {
+            "body": {
+                "from": _borne(ancien),
+                "to": _borne(arguments.get("body")),
+                "replaces_everything": True,
+            }
+        }
+        nouveau_titre = arguments.get("title")
+        if isinstance(nouveau_titre, str) and nouveau_titre != titre_actuel:
+            change["title"] = {"from": titre_actuel, "to": nouveau_titre}
+        return change
+
     # Un outil de modification ajoute plus tard sans passer par ici produirait un diff
     # vide, que le domaine accepterait. Le refus est donc explicite.
     raise ValueError(f"No diff is defined for {contract.tool_name}")
+
+
+# Un corps de page peut peser des dizaines de milliers de caracteres, et le diff est
+# stocke avec la proposition. Borne, donc -- mais jamais en silence : une troncature
+# invisible ferait approuver un changement dont on ne montre qu'un fragment, ce qui
+# est pire que de ne rien montrer.
+MAX_DIFF_CHARACTERS = 4_000
+DIFF_TRUNCATED = "\n[...] contenu tronque pour l'affichage ; le texte complet sera ecrit."
+
+
+def _borne(valeur: Any) -> Any:
+    if not isinstance(valeur, str) or len(valeur) <= MAX_DIFF_CHARACTERS:
+        return valeur
+    return valeur[:MAX_DIFF_CHARACTERS] + DIFF_TRUNCATED

@@ -194,6 +194,12 @@ class MCPMutationGateway:
             # ecriture approuvee ne peut pas atterrir sur un autre site.
             bound["cloudId"] = str(cloud_id)
 
+        # Imposes apres la validation publique et avant celle du fournisseur, comme le
+        # liant : ils decrivent la facon de transmettre l'action, pas l'action. Le
+        # contrat interdit deja qu'un argument impose figure aussi dans le schema
+        # public, donc rien de ce que l'humain a vu ne peut etre ecrase ici.
+        bound.update(contract.fixed_provider_arguments)
+
         if not Draft202012Validator(contract.provider_input_schema).is_valid(bound):
             raise _Refusal(INPUT_REJECTED)
         return bound

@@ -442,3 +442,85 @@ async def test_a_source_that_states_no_version_is_refused_too() -> None:
     )
 
     assert answer.approval is None
+
+
+# --- Le diff d'une mise a jour Confluence -----------------------------------------
+#
+# Une mise a jour REMPLACE le corps entier : ce n'est pas un ajout. Montrer seulement
+# le nouveau texte laisserait croire a un complement, alors que tout ce qui n'y figure
+# pas disparait.
+
+
+def test_a_confluence_update_shows_what_disappears() -> None:
+    from app.agent.read_workflow import _diff_for
+    from app.mcp.domain import MCPReadSourceSystem
+    from app.mcp.mutation_registry import MCPMutationRegistry as Registre
+
+    contrat = Registre().get(MCPReadSourceSystem.CONFLUENCE, "updateConfluencePage")
+    assert contrat is not None
+
+    diff = _diff_for(
+        contrat,
+        {"pageId": "131073", "body": "Le nouveau texte."},
+        {"body": "L'ancien texte, qui disparait.", "title": "Procedure"},
+    )
+
+    assert diff["body"]["from"] == "L'ancien texte, qui disparait."
+    assert diff["body"]["to"] == "Le nouveau texte."
+    # Le drapeau existe pour qu'une interface puisse le dire, plutot que de laisser
+    # deviner qu'un remplacement n'est pas un ajout.
+    assert diff["body"]["replaces_everything"] is True
+
+
+def test_a_title_change_appears_only_when_it_changes() -> None:
+    from app.agent.read_workflow import _diff_for
+    from app.mcp.domain import MCPReadSourceSystem
+    from app.mcp.mutation_registry import MCPMutationRegistry as Registre
+
+    contrat = Registre().get(MCPReadSourceSystem.CONFLUENCE, "updateConfluencePage")
+    assert contrat is not None
+    etat = {"body": "corps", "title": "Procedure"}
+
+    inchange = _diff_for(contrat, {"pageId": "1", "body": "b", "title": "Procedure"}, etat)
+    modifie = _diff_for(contrat, {"pageId": "1", "body": "b", "title": "Nouvelle"}, etat)
+
+    assert "title" not in inchange
+    assert modifie["title"] == {"from": "Procedure", "to": "Nouvelle"}
+
+
+def test_a_long_body_is_truncated_but_says_so() -> None:
+    """Une troncature invisible ferait approuver un changement dont on ne montre qu'un
+    fragment, ce qui est pire que de ne rien montrer."""
+
+    from app.agent.read_workflow import (
+        DIFF_TRUNCATED,
+        MAX_DIFF_CHARACTERS,
+        _diff_for,
+    )
+    from app.mcp.domain import MCPReadSourceSystem
+    from app.mcp.mutation_registry import MCPMutationRegistry as Registre
+
+    contrat = Registre().get(MCPReadSourceSystem.CONFLUENCE, "updateConfluencePage")
+    assert contrat is not None
+    enorme = "A" * (MAX_DIFF_CHARACTERS + 500)
+
+    diff = _diff_for(contrat, {"pageId": "1", "body": enorme}, {"body": "court"})
+
+    assert diff["body"]["to"].endswith(DIFF_TRUNCATED)
+    assert len(diff["body"]["to"]) < len(enorme) + len(DIFF_TRUNCATED) + 1
+    # Le corps court n'est pas touche : on ne tronque que ce qui depasse.
+    assert diff["body"]["from"] == "court"
+
+
+def test_a_creation_needs_no_diff() -> None:
+    """Rien ne disparait quand rien n'existait. Le domaine ne l'exige que pour les
+    modifications, et en inventer un donnerait a l'humain quelque chose a comparer qui
+    n'a pas de sens."""
+
+    from app.mcp.domain import MCPReadSourceSystem
+    from app.mcp.mutation_registry import MCPMutationRegistry as Registre
+
+    contrat = Registre().get(MCPReadSourceSystem.CONFLUENCE, "createConfluencePage")
+
+    assert contrat is not None
+    assert contrat.action_class is ToolActionClass.CREATE
