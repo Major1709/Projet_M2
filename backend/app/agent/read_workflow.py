@@ -181,7 +181,19 @@ SYSTEM_PROMPT = (
     "\n"
     "Si une lecture echoue, l'observation te le dit. Corrige tes arguments et reessaie, "
     "ou explique que l'information n'est pas accessible. N'invente jamais un contenu "
-    "que tu n'as pas lu."
+    "que tu n'as pas lu.\n"
+    "\n"
+    "Quand on te demande un CAHIER DES CHARGES ou un BACKLOG a partir d'un processus "
+    "Figma, lis-le avec extractFigmaProcess -- il suit les connecteurs, alors qu'une "
+    "lecture de noeud ne rend qu'une forme isolee. Rends ensuite un tableau markdown "
+    "avec exactement ces quatre colonnes, dans cet ordre :\n"
+    "Bloc fonctionnel | User story | Critere d'acceptation | Remarque\n"
+    "Une ligne par etape du processus, et rien avant le tableau. Les user stories "
+    "s'ecrivent \"En tant que ..., je veux ..., afin de ...\". Un critere d'acceptation "
+    "se verifie : il decrit ce qu'on observe, pas une intention. La remarque porte ce "
+    "que la maquette montre et que les trois autres colonnes ne disent pas -- un "
+    "enchainement, une condition -- et reste vide si tu n'as rien de tel a y mettre "
+    "plutot que d'etre remplie pour l'etre."
 )
 
 # A read that failed for a reason the model can act on. Everything else stops the
