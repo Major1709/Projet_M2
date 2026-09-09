@@ -151,6 +151,11 @@ class FigmaFrameCatalogue:
         self._file_keys = tuple(dict.fromkeys(file_keys))
         self._interval = min_refresh_interval_seconds
         self._entries: tuple[FrameEntry, ...] = ()
+        # Le nom que Figma donne au fichier, releve a l'indexation. Sans lui, le
+        # modele ne connaitrait les maquettes que par des cles de vingt-deux
+        # caracteres -- et l'utilisateur devrait les recopier, ce que l'annuaire
+        # existe precisement pour eviter.
+        self._file_names: dict[str, str] = {}
         self._last_refresh: float | None = None
 
     @property
@@ -160,6 +165,19 @@ class FigmaFrameCatalogue:
     @property
     def size(self) -> int:
         return len(self._entries)
+
+    def describe(self) -> tuple[str, ...]:
+        """Les maquettes indexees, telles qu'on peut les nommer au modele.
+
+        Rend le nom quand l'indexation a eu lieu, la cle seule sinon. Une description
+        d'outil est construite au demarrage, avant tout appel reseau : annoncer un nom
+        qu'on n'a pas encore lu serait inventer, et la cle seule reste exacte.
+        """
+
+        return tuple(
+            f"{self._file_names[cle]} ({cle})" if cle in self._file_names else cle
+            for cle in self._file_keys
+        )
 
     async def find(
         self,
@@ -243,6 +261,9 @@ class FigmaFrameCatalogue:
         if charge is None:
             charge = _first_json(resultat)
         if isinstance(charge, dict):
+            nom = charge.get("name")
+            if isinstance(nom, str) and nom:
+                self._file_names[file_key] = nom
             return charge.get("document", charge)
         return None
 

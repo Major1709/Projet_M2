@@ -464,6 +464,12 @@ def _frame_catalogue_tool(
 
     if frames is None:
         return ()
+    maquettes = frames.describe()
+    connues = (
+        " Maquettes indexees : " + " ; ".join(maquettes) + "."
+        if maquettes
+        else ""
+    )
     return (
         {
             "type": "function",
@@ -472,7 +478,7 @@ def _frame_catalogue_tool(
                 "description": (
                     "Retrouve un cadre Figma par son nom parmi les maquettes du projet. "
                     "Rend son fileKey et son nodeId, avec lesquels il faut ensuite "
-                    "appeler getFigmaNode pour en lire le contenu."
+                    "appeler getFigmaNode pour en lire le contenu." + connues
                 ),
                 "parameters": {
                     "type": "object",
@@ -565,11 +571,13 @@ class AgentReadWorkflow:
             {c.tool_name: c for c in mutations.contracts} if mutations is not None else {}
         )
         self._frames = frames
-        self._catalogue = (
-            tool_catalogue(self._registry, offered_systems)
-            + _mutation_catalogue(mutations, offered_systems)
-            + _frame_catalogue_tool(frames)
-        )
+        # La partie stable du catalogue. L'outil de recherche de cadres n'en fait pas
+        # partie : sa description nomme les maquettes indexees, et ces noms ne sont
+        # connus qu'apres la premiere indexation. Fige au demarrage, il n'aurait jamais
+        # affiche que des cles.
+        self._static_catalogue = tool_catalogue(
+            self._registry, offered_systems
+        ) + _mutation_catalogue(mutations, offered_systems)
         # Les ecritures entrent dans les noms autorises : sans cela l'adaptateur
         # journalise "outil non offert" a chaque proposition, et le modele recevrait
         # un signal disant qu'il a invente un nom qu'on lui a pourtant montre.
@@ -613,7 +621,7 @@ class AgentReadWorkflow:
             response = await self._provider.generate(
                 request=LLMRequest(
                     messages=tuple(messages),
-                    tools=self._catalogue,
+                    tools=self._static_catalogue + _frame_catalogue_tool(self._frames),
                     allowed_tool_names=self._allowed_tool_names,
                     max_steps=question.max_steps,
                     max_completion_tokens=question.max_completion_tokens,

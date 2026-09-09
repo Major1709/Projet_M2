@@ -215,7 +215,7 @@ async def test_a_deployment_without_writes_offers_none_and_ignores_the_name() ->
     provider = StubProvider(a_response(a_call()), a_response(text="je ne sais pas faire"))
     workflow, repository = workflow_for(provider, with_writes=False)
 
-    offerts = {c["function"]["name"] for c in workflow._catalogue}
+    offerts = {c["function"]["name"] for c in workflow._static_catalogue}
 
     assert "createJiraIssue" not in offerts
 
@@ -524,3 +524,46 @@ def test_a_creation_needs_no_diff() -> None:
 
     assert contrat is not None
     assert contrat.action_class is ToolActionClass.CREATE
+
+
+@pytest.mark.anyio
+async def test_the_tool_description_names_the_indexed_maquettes() -> None:
+    """La description est recalculee a chaque appel, pas figee au demarrage : les noms
+    de maquettes ne sont connus qu'apres la premiere indexation, et une description
+    figee n'aurait jamais affiche que des cles."""
+
+    from app.agent.read_workflow import FIND_FIGMA_FRAME
+    from app.figma.catalogue import FigmaFrameCatalogue
+
+    class ReadsWithName:
+        async def execute_call(self, *, call, context):
+            return _Named({"name": "PROCESS", "document": {"type": "CANVAS", "name": "P"}})
+
+    annuaire = FigmaFrameCatalogue(reads=ReadsWithName(), file_keys=("CLE123",))
+    provider = StubProvider(a_response(text="ok"))
+    workflow = AgentReadWorkflow(
+        provider=provider,
+        reads=StubReads(),
+        audit_sink=InMemoryApprovalUnitOfWork().audit,
+        frames=annuaire,
+    )
+
+    await workflow.answer(question=a_question(None), context=CONTEXT)
+    outil = next(
+        t for t in provider.requests[0].tools if t["function"]["name"] == FIND_FIGMA_FRAME
+    )
+    assert "CLE123" in outil["function"]["description"]
+
+    await annuaire.refresh(CONTEXT)
+    provider._responses.append(a_response(text="ok"))
+    await workflow.answer(question=a_question(None), context=CONTEXT)
+    outil = next(
+        t for t in provider.requests[1].tools if t["function"]["name"] == FIND_FIGMA_FRAME
+    )
+    assert "PROCESS (CLE123)" in outil["function"]["description"]
+
+
+class _Named:
+    def __init__(self, payload) -> None:
+        self.structured_content = payload
+        self.content = ()

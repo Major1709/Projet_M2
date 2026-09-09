@@ -261,3 +261,45 @@ async def test_the_read_goes_through_the_ordinary_audited_path() -> None:
     appel = reads.calls[0]
     assert appel.tool_name == "getFigmaFile"
     assert appel.arguments == {"fileKey": CLE}
+
+
+# --- Nommer les maquettes au modele -----------------------------------------------
+#
+# Sans cela, l'utilisateur devait recopier une cle de vingt-deux caracteres dans sa
+# question : l'annuaire connaissait la maquette, mais rien ne le disait au modele.
+
+
+def test_before_any_indexing_only_the_key_is_announced() -> None:
+    """Une description d'outil est construite au demarrage, avant tout appel reseau.
+    Annoncer un nom qu'on n'a pas encore lu serait inventer ; la cle reste exacte."""
+
+    annuaire = catalogue_for(ReadsReturning())
+
+    assert annuaire.describe() == (CLE,)
+
+
+@pytest.mark.anyio
+async def test_after_indexing_the_file_is_named() -> None:
+    """Le nom vient de la reponse du fournisseur, pas d'une configuration : deux
+    endroits qui nommeraient la meme maquette finiraient par diverger."""
+
+    class ReadsWithName(ReadsReturning):
+        async def execute_call(self, *, call, context):
+            self.calls.append(call)
+            return _Result({"name": "PROCESS", "document": ARBRE_REEL})
+
+    annuaire = catalogue_for(ReadsWithName())
+    await annuaire.refresh(CONTEXT)
+
+    assert annuaire.describe() == (f"PROCESS ({CLE})",)
+
+
+@pytest.mark.anyio
+async def test_a_file_without_a_name_falls_back_to_its_key() -> None:
+    """Un fournisseur qui ne nomme pas son fichier ne doit pas faire disparaitre la
+    maquette de la liste."""
+
+    annuaire = catalogue_for(ReadsReturning())
+    await annuaire.refresh(CONTEXT)
+
+    assert annuaire.describe() == (CLE,)
