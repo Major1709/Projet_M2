@@ -86,6 +86,10 @@ type NexiaChatProps = {
   gateway?: NexiaGateway;
 };
 
+function NexiaOrb() {
+  return <span className="nexia-orb" aria-hidden="true" />;
+}
+
 export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -261,6 +265,10 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
   return (
     <main className={`nexia-shell ${hasConversation ? "nexia-shell--chat" : ""}`}>
       <header className="nexia-header">
+        <div className="nexia-brand">
+          <NexiaOrb />
+          <span className="nexia-brand__name">NEXIA</span>
+        </div>
         <div className="profile">
           <button
             ref={profileButtonRef}
@@ -322,7 +330,7 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
                 className={`message-row message-row--${message.role}`}
               >
                 <div className={`message-avatar message-avatar--${message.role}`} aria-hidden="true">
-                  {message.role === "user" ? "U" : "N"}
+                  {message.role === "user" ? "U" : <NexiaOrb />}
                 </div>
                 <div
                   className={`message-content ${
@@ -391,7 +399,7 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
 
             {isSending ? (
               <article className="message-row message-row--assistant" aria-label="NEXIA prépare sa réponse">
-                <div className="message-avatar message-avatar--assistant" aria-hidden="true">N</div>
+                <div className="message-avatar message-avatar--assistant" aria-hidden="true"><NexiaOrb /></div>
                 <p className="message-bubble message-bubble--assistant message-bubble--loading">
                   <span />
                   <span />
