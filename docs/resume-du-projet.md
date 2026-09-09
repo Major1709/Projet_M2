@@ -1,80 +1,95 @@
 # Résumé du projet
 
-> Ce document conserve le bilan historique du Sprint 0. Depuis le 30 août 2026,
-> l'implémentation frontend décrite ci-dessous a été retirée du dépôt afin d'être
-> reconstruite depuis une base propre. Les commandes et parcours frontend de ce
-> bilan ne décrivent donc plus l'état exécutable courant.
+> Mis à jour le 9 septembre 2026. Ce document décrit l'état **exécutable** du projet.
+> Le bilan historique du Sprint 0, qui décrivait une interface de démonstration
+> alimentée par des données fictives, est remplacé : cette version-là n'existe plus.
 
 ## Objectif
 
-Nous avons préparé la base d’un assistant web qui rassemble les connaissances de
-Jira, Confluence et Figma. L’assistant doit pouvoir rechercher des informations,
-répondre avec des sources et proposer des modifications. Une modification ne doit
-jamais être exécutée sans validation humaine.
+NEXIA est un assistant web qui rassemble les connaissances de Jira, Confluence et
+Figma. Il répond à des questions en citant ses sources, et il peut proposer des
+modifications. **Une modification n'est jamais exécutée sans validation humaine.**
 
-## Ce qui a été réalisé
+## Ce qui fonctionne aujourd'hui
 
-### Interface web
+### Lecture
 
-- création d’une interface Next.js responsive ;
-- affichage et sélection de demandes Jira fictives ;
-- simulation de leur indexation ;
-- chat de démonstration avec des références Jira, Confluence et Figma ;
-- aperçu d’une proposition de modification Confluence ;
-- actions pour approuver, modifier ou rejeter la proposition ;
-- prise en charge du clavier, des lecteurs d’écran et de la réduction des animations.
+L'assistant lit Jira, Confluence et Figma à travers des connecteurs fermés par défaut.
+Une lecture n'aboutit que si elle traverse une liste blanche d'outils, une validation
+de schéma, un contrôle d'empreinte du schéma distant, une liaison serveur des
+identifiants sensibles, puis un audit. **16 outils de lecture** sont déclarés.
 
-### API backend
+Il garde le fil de la conversation : « que dit KAN-2 ? » puis « et son statut ? »
+fonctionne sans répéter la référence.
 
-- création d’une API FastAPI organisée par fonctionnalités ;
-- routes de santé pour vérifier que l’API fonctionne ;
-- création et consultation de conversations ;
-- création, consultation, approbation, rejet et révision de propositions ;
-- protection contre une décision répétée ou basée sur une ancienne version ;
-- conservation d’un hash du contenu approuvé ;
-- blocage d’une mutation tant que la proposition n’est pas approuvée ;
-- nouvelle vérification des permissions juste avant l’exécution.
+Pour Figma, un annuaire de cadres permet de demander « que contient le frame LOGIN ? »
+sans coller de lien.
 
-### Architecture et sécurité
+### Écriture, sous approbation
 
-- définition de l’architecture générale du système ;
-- conception de la recherche RAG et de la gestion des sources ;
-- définition des contrats pour Groq et les connecteurs MCP ;
-- séparation des responsabilités entre le frontend, le backend et les services externes ;
-- règles de sécurité pour l’identité, les permissions, l’audit et les mutations.
+**5 outils d'écriture** sont déclarés : créer un ticket, commenter un ticket, changer
+son statut, créer une page Confluence, mettre à jour une page.
 
-### Infrastructure et qualité
+Le parcours est toujours le même. Le modèle **propose**, la boucle s'arrête, un humain
+**approuve** dans l'interface, puis le backend **exécute**. Entre l'approbation et
+l'écriture, la cible est relue pour confirmer qu'elle n'a pas bougé, et le schéma de
+l'outil est revérifié.
 
-- préparation d’un fichier Docker Compose pour le frontend, l’API, un worker,
-  PostgreSQL/pgvector et Redis ;
-- définition d’une stratégie de tests et de validation ;
-- ajout de tests backend sur les conversations et le cycle d’approbation ;
-- ajout de tests frontend sur l’indexation, le chat et les décisions.
+Ce qui est proposé au modèle est délibérément plus étroit que ce que les serveurs
+acceptent : un champ qui permettrait d'écrire ailleurs que ce que l'écran annonce est
+écarté, et chaque exclusion est justifiée dans `backend/app/mcp/mutation_registry.py`.
 
-## Fonctionnement actuel
+### Identité et traçabilité
 
-Le parcours de démonstration est le suivant :
+L'identité vient d'une connexion Atlassian réelle (OAuth avec PKCE). Chaque lecture,
+chaque proposition et chaque écriture laisse une trace en base, avec le locataire,
+l'utilisateur et la corrélation. Une panne d'audit bloque l'action au lieu de la
+laisser passer sans trace.
 
-1. l’utilisateur sélectionne des demandes Jira ;
-2. il lance une indexation simulée ;
-3. il pose une question dans le chat ;
-4. l’interface affiche une réponse et ses sources fictives ;
-5. une modification Confluence est proposée ;
-6. l’utilisateur peut l’approuver, demander une révision ou la rejeter.
+### Modèle de langage
 
-Le frontend et le backend existent, mais ils ne sont pas encore connectés entre eux.
-L’interface utilise des données fictives et l’API conserve ses données en mémoire.
+Gemini `gemini-3.5-flash-lite`, à travers sa surface compatible OpenAI. L'adaptateur
+Groq reste en place et fonctionnel : le retour arrière est l'échange de deux booléens.
+
+## Ce qui n'est pas fait
+
+- **La recherche sémantique est inactive.** Le module, la table vectorielle et le
+  modèle sont choisis, mais rien n'est indexé et l'image est construite sans le moteur
+  d'inférence. Le lien Jira↔Figma par le sens n'existe donc pas.
+- **La découverte Figma est impossible** avec un jeton personnel : la portée
+  `projects:read` n'est pas offerte. Les maquettes indexées sont désignées en
+  configuration.
+- **Aucune écriture Figma.** Le connecteur passe par l'API REST, pas par un serveur
+  MCP, et une maquette se modifie dans l'outil de conception.
+- Le service `worker` de Docker Compose n'est pas fonctionnel.
 
 ## Organisation du projet
 
 | Dossier | Contenu |
 |---|---|
-| `frontend/` | Interface Next.js et démonstration utilisateur |
-| `backend/` | API FastAPI et règles d’approbation |
-| `infra/` | Configuration Docker Compose prévue pour le MVP |
-| `docs/` | Spécifications, architecture, sécurité et stratégie de tests |
+| `frontend/` | Interface Next.js, chat et écran d'approbation |
+| `backend/` | API FastAPI, connecteurs MCP, domaine d'approbation, agent |
+| `infra/` | Docker Compose et surcouches par connecteur |
+| `docs/` | Spécifications, architecture, sécurité, journaux de développement |
 
 ## Démarrage local
+
+### Backend et services
+
+Prérequis : Docker, et les secrets décrits dans [`../infra/README.md`](../infra/README.md).
+
+```powershell
+docker compose -f infra/compose.yaml `
+  -f infra/compose.atlassian.yaml `
+  -f infra/compose.atlassian-bindings.yaml `
+  -f infra/compose.atlassian-oauth.yaml `
+  -f infra/compose.auth-atlassian.yaml `
+  -f infra/compose.figma.yaml `
+  up -d
+```
+
+Les surcouches ne sont pas optionnelles : sans elles, les connecteurs restent éteints.
+L'API répond sur `http://localhost:8000`, sa documentation sur `/docs`.
 
 ### Frontend
 
@@ -86,65 +101,37 @@ npm install
 npm run dev
 ```
 
-Ouvrir ensuite `http://localhost:3000`.
-
-### Backend
-
-Prérequis : Python 3.11 ou plus récent.
-
-```powershell
-cd backend
-python -m venv .venv
-.venv\Scripts\python -m pip install -e ".[dev]"
-.venv\Scripts\python -m uvicorn app.main:app --reload
-```
-
-L’API est disponible sur `http://localhost:8000`. Sa documentation interactive est
-accessible sur `http://localhost:8000/docs`.
+Ouvrir `http://localhost:3000` et se connecter à Atlassian.
 
 ## Vérifications
 
-Au 6 août 2026, les vérifications suivantes passent :
+Au 9 septembre 2026, sur le commit `3f3cb5a` :
 
-- 8 tests backend ;
-- 4 tests frontend ;
-- contrôle du code Python avec Ruff ;
-- contrôle TypeScript et ESLint ;
-- build de production Next.js.
+- **650 tests backend** hors intégration, **7 tests d'intégration** contre pgvector réel ;
+- Ruff sans avertissement ;
+- les 7 migrations appliquées sur une base vierge ;
+- CI GitHub verte sur Python 3.11 et 3.12.
 
 ```powershell
-cd frontend
-npm run test
-npm run typecheck
-npm run lint
-npm run build
-
-cd ..\backend
-.venv\Scripts\python -m pytest
+cd backend
+.venv\Scripts\python -m pytest -m "not integration"
 .venv\Scripts\ruff check app tests
 ```
 
-## Ce qui reste à faire
-
-- connecter réellement le frontend à l’API ;
-- ajouter l’authentification OIDC ;
-- remplacer le stockage en mémoire par PostgreSQL ;
-- implémenter le vrai parcours RAG et l’appel à Groq ;
-- brancher les connecteurs Jira, Confluence et Figma ;
-- ajouter le worker, les migrations et les Dockerfiles attendus par Docker Compose ;
-- ajouter une intégration continue ;
-- terminer les contrôles de sécurité avant d’autoriser une mutation réelle.
-
 ## État du projet
 
-Le Sprint 0 est terminé : le cadrage, l’architecture, l’interface de démonstration,
-le socle backend et les règles principales de sécurité sont en place. Le projet est
-prêt pour un premier parcours réel en lecture seule, mais **pas encore pour exécuter
-des modifications réelles dans Jira, Confluence ou Figma**.
+Le backend est complet pour le périmètre annoncé : lecture des trois sources, écriture
+Jira et Confluence sous approbation humaine, audit, et intégration continue. La chaîne
+a été éprouvée contre les serveurs réels — des tickets ont été créés depuis des phrases
+en français, avec leur trace.
 
-Pour plus de détails, consulter :
+Ce qui reste relève de l'enrichissement, non du socle : la recherche sémantique, la
+découverte Figma, et les écritures Confluence plus fines.
 
-- [`product/mvp-spec.md`](product/mvp-spec.md) pour les besoins fonctionnels ;
-- [`architecture/system-architecture.md`](architecture/system-architecture.md) pour l’architecture ;
-- [`security/backend-security-review.md`](security/backend-security-review.md) pour la sécurité ;
-- [`qa/test-strategy.md`](qa/test-strategy.md) pour les tests.
+Pour plus de détails :
+
+- [`development-logs/MCP-RW-001.md`](development-logs/MCP-RW-001.md) — l'écriture sous approbation ;
+- [`development-logs/MCP-RO-ARCH-001.md`](development-logs/MCP-RO-ARCH-001.md) — les connecteurs en lecture ;
+- [`product/mvp-spec.md`](product/mvp-spec.md) — les besoins fonctionnels ;
+- [`architecture/system-architecture.md`](architecture/system-architecture.md) — l'architecture ;
+- [`security/backend-security-review.md`](security/backend-security-review.md) — la sécurité.
