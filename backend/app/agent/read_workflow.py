@@ -40,6 +40,7 @@ from app.approvals.workflow import ApprovalWorkflow
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
 from app.core.identity import SecurityContext
+from app.figma.catalogue import FigmaFrameCatalogue
 from app.mcp.adapters.permission import (
     _payload_of,
     _read_for_resource,
@@ -257,6 +258,18 @@ PROPOSAL_MESSAGE = (
 # Quand une ecriture est demandee hors d'un fil. Une proposition appartient a une
 # conversation : c'est ce qui permet de la retrouver, d'en verifier le proprietaire
 # et de l'afficher au bon endroit.
+FIND_FIGMA_FRAME = "findFigmaFrame"
+
+FRAME_FOUND_HEADER = (
+    "Cadres trouves. Utilise getFigmaNode avec le fileKey et le nodeId pour en lire "
+    "le contenu ; ne decris pas un cadre a partir de son nom seul."
+)
+FRAME_NOT_FOUND = (
+    "Aucun cadre nomme \"{name}\" dans les maquettes du projet, meme apres relecture. "
+    "Verifie l'orthographe, ou demande a l'utilisateur le lien de la maquette."
+)
+FRAME_QUERY_REQUIRED = "Indique le nom du cadre a chercher."
+
 NO_CONVERSATION_MESSAGE = (
     "Cette action doit etre proposee depuis une conversation. Reformule ta demande "
     "dans un fil pour que je puisse te la soumettre."
@@ -426,6 +439,42 @@ def _mutation_catalogue(
     )
 
 
+def _frame_catalogue_tool(
+    frames: "FigmaFrameCatalogue | None",
+) -> tuple[dict[str, Any], ...]:
+    """L'outil de recherche de cadres, offert seulement s'il a de quoi chercher.
+
+    Sa description dit ce qu'il rend -- une cle de fichier et un identifiant de noeud
+    -- parce que c'est ce qui apprend au modele que la reponse n'est pas la reponse :
+    il faut ensuite lire le noeud. Sans cela il aurait tendance a decrire un cadre a
+    partir de son seul nom.
+    """
+
+    if frames is None:
+        return ()
+    return (
+        {
+            "type": "function",
+            "function": {
+                "name": FIND_FIGMA_FRAME,
+                "description": (
+                    "Retrouve un cadre Figma par son nom parmi les maquettes du projet. "
+                    "Rend son fileKey et son nodeId, avec lesquels il faut ensuite "
+                    "appeler getFigmaNode pour en lire le contenu."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                    },
+                },
+            },
+        },
+    )
+
+
 def _index_by_tool_name(registry: MCPToolRegistry) -> dict[str, ToolContract]:
     """Map a bare tool name back to its contract, and refuse an ambiguous one.
 
@@ -462,6 +511,9 @@ class AgentReadWorkflow:
         # une configuration.
         mutations: "MCPMutationRegistry | None" = None,
         approvals: "ApprovalWorkflow | None" = None,
+        # Absent quand aucun fichier Figma n'est designe. L'outil n'est alors pas
+        # offert, plutot qu'offert et toujours bredouille.
+        frames: "FigmaFrameCatalogue | None" = None,
         max_reads_per_question: int = DEFAULT_MAX_READS_PER_QUESTION,
         semantic_index: SemanticIndex | None = None,
         retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
@@ -500,13 +552,20 @@ class AgentReadWorkflow:
         self._mutation_contracts = (
             {c.tool_name: c for c in mutations.contracts} if mutations is not None else {}
         )
-        self._catalogue = tool_catalogue(self._registry, offered_systems) + _mutation_catalogue(
-            mutations, offered_systems
+        self._frames = frames
+        self._catalogue = (
+            tool_catalogue(self._registry, offered_systems)
+            + _mutation_catalogue(mutations, offered_systems)
+            + _frame_catalogue_tool(frames)
         )
         # Les ecritures entrent dans les noms autorises : sans cela l'adaptateur
         # journalise "outil non offert" a chaque proposition, et le modele recevrait
         # un signal disant qu'il a invente un nom qu'on lui a pourtant montre.
-        self._allowed_tool_names = tuple(self._contracts) + tuple(self._mutation_contracts)
+        self._allowed_tool_names = (
+            tuple(self._contracts)
+            + tuple(self._mutation_contracts)
+            + ((FIND_FIGMA_FRAME,) if frames is not None else ())
+        )
 
     async def answer(
         self,
@@ -594,6 +653,18 @@ class AgentReadWorkflow:
                 )
 
             for call in response.tool_calls:
+                # L'annuaire repond sans passer par un connecteur : il n'y a rien a
+                # autoriser chez une source, seulement une recherche locale dont le
+                # resultat sert a construire la vraie lecture au tour suivant. Il ne
+                # compte donc pas dans le budget de lectures.
+                if call.tool_name == FIND_FIGMA_FRAME and self._frames is not None:
+                    messages.append(
+                        self._tool_turn(
+                            call,
+                            await self._find_frames(call=call, context=context),
+                        )
+                    )
+                    continue
                 if attempted_reads >= self._max_reads_per_question:
                     await self._record_skip(
                         call=call,
@@ -792,6 +863,34 @@ class AgentReadWorkflow:
                 explanation=proposal.explanation,
             ),
         )
+
+    async def _find_frames(
+        self,
+        *,
+        call: ProposedToolCall,
+        context: SecurityContext,
+    ) -> str:
+        """Repondre a une recherche de cadre, en clair pour le modele.
+
+        Le resultat n'est pas du contenu de source : ce sont des noms et des
+        identifiants que NOUS avons indexes a partir de lectures deja autorisees. Il
+        n'est donc pas encadre comme du contenu non fiable -- mais rien n'y est
+        interprete non plus, seulement recopie.
+        """
+
+        assert self._frames is not None
+        demande = call.arguments.get("name")
+        if not isinstance(demande, str) or not demande.strip():
+            return FRAME_QUERY_REQUIRED
+        trouves = await self._frames.find(query=demande, context=context)
+        if not trouves:
+            return FRAME_NOT_FOUND.format(name=demande.strip()[:120])
+        lignes = [
+            f"- {e.name} ({e.node_type}) | fileKey={e.file_key} nodeId={e.node_id} "
+            f"| emplacement : {e.location}"
+            for e in trouves
+        ]
+        return FRAME_FOUND_HEADER + chr(10) + chr(10).join(lignes)
 
     async def _resource_state(
         self,

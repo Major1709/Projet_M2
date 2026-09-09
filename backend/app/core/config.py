@@ -202,6 +202,13 @@ class Settings(BaseSettings):
     )
     mcp_figma_grant_tenant_id: str | None = Field(default=None, min_length=1, max_length=200)
     mcp_figma_grant_user_id: str | None = Field(default=None, min_length=1, max_length=200)
+    # Les maquettes que l'annuaire de cadres indexe. Designees par le deploiement, et
+    # non decouvertes : l'API Figma ne sait pas lister les fichiers d'un utilisateur
+    # avec un jeton personnel -- la portee projects:read n'y est pas offerte -- et
+    # inventer une decouverte impossible aurait produit un outil qui echoue toujours.
+    #
+    # Vide, l'annuaire n'est pas monte et son outil n'est pas offert au modele.
+    figma_indexed_file_keys: tuple[str, ...] = ()
     mcp_atlassian_jira_cloud_id: UUID | None = None
     mcp_atlassian_confluence_cloud_id: UUID | None = None
     # The Groq endpoint is fixed in the adapter, not declared here. A destination

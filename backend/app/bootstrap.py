@@ -40,6 +40,7 @@ from app.core.database import (
     create_session_factory,
     database_is_ready,
 )
+from app.figma.catalogue import FigmaFrameCatalogue
 from app.mcp.adapters.figma_rest import FigmaRESTTransport
 from app.mcp.adapters.grants import (
     DevelopmentFileGrantBroker,
@@ -291,6 +292,26 @@ def _build_mutations(
     )
 
 
+def _build_frame_catalogue(
+    settings: Settings,
+    mcp_reads: MCPReadWorkflow,
+) -> FigmaFrameCatalogue | None:
+    """L'annuaire de cadres, monte seulement s'il a des maquettes a indexer.
+
+    Les deux conditions comptent. Sans connecteur Figma actif, chaque indexation
+    echouerait ; sans fichier designe, l'annuaire serait vide et son outil ne
+    rendrait jamais rien -- offrir au modele un outil qui echoue toujours est pire
+    que ne pas l'offrir, parce qu'il le rappellera.
+    """
+
+    if not settings.mcp_figma_enabled or not settings.figma_indexed_file_keys:
+        return None
+    return FigmaFrameCatalogue(
+        reads=mcp_reads,
+        file_keys=settings.figma_indexed_file_keys,
+    )
+
+
 def _writes_are_open(settings: Settings, approvals: ApprovalWorkflow | None) -> bool:
     """Les ecritures sont-elles reellement proposables.
 
@@ -357,6 +378,7 @@ def _build_agent(
         # ferait promettre au modele une action qui n'arriverait jamais.
         mutations=MCPMutationRegistry() if _writes_are_open(settings, approvals) else None,
         approvals=approvals if _writes_are_open(settings, approvals) else None,
+        frames=_build_frame_catalogue(settings, mcp_reads),
         # The same sink the provider and the reads write to, so a question and
         # everything it caused share one trail.
         audit_sink=audit_sink,
