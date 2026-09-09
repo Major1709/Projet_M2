@@ -15,10 +15,17 @@ import {
   type NexiaGateway,
   nexiaApi,
 } from "@/adapters/nexia-api";
+import { MutationApprovalPreview } from "@/ui/MutationApprovalPreview";
 
 type ChatMessage =
   | { id: string; role: "user"; text: string }
-  | { id: string; role: "assistant"; text: string; sources: NexiaAnswer["sources"] };
+  | {
+      id: string;
+      role: "assistant";
+      text: string;
+      sources: NexiaAnswer["sources"];
+      approval?: NexiaAnswer["approval"];
+    };
 
 const MAX_QUESTION_LENGTH = 4000;
 
@@ -78,6 +85,10 @@ function sourceIcon(source: NexiaAnswer["sources"][number]): SourceIcon {
 type NexiaChatProps = {
   gateway?: NexiaGateway;
 };
+
+function NexiaOrb() {
+  return <span className="nexia-orb" aria-hidden="true" />;
+}
 
 export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -185,6 +196,7 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
           role: "assistant",
           text: answer.answer,
           sources: answer.sources,
+          approval: answer.approval,
         },
       ]);
     } catch (caught) {
@@ -253,6 +265,10 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
   return (
     <main className={`nexia-shell ${hasConversation ? "nexia-shell--chat" : ""}`}>
       <header className="nexia-header">
+        <div className="nexia-brand">
+          <NexiaOrb />
+          <span className="nexia-brand__name">NEXIA</span>
+        </div>
         <div className="profile">
           <button
             ref={profileButtonRef}
@@ -314,9 +330,15 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
                 className={`message-row message-row--${message.role}`}
               >
                 <div className={`message-avatar message-avatar--${message.role}`} aria-hidden="true">
-                  {message.role === "user" ? "U" : "N"}
+                  {message.role === "user" ? "U" : <NexiaOrb />}
                 </div>
-                <div className="message-content">
+                <div
+                  className={`message-content ${
+                    message.role === "assistant" && message.approval
+                      ? "message-content--approval"
+                      : ""
+                  }`}
+                >
                   <p className={`message-bubble message-bubble--${message.role}`}>{message.text}</p>
                   {message.role === "assistant" && message.sources.length > 0 ? (
                     <div className="message-sources" aria-label="Sources de la réponse">
@@ -364,13 +386,20 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
                       </ul>
                     </div>
                   ) : null}
+                  {message.role === "assistant" && message.approval ? (
+                    <MutationApprovalPreview
+                      approval={message.approval}
+                      gateway={gateway}
+                      onSessionRequired={() => setIsDisconnected(true)}
+                    />
+                  ) : null}
                 </div>
               </article>
             ))}
 
             {isSending ? (
               <article className="message-row message-row--assistant" aria-label="NEXIA prépare sa réponse">
-                <div className="message-avatar message-avatar--assistant" aria-hidden="true">N</div>
+                <div className="message-avatar message-avatar--assistant" aria-hidden="true"><NexiaOrb /></div>
                 <p className="message-bubble message-bubble--assistant message-bubble--loading">
                   <span />
                   <span />

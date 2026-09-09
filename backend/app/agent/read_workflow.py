@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Collection, Sequence
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
@@ -30,16 +31,34 @@ from app.agent.errors import AgentAuditUnavailable
 from app.agent.markup import reduce_markup
 from app.agent.untrusted import neutralise
 from app.agent.untrusted import wrap as wrap_untrusted
+from app.approvals.domain import (
+    ActionProposalCreate,
+    ActionProposalState,
+    ActionTarget,
+)
+from app.approvals.workflow import ApprovalWorkflow
 from app.audit.domain import AuditEvent, AuditEventType
 from app.audit.ports import AuditSink
 from app.core.identity import SecurityContext
-from app.mcp.domain import MCPReadSourceSystem, MCPReadToolCall, ToolActionClass
+from app.figma.catalogue import FigmaFrameCatalogue
+from app.mcp.adapters.permission import (
+    _payload_of,
+    _read_for_resource,
+    source_version_of,
+)
+from app.mcp.domain import (
+    MCPReadSourceSystem,
+    MCPReadToolCall,
+    SourceSystem,
+    ToolActionClass,
+)
 from app.mcp.errors import (
     MCPInputRejected,
     MCPReadError,
     MCPRemoteToolFailure,
     MCPResponseTooLarge,
 )
+from app.mcp.mutation_registry import MCPMutationRegistry, MutationToolContract
 from app.mcp.read_workflow import MCPReadWorkflow
 from app.mcp.registry import MCPToolRegistry, ToolContract
 from app.semantics.workflow import SemanticIndex
@@ -223,6 +242,47 @@ class PriorTurn(BaseModel):
 class AgentStopReason(StrEnum):
     ANSWERED = "answered"
     STEP_LIMIT_REACHED = "step_limit_reached"
+    # La boucle s'est arretee parce qu'une ecriture a ete demandee. Ce n'est ni un
+    # succes ni un echec : c'est une question posee a un humain, et rien ne bougera
+    # tant qu'il n'aura pas repondu.
+    APPROVAL_REQUIRED = "approval_required"
+
+
+# Ce que le modele recoit quand il propose une ecriture. Ecrit au passe accompli --
+# la proposition existe -- et sans promesse : elle n'a pas ete executee.
+PROPOSAL_MESSAGE = (
+    "J'ai prepare cette action. Elle attend ton approbation et ne sera pas executee "
+    "avant que tu l'aies validee."
+)
+
+# Quand une ecriture est demandee hors d'un fil. Une proposition appartient a une
+# conversation : c'est ce qui permet de la retrouver, d'en verifier le proprietaire
+# et de l'afficher au bon endroit.
+FIND_FIGMA_FRAME = "findFigmaFrame"
+
+FRAME_FOUND_HEADER = (
+    "Cadres trouves. Utilise getFigmaNode avec le fileKey et le nodeId pour en lire "
+    "le contenu ; ne decris pas un cadre a partir de son nom seul."
+)
+FRAME_NOT_FOUND = (
+    "Aucun cadre nomme \"{name}\" dans les maquettes du projet, meme apres relecture. "
+    "Verifie l'orthographe, ou demande a l'utilisateur le lien de la maquette."
+)
+FRAME_QUERY_REQUIRED = "Indique le nom du cadre a chercher."
+
+NO_CONVERSATION_MESSAGE = (
+    "Cette action doit etre proposee depuis une conversation. Reformule ta demande "
+    "dans un fil pour que je puisse te la soumettre."
+)
+
+# Quand la ressource a modifier ne peut pas etre epinglee : elle n'existe pas, elle
+# n'est pas visible, ou la source ne dit pas sa version. Refuse plutot que propose :
+# une proposition sans version serait refusee a l'execution, apres que l'humain a
+# clique, ce qui est le pire moment pour apprendre que la cible etait introuvable.
+UNPINNABLE_TARGET_MESSAGE = (
+    "Je n'ai pas pu retrouver la ressource visee, ou elle ne m'est pas accessible. "
+    "Verifie son identifiant avant que je propose cette action."
+)
 
 
 class AgentQuestion(BaseModel):
@@ -254,6 +314,45 @@ class AgentAnswer(BaseModel):
     # workflow's provenance, never from the model's account of what it read -- a
     # model that hallucinates a citation cannot make one appear here.
     sources: tuple[AgentSource, ...] = ()
+    # Presente uniquement avec APPROVAL_REQUIRED. Nommee "approval" et non
+    # "proposal" parce que c'est le nom que le frontend lit deja : les deux cotes ont
+    # ete ecrits en parallele et ont choisi des mots differents, et renommer ici
+    # coutait une ligne la ou renommer la-bas aurait fait retravailler du code deja
+    # eprouve.
+    #
+    # Porte ce dont une interface a besoin pour afficher l'ecran, jeton de decision
+    # compris -- celui-ci n'est rendu qu'ici et nulle part ailleurs, donc un client
+    # qui ne le garde pas ne pourra plus approuver.
+    approval: "ProposedMutationView | None" = None
+
+
+class ProposedMutationView(BaseModel):
+    """Une proposition d'ecriture, telle qu'une interface la recoit.
+
+    Volontairement plate et minimale. Elle ne porte pas l'etat ni les empreintes
+    internes : ce qu'un humain doit voir pour decider, c'est l'outil, la cible et la
+    charge, pas la mecanique qui les encadre.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    version: int
+    decision_token: str
+    tool_name: str
+    source_system: SourceSystem
+    action_class: ToolActionClass
+    payload: dict[str, Any]
+    # L'etat pilote ce que l'interface propose : des boutons tant que la proposition
+    # attend, un compte rendu une fois qu'elle est tranchee. Sans lui, une interface
+    # doit deviner, et devinera mal apres un rechargement.
+    state: ActionProposalState
+    # Une proposition expire. L'echeance est envoyee pour que l'interface puisse le
+    # dire avant le clic plutot que de laisser l'utilisateur decouvrir un 410 GONE.
+    expires_at: datetime
+    # Ce que le modele a avance pour justifier l'ecriture, quand il en donne une.
+    # Affichee a part de la charge : c'est son argument, pas un fait.
+    explanation: str | None = None
 
 
 def tool_catalogue(
@@ -305,6 +404,77 @@ def tool_catalogue(
     )
 
 
+def _mutation_catalogue(
+    registry: "MCPMutationRegistry | None",
+    offered: Collection[MCPReadSourceSystem] | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Les ecritures declarees, presentees au modele comme des outils ordinaires.
+
+    Le modele n'a pas a savoir qu'une ecriture est speciale : c'est la boucle qui
+    l'arrete et un humain qui tranche. Lui expliquer dans une description qu'il
+    "propose seulement" l'inviterait a raisonner sur la garantie plutot qu'a s'en
+    remettre a elle -- et la garantie ne vient pas de sa cooperation.
+
+    La description dit en revanche ce qui est vrai et utile : l'action attend une
+    approbation. Un modele qui l'ignore ne peut rien forcer ; un modele qui la lit
+    saura le dire a l'utilisateur au lieu d'annoncer un ticket cree.
+    """
+
+    if registry is None:
+        return ()
+    return tuple(
+        {
+            "type": "function",
+            "function": {
+                "name": contract.tool_name,
+                "description": (
+                    f"Ecriture {contract.source_system.value} : {contract.tool_name}. "
+                    "Soumise a l'approbation d'un humain avant execution."
+                ),
+                "parameters": contract.public_input_schema,
+            },
+        }
+        for contract in registry.contracts
+        if offered is None or contract.source_system in offered
+    )
+
+
+def _frame_catalogue_tool(
+    frames: "FigmaFrameCatalogue | None",
+) -> tuple[dict[str, Any], ...]:
+    """L'outil de recherche de cadres, offert seulement s'il a de quoi chercher.
+
+    Sa description dit ce qu'il rend -- une cle de fichier et un identifiant de noeud
+    -- parce que c'est ce qui apprend au modele que la reponse n'est pas la reponse :
+    il faut ensuite lire le noeud. Sans cela il aurait tendance a decrire un cadre a
+    partir de son seul nom.
+    """
+
+    if frames is None:
+        return ()
+    return (
+        {
+            "type": "function",
+            "function": {
+                "name": FIND_FIGMA_FRAME,
+                "description": (
+                    "Retrouve un cadre Figma par son nom parmi les maquettes du projet. "
+                    "Rend son fileKey et son nodeId, avec lesquels il faut ensuite "
+                    "appeler getFigmaNode pour en lire le contenu."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                    },
+                },
+            },
+        },
+    )
+
+
 def _index_by_tool_name(registry: MCPToolRegistry) -> dict[str, ToolContract]:
     """Map a bare tool name back to its contract, and refuse an ambiguous one.
 
@@ -334,6 +504,16 @@ class AgentReadWorkflow:
         audit_sink: AuditSink,
         registry: MCPToolRegistry | None = None,
         offered_systems: Collection[MCPReadSourceSystem] | None = None,
+        # Absents quand le deploiement n'ouvre pas les ecritures. Les deux vont
+        # ensemble : un registre sans workflow offrirait au modele des outils que
+        # personne ne peut transformer en proposition, et un workflow sans registre
+        # n'aurait rien a proposer. L'un sans l'autre est une erreur de cablage, pas
+        # une configuration.
+        mutations: "MCPMutationRegistry | None" = None,
+        approvals: "ApprovalWorkflow | None" = None,
+        # Absent quand aucun fichier Figma n'est designe. L'outil n'est alors pas
+        # offert, plutot qu'offert et toujours bredouille.
+        frames: "FigmaFrameCatalogue | None" = None,
         max_reads_per_question: int = DEFAULT_MAX_READS_PER_QUESTION,
         semantic_index: SemanticIndex | None = None,
         retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
@@ -365,8 +545,27 @@ class AgentReadWorkflow:
         # autorise. Un modele qui nommerait un outil non offert est donc encore
         # reconnu, et refuse par le connecteur eteint avec sa vraie raison, plutot
         # que traite en outil inconnu.
-        self._catalogue = tool_catalogue(self._registry, offered_systems)
-        self._allowed_tool_names = tuple(self._contracts)
+        if (mutations is None) != (approvals is None):
+            raise ValueError("A mutation registry and an approval workflow go together")
+        self._mutations = mutations
+        self._approvals = approvals
+        self._mutation_contracts = (
+            {c.tool_name: c for c in mutations.contracts} if mutations is not None else {}
+        )
+        self._frames = frames
+        self._catalogue = (
+            tool_catalogue(self._registry, offered_systems)
+            + _mutation_catalogue(mutations, offered_systems)
+            + _frame_catalogue_tool(frames)
+        )
+        # Les ecritures entrent dans les noms autorises : sans cela l'adaptateur
+        # journalise "outil non offert" a chaque proposition, et le modele recevrait
+        # un signal disant qu'il a invente un nom qu'on lui a pourtant montre.
+        self._allowed_tool_names = (
+            tuple(self._contracts)
+            + tuple(self._mutation_contracts)
+            + ((FIND_FIGMA_FRAME,) if frames is not None else ())
+        )
 
     async def answer(
         self,
@@ -433,7 +632,39 @@ class AgentReadWorkflow:
             # passed the adapter's checks, and nothing the provider sent that we
             # never looked at.
             messages.append(self._assistant_turn(response.text, response.tool_calls))
+
+            # Une ecriture arrete la boucle, immediatement et avant toute lecture de
+            # ce tour. Continuer laisserait le modele enchainer plusieurs ecritures
+            # sur une seule question, alors que chacune doit etre vue et approuvee
+            # separement. La premiere l'emporte : s'il en a propose plusieurs, les
+            # autres n'ont jamais existe -- il les reproposera au tour suivant s'il
+            # les juge encore utiles, et l'humain aura vu la premiere entre-temps.
+            mutation = next(
+                (c for c in response.tool_calls if c.tool_name in self._mutation_contracts),
+                None,
+            )
+            if mutation is not None:
+                return await self._propose(
+                    call=mutation,
+                    question=question,
+                    context=context,
+                    step=step,
+                    records=records,
+                )
+
             for call in response.tool_calls:
+                # L'annuaire repond sans passer par un connecteur : il n'y a rien a
+                # autoriser chez une source, seulement une recherche locale dont le
+                # resultat sert a construire la vraie lecture au tour suivant. Il ne
+                # compte donc pas dans le budget de lectures.
+                if call.tool_name == FIND_FIGMA_FRAME and self._frames is not None:
+                    messages.append(
+                        self._tool_turn(
+                            call,
+                            await self._find_frames(call=call, context=context),
+                        )
+                    )
+                    continue
                 if attempted_reads >= self._max_reads_per_question:
                     await self._record_skip(
                         call=call,
@@ -482,6 +713,221 @@ class AgentReadWorkflow:
             "name": call.tool_name,
             "content": observation,
         }
+
+    async def _propose(
+        self,
+        *,
+        call: ProposedToolCall,
+        question: AgentQuestion,
+        context: SecurityContext,
+        step: int,
+        records: list[ReadRecord],
+    ) -> AgentAnswer:
+        """Transformer un appel d'ecriture en proposition, et s'arreter la.
+
+        Le modele choisit l'outil et les arguments ; il ne choisit rien d'autre. La
+        classe d'action et le systeme source viennent du contrat, jamais de ce qu'il
+        a renvoye -- c'est la meme regle que pour les lectures, et elle porte plus
+        loin ici : un modele qui pourrait nommer sa propre classe d'action pourrait
+        faire passer une suppression pour une creation dans l'ecran d'approbation.
+
+        Les sources deja consultees sont conservees. La proposition est souvent le
+        resultat de lectures -- "cree un ticket a partir de ce que dit KAN-2" -- et
+        les perdre priverait l'humain de ce sur quoi elle se fonde.
+        """
+
+        contract = self._mutation_contracts[call.tool_name]
+        if self._approvals is None:  # pragma: no cover - garanti par le constructeur
+            raise RuntimeError("A mutation was offered without an approval workflow")
+
+        resource_id = (
+            _as_text(call.arguments.get(contract.resource_argument))
+            if contract.resource_argument
+            else None
+        )
+        resource_version: str | None = None
+        if contract.action_class is not ToolActionClass.CREATE:
+            # Une modification doit epingler la version que l'humain aura sous les
+            # yeux. Juste avant d'ecrire, la revalidation compare cette version a
+            # celle du moment : c'est ce qui refuse d'ecraser un ticket que quelqu'un
+            # d'autre a modifie entre l'approbation et l'execution.
+            #
+            # Sans cette lecture, la proposition partirait sans version et la
+            # revalidation refuserait tout -- une panne qui ne se verrait qu'a la
+            # premiere execution, jamais a la proposition.
+            etat_actuel = await self._resource_state(
+                contract=contract,
+                resource_id=resource_id,
+                context=context,
+            )
+            resource_version = source_version_of(contract.source_system, etat_actuel)
+            if resource_version is None:
+                logger.info(
+                    "A write was refused: the target could not be pinned",
+                    extra={
+                        "correlation_id": question.correlation_id,
+                        "tool_name": call.tool_name,
+                    },
+                )
+                return AgentAnswer(
+                    text=UNPINNABLE_TARGET_MESSAGE,
+                    stop_reason=AgentStopReason.ANSWERED,
+                    steps_used=step,
+                    sources=sources_from(tuple(records)),
+                )
+
+        cible = ActionTarget(
+            source_system=contract.source_system,
+            resource_type=contract.resource_type,
+            resource_id=resource_id,
+            # Le conteneur et le titre sont tires de la charge validee par le schema
+            # public, donc de valeurs que l'humain verra aussi. Aucune information
+            # nouvelle n'entre ici.
+            container_id=(
+                _as_text(call.arguments.get(contract.container_argument))
+                if contract.container_argument
+                else None
+            ),
+            title=(
+                _as_text(call.arguments.get(contract.title_argument))
+                if contract.title_argument
+                else resource_id
+            ),
+            resource_version=resource_version,
+        )
+        # Le domaine refuse une proposition de modification sans diff, et il a raison :
+        # approuver "modifier KAN-2" sans voir ce qui change ne veut rien dire. Le diff
+        # est donc construit ici, a partir de la charge validee et de l'etat lu a
+        # l'instant -- jamais de ce que le modele raconte.
+        diff = (
+            None
+            if contract.action_class is ToolActionClass.CREATE
+            else _diff_for(contract, call.arguments, etat_actuel)
+        )
+
+        if question.conversation_id is None:
+            # Refuse plutot que rattache a un fil invente. Une proposition appartient
+            # a une conversation : c'est ce qui permet d'en verifier le proprietaire.
+            logger.info(
+                "A write was proposed outside a conversation",
+                extra={
+                    "correlation_id": question.correlation_id,
+                    "tool_name": call.tool_name,
+                },
+            )
+            return AgentAnswer(
+                text=NO_CONVERSATION_MESSAGE,
+                stop_reason=AgentStopReason.ANSWERED,
+                steps_used=step,
+                sources=sources_from(tuple(records)),
+            )
+
+        issued = self._approvals.propose(
+            ActionProposalCreate(
+                conversation_id=question.conversation_id,
+                source_system=contract.source_system,
+                tool_name=contract.tool_name,
+                action_class=contract.action_class,
+                target=cible,
+                payload=call.arguments,
+                diff=diff,
+                explanation=None,
+                correlation_id=question.correlation_id,
+            ),
+            context,
+        )
+        proposal = issued.proposal
+        logger.info(
+            "A write is waiting for approval",
+            extra={
+                "correlation_id": question.correlation_id,
+                "tool_name": contract.tool_name,
+                "proposal_id": str(proposal.id),
+            },
+        )
+        return AgentAnswer(
+            text=PROPOSAL_MESSAGE,
+            stop_reason=AgentStopReason.APPROVAL_REQUIRED,
+            steps_used=step,
+            sources=sources_from(tuple(records)),
+            approval=ProposedMutationView(
+                id=proposal.id,
+                version=proposal.version,
+                decision_token=issued.decision_token,
+                tool_name=proposal.tool_name,
+                source_system=proposal.source_system,
+                action_class=proposal.action_class,
+                payload=proposal.payload,
+                state=proposal.state,
+                expires_at=proposal.expires_at,
+                explanation=proposal.explanation,
+            ),
+        )
+
+    async def _find_frames(
+        self,
+        *,
+        call: ProposedToolCall,
+        context: SecurityContext,
+    ) -> str:
+        """Repondre a une recherche de cadre, en clair pour le modele.
+
+        Le resultat n'est pas du contenu de source : ce sont des noms et des
+        identifiants que NOUS avons indexes a partir de lectures deja autorisees. Il
+        n'est donc pas encadre comme du contenu non fiable -- mais rien n'y est
+        interprete non plus, seulement recopie.
+        """
+
+        assert self._frames is not None
+        demande = call.arguments.get("name")
+        if not isinstance(demande, str) or not demande.strip():
+            return FRAME_QUERY_REQUIRED
+        trouves = await self._frames.find(query=demande, context=context)
+        if not trouves:
+            return FRAME_NOT_FOUND.format(name=demande.strip()[:120])
+        lignes = [
+            f"- {e.name} ({e.node_type}) | fileKey={e.file_key} nodeId={e.node_id} "
+            f"| emplacement : {e.location}"
+            for e in trouves
+        ]
+        return FRAME_FOUND_HEADER + chr(10) + chr(10).join(lignes)
+
+    async def _resource_state(
+        self,
+        *,
+        contract: "MutationToolContract",
+        resource_id: str | None,
+        context: SecurityContext,
+    ) -> Any:
+        """L'etat que la source rend pour la ressource visee, ou None.
+
+        Lue par le chemin de lecture ordinaire, donc autorisee et tracee comme
+        n'importe quelle autre lecture. Une proposition qui epingle une version se
+        fonde ainsi sur une lecture que l'audit nomme, et non sur un souvenir.
+
+        Rend None sur tout echec, sans distinguer lequel. La suite est la meme dans
+        tous les cas -- pas de proposition -- et detailler ici apprendrait a un
+        appelant ou se trouve la frontiere entre "ticket inexistant" et "ticket
+        invisible pour ce mandat".
+        """
+
+        if not resource_id:
+            return None
+        read = _read_for_resource(contract.source_system, resource_id)
+        if read is None:
+            return None
+        try:
+            result = await self._reads.execute_call(call=read, context=context)
+        except MCPReadError:
+            return None
+        # Les helpers viennent du verificateur de permission, et c'est
+        # deliberement le meme code : la version epinglee a la proposition doit etre
+        # lue exactement comme celle relue juste avant l'ecriture. Deux extractions
+        # differentes finiraient par diverger, et la comparaison ne comparerait plus
+        # rien. Ils gagneraient a vivre dans un module partage plutot que derriere un
+        # underscore -- dette assumee, notee ici.
+        payload = result.structured_content
+        return _payload_of(result) if payload is None else payload
 
     @staticmethod
     def _replayed(history: Sequence[PriorTurn]) -> list[dict[str, Any]]:
@@ -815,3 +1261,86 @@ __all__ = [
     "PriorTurn",
     "tool_catalogue",
 ]
+
+
+def _as_text(value: Any) -> str | None:
+    """Une valeur de charge, si elle est un texte utilisable comme etiquette.
+
+    La charge a deja passe le schema public, donc ce controle ne protege de rien de
+    nouveau ; il evite seulement qu'un champ absent ou d'un autre type fasse echouer
+    la construction de la cible et emporte la proposition avec lui.
+    """
+
+    return value if isinstance(value, str) and value else None
+
+
+def _diff_for(
+    contract: "MutationToolContract",
+    arguments: dict[str, Any],
+    etat: Any,
+) -> dict[str, Any]:
+    """Ce que l'ecriture changera, dit assez precisement pour qu'on puisse l'approuver.
+
+    Construit a partir de la charge validee et de l'etat lu a l'instant, jamais du
+    recit du modele. Un diff invente serait pire qu'aucun diff : il donnerait a
+    l'humain la sensation d'avoir verifie.
+
+    Chaque outil dit sa propre histoire, parce qu'il n'y en a pas de generique : un
+    commentaire ajoute et un statut deplace ne se resument pas de la meme facon.
+    """
+
+    champs = etat.get("fields") if isinstance(etat, dict) else None
+    champs = champs if isinstance(champs, dict) else {}
+
+    if contract.tool_name == "addCommentToJiraIssue":
+        return {"comment_added": arguments.get("commentBody")}
+
+    if contract.tool_name == "transitionJiraIssue":
+        statut = champs.get("status")
+        actuel = statut.get("name") if isinstance(statut, dict) else None
+        transition = arguments.get("transition")
+        cible = transition.get("id") if isinstance(transition, dict) else None
+        # Le statut d'arrivee n'est PAS resolu : nous n'avons que l'identifiant de la
+        # transition, et le nom qui va avec vit dans getTransitionsForJiraIssue, une
+        # lecture que le registre ne declare pas encore. Le diff le dit tel quel plutot
+        # que d'inventer un libelle -- un ecran qui annoncerait "vers Termine" sans
+        # l'avoir verifie mentirait a l'humain au moment ou il decide.
+        return {"status": {"from": actuel, "to_transition_id": cible}}
+
+    if contract.tool_name == "updateConfluencePage":
+        # Une mise a jour Confluence REMPLACE le corps entier : ce n'est pas un ajout.
+        # Montrer seulement le nouveau texte laisserait croire a un complement, alors
+        # que tout ce qui n'y figure pas disparait. Les deux versions sont donc
+        # presentees, et c'est le seul diff du fichier ou l'ancien etat compte autant
+        # que le nouveau.
+        ancien = etat.get("body") if isinstance(etat, dict) else None
+        titre_actuel = etat.get("title") if isinstance(etat, dict) else None
+        change: dict[str, Any] = {
+            "body": {
+                "from": _borne(ancien),
+                "to": _borne(arguments.get("body")),
+                "replaces_everything": True,
+            }
+        }
+        nouveau_titre = arguments.get("title")
+        if isinstance(nouveau_titre, str) and nouveau_titre != titre_actuel:
+            change["title"] = {"from": titre_actuel, "to": nouveau_titre}
+        return change
+
+    # Un outil de modification ajoute plus tard sans passer par ici produirait un diff
+    # vide, que le domaine accepterait. Le refus est donc explicite.
+    raise ValueError(f"No diff is defined for {contract.tool_name}")
+
+
+# Un corps de page peut peser des dizaines de milliers de caracteres, et le diff est
+# stocke avec la proposition. Borne, donc -- mais jamais en silence : une troncature
+# invisible ferait approuver un changement dont on ne montre qu'un fragment, ce qui
+# est pire que de ne rien montrer.
+MAX_DIFF_CHARACTERS = 4_000
+DIFF_TRUNCATED = "\n[...] contenu tronque pour l'affichage ; le texte complet sera ecrit."
+
+
+def _borne(valeur: Any) -> Any:
+    if not isinstance(valeur, str) or len(valeur) <= MAX_DIFF_CHARACTERS:
+        return valeur
+    return valeur[:MAX_DIFF_CHARACTERS] + DIFF_TRUNCATED

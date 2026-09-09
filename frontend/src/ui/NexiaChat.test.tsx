@@ -10,6 +10,30 @@ function createGateway(overrides: Partial<NexiaGateway> = {}): NexiaGateway {
   return {
     createConversation: vi.fn().mockResolvedValue("conversation-1"),
     askQuestion: vi.fn().mockResolvedValue({ answer: "Réponse NEXIA", sources: [] }),
+    createActionProposal: vi.fn().mockResolvedValue({
+      target: "jira",
+      proposalId: "proposal-1",
+      decisionToken: "decision-token-123456789012345",
+      version: 1,
+      state: "PENDING_APPROVAL",
+    }),
+    approveActionProposal: vi.fn().mockResolvedValue({
+      target: "jira",
+      proposalId: "proposal-1",
+      version: 2,
+      state: "APPROVED",
+    }),
+    rejectActionProposal: vi.fn().mockResolvedValue({
+      target: "jira",
+      proposalId: "proposal-1",
+      version: 2,
+      state: "REJECTED",
+    }),
+    executeActionProposal: vi.fn().mockResolvedValue({
+      succeeded: true,
+      partial: false,
+      externalIds: ["KAN-42"],
+    }),
     signOut: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -166,6 +190,36 @@ describe("NexiaChat", () => {
       expect(reference).toHaveAttribute("rel", "noreferrer");
     });
     expect(within(references[3]).queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it("affiche la proposition d’écriture dans le tour assistant, sans naviguer vers une page", async () => {
+    const gateway = createGateway({
+      askQuestion: vi.fn().mockResolvedValue({
+        answer: "J’ai préparé le ticket. Vérifiez le contenu avant de créer.",
+        sources: [],
+        approval: {
+          target: "jira",
+          action: "Créer un ticket",
+          destination: "Jira · Backlog PKA",
+          objectType: "User Story",
+          project: "PKA",
+          title: "Stabiliser le viewport du chat",
+          description: "Conserver la zone de saisie visible.",
+          label: "Écriture Jira",
+        },
+      }),
+    });
+    const user = userEvent.setup();
+    render(<NexiaChat gateway={gateway} />);
+
+    await user.type(screen.getByRole("textbox", { name: "Votre message" }), "Prépare un ticket Jira");
+    await user.click(screen.getByRole("button", { name: "Envoyer le message" }));
+
+    const approval = await screen.findByRole("complementary", { name: "Créer un ticket" });
+    expect(approval).toHaveClass("approval-panel--inline");
+    expect(within(approval).getByText("Jira · Backlog PKA")).toBeInTheDocument();
+    await user.click(within(approval).getByRole("button", { name: "Approuver et créer" }));
+    expect(within(approval).getByRole("status")).toHaveTextContent("Action approuvée");
   });
 
   it("réinitialise localement et crée paresseusement un nouveau fil au prochain message", async () => {

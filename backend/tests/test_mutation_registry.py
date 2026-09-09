@@ -30,8 +30,12 @@ def a_contract(**changes) -> MutationToolContract:
             "type": "object",
             "additionalProperties": False,
             "required": ["summary"],
-            "properties": {"summary": {"type": "string"}},
+            "properties": {
+                "summary": {"type": "string"},
+                "projectKey": {"type": "string"},
+            },
         },
+        "container_argument": "projectKey",
         "provider_input_schema": {
             "type": "object",
             "properties": {"cloudId": {"type": "string"}},
@@ -199,3 +203,186 @@ def test_the_provider_schema_is_copied_and_not_simplified() -> None:
     assert schema_sha256(json.loads(json.dumps(contrat.provider_input_schema))) == (
         contrat.provider_input_schema_sha256
     )
+
+
+# --- Les deux ecritures qui modifient un ticket existant ---------------------------
+
+
+def test_a_comment_is_classified_as_an_update_not_a_creation() -> None:
+    """Ce qui decide n'est pas la grammaire mais la revalidation.
+
+    Un commentaire est bien cree, mais ce qu'il faut confirmer juste avant d'ecrire,
+    c'est que LE TICKET existe toujours et n'a pas bouge depuis l'approbation. Classe
+    en creation, la verification porterait sur le projet, ce qui ne dit rien du ticket.
+    """
+
+    contrat = MCPMutationRegistry().get(SourceSystem.JIRA, "addCommentToJiraIssue")
+
+    assert contrat is not None
+    assert contrat.action_class is ToolActionClass.UPDATE
+    assert contrat.resource_argument == "issueIdOrKey"
+
+
+def test_the_comment_id_field_is_refused() -> None:
+    """L'exclusion la plus importante du registre.
+
+    ``commentId`` transforme l'ajout en MODIFICATION d'un commentaire existant. Un
+    contrat annonce comme "ajouter un commentaire" pourrait alors en reecrire un
+    autre, ecrit par quelqu'un d'autre, sans que l'ecran d'approbation le montre.
+    """
+
+    contrat = MCPMutationRegistry().get(SourceSystem.JIRA, "addCommentToJiraIssue")
+    assert contrat is not None
+
+    assert "commentId" in contrat.provider_input_schema["properties"]
+    assert "commentId" not in contrat.public_input_schema["properties"]
+
+
+def test_a_hidden_comment_cannot_be_proposed() -> None:
+    """``commentVisibility`` restreint qui verra le commentaire. Un humain qui approuve
+    "ajouter un commentaire" ne s'attend pas a ce qu'il soit cache."""
+
+    contrat = MCPMutationRegistry().get(SourceSystem.JIRA, "addCommentToJiraIssue")
+    assert contrat is not None
+
+    assert "commentVisibility" not in contrat.public_input_schema["properties"]
+
+
+def test_a_transition_cannot_smuggle_field_changes() -> None:
+    """``fields`` et ``update`` permettent de modifier n'importe quel champ AU PASSAGE
+    d'une transition -- le meme sac ouvert qu'additional_fields, en plus trompeur :
+    l'humain approuve "passer KAN-2 en Termine" et l'appel pourrait reassigner le
+    ticket ou vider sa description."""
+
+    contrat = MCPMutationRegistry().get(SourceSystem.JIRA, "transitionJiraIssue")
+    assert contrat is not None
+
+    accepte = contrat.provider_input_schema["properties"]
+    offert = contrat.public_input_schema["properties"]
+
+    for dangereux in ("fields", "update", "historyMetadata"):
+        assert dangereux in accepte
+        assert dangereux not in offert
+    assert set(offert) == {"issueIdOrKey", "transition"}
+
+
+def test_the_issue_key_is_anchored() -> None:
+    """Un identifiant de ticket a une forme. La borner empeche qu'une valeur libre
+    parte vers le fournisseur au seul motif qu'elle est une chaine."""
+
+    import re
+
+    for outil in ("addCommentToJiraIssue", "transitionJiraIssue"):
+        contrat = MCPMutationRegistry().get(SourceSystem.JIRA, outil)
+        assert contrat is not None
+        motif = contrat.public_input_schema["properties"]["issueIdOrKey"]["pattern"]
+        assert re.match(motif, "KAN-2")
+        assert not re.match(motif, "../autre")
+        assert not re.match(motif, "kan-2")
+
+
+def test_an_update_without_a_resource_argument_is_refused_at_construction() -> None:
+    """Sans lui, la revalidation n'a rien a relire et refuserait tout -- ce qui se
+    decouvrirait a la premiere execution plutot qu'au demarrage."""
+
+    with pytest.raises(ValueError, match="must name its resource argument"):
+        a_contract(action_class=ToolActionClass.UPDATE, container_argument=None)
+
+
+def test_a_named_argument_must_exist_in_the_public_schema() -> None:
+    """Une faute de frappe dans un nom d'argument rendrait la cible vide sans rien
+    casser de visible."""
+
+    with pytest.raises(ValueError, match="which it does not accept"):
+        a_contract(title_argument="titreQuiNexistePas")
+
+
+def test_every_declared_fingerprint_is_the_live_one() -> None:
+    """Les trois releves en direct sur mcp.atlassian.com le 01/09/2026."""
+
+    attendues = {
+        "createJiraIssue": "828960eaf117a59f0b27b4e80fb6893f4091474d429815cb04a2b50f21e28cdc",
+        "addCommentToJiraIssue": (
+            "36311209ea980a82f1366eb4ac2e11317565fd093b5a6dafb5a862750252a37d"
+        ),
+        "transitionJiraIssue": (
+            "f054dd3f56c2cdf39f1fd178acede2cce5e1bad1580ea6a385029a6e0ccb95bc"
+        ),
+        "createConfluencePage": (
+            "ecd3fadf71d215eec0a3d7c5465426d3010cd3e79819470b307e5fbba9367f8b"
+        ),
+        "updateConfluencePage": (
+            "88a6bfb22c7e9797c27324c80130da32693c1942752e830a1acb5cac9652debe"
+        ),
+    }
+
+    for contrat in MCPMutationRegistry().contracts:
+        assert contrat.provider_input_schema_sha256 == attendues[contrat.tool_name]
+
+
+# --- Confluence -------------------------------------------------------------------
+
+
+def test_the_body_format_is_imposed_by_the_server_not_chosen_by_the_model() -> None:
+    """Le fournisseur interprete le corps en HTML par defaut. Laisser ce choix au
+    modele, c'est accepter qu'un jour il ecrive du markdown dans un champ lu comme du
+    HTML : la page s'affiche alors avec ses asterisques en clair, et personne ne l'a
+    decide."""
+
+    for outil in ("createConfluencePage", "updateConfluencePage"):
+        contrat = MCPMutationRegistry().get(SourceSystem.CONFLUENCE, outil)
+        assert contrat is not None
+        assert dict(contrat.fixed_provider_arguments) == {"contentFormat": "markdown"}
+        # Impose, donc jamais offert : sinon l'humain approuverait une valeur et une
+        # autre partirait.
+        assert "contentFormat" not in contrat.public_input_schema["properties"]
+
+
+def test_a_fixed_argument_may_not_also_be_offered() -> None:
+    with pytest.raises(ValueError, match="both fixes and offers"):
+        a_contract(fixed_provider_arguments={"projectKey": "KAN"})
+
+
+def test_a_new_page_cannot_be_made_private() -> None:
+    """Un humain qui approuve "creer une page dans l'espace ENG" ne s'attend pas a ce
+    qu'elle soit invisible pour l'equipe."""
+
+    contrat = MCPMutationRegistry().get(SourceSystem.CONFLUENCE, "createConfluencePage")
+    assert contrat is not None
+
+    accepte = contrat.provider_input_schema["properties"]
+    offert = contrat.public_input_schema["properties"]
+
+    assert "isPrivate" in accepte
+    for ecarte in ("isPrivate", "status", "contentType", "parentId", "subtype"):
+        assert ecarte not in offert
+    assert set(offert) == {"spaceId", "title", "body"}
+
+
+def test_an_update_cannot_move_the_page() -> None:
+    """Le refus le plus important de ce contrat : spaceId et parentId DEPLACENT la
+    page. L'humain approuve "mettre a jour cette page" et elle changerait d'espace
+    sans que rien ne l'annonce."""
+
+    contrat = MCPMutationRegistry().get(SourceSystem.CONFLUENCE, "updateConfluencePage")
+    assert contrat is not None
+
+    accepte = contrat.provider_input_schema["properties"]
+    offert = contrat.public_input_schema["properties"]
+
+    for deplacement in ("spaceId", "parentId"):
+        assert deplacement in accepte
+        assert deplacement not in offert
+    for autre in ("status", "versionMessage"):
+        assert autre not in offert
+
+
+def test_confluence_writes_use_the_confluence_binding() -> None:
+    """Le liant choisit le cloudId injecte. Se tromper ferait ecrire sur le mauvais
+    produit du meme site."""
+
+    for outil in ("createConfluencePage", "updateConfluencePage"):
+        contrat = MCPMutationRegistry().get(SourceSystem.CONFLUENCE, outil)
+        assert contrat is not None
+        assert contrat.binding_kind is MCPBindingKind.CONFLUENCE
+        assert contrat.resource_type == "page"
