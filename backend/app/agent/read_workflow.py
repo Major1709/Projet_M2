@@ -186,14 +186,26 @@ SYSTEM_PROMPT = (
     "Quand on te demande un CAHIER DES CHARGES ou un BACKLOG a partir d'un processus "
     "Figma, lis-le avec extractFigmaProcess -- il suit les connecteurs, alors qu'une "
     "lecture de noeud ne rend qu'une forme isolee. Rends ensuite un tableau markdown "
-    "avec exactement ces quatre colonnes, dans cet ordre :\n"
-    "Bloc fonctionnel | User story | Critere d'acceptation | Remarque\n"
-    "Une ligne par etape du processus, et rien avant le tableau. Les user stories "
-    "s'ecrivent \"En tant que ..., je veux ..., afin de ...\". Un critere d'acceptation "
-    "se verifie : il decrit ce qu'on observe, pas une intention. La remarque porte ce "
-    "que la maquette montre et que les trois autres colonnes ne disent pas -- un "
-    "enchainement, une condition -- et reste vide si tu n'as rien de tel a y mettre "
-    "plutot que d'etre remplie pour l'etre."
+    "avec exactement ces sept colonnes, dans cet ordre :\n"
+    "Bloc fonctionnel | Ref. PBS | Userstory | Description | "
+    "Criteres d'acceptation - Contexte | Criteres d'acceptation - Scenario | Remarques\n"
+    "Une ligne par etape du processus. Le tableau seul : aucune introduction, aucune "
+    "section numerotee, aucun texte avant ou apres.\n"
+    "Bloc fonctionnel : le nom de l'etape, tel que la maquette l'appelle.\n"
+    "Ref. PBS : laisse VIDE. Cette reference est attribuee par l'equipe, et en "
+    "inventer une creerait un renvoi vers un element qui n'existe pas.\n"
+    "Userstory : \"En tant que ..., je souhaite ..., afin de ...\".\n"
+    "Description : ce qu'il faut mettre en place, en une ou deux phrases. Elle dit le "
+    "COMMENT quand la user story dit le pourquoi ; si tu n'as rien a y ajouter, ne "
+    "reformule pas la user story autrement.\n"
+    "Criteres d'acceptation - Contexte : la situation de depart, sous la forme "
+    "\"Etant donne que l'utilisateur ...\".\n"
+    "Criteres d'acceptation - Scenario : le declencheur et le resultat observable, "
+    "sous la forme \"Lorsque ... Alors ...\". Ce qui suit Alors doit se constater, pas "
+    "s'esperer : un ecran qui s'affiche, un message, un etat qui change.\n"
+    "Remarques : ce que la maquette montre et que les autres colonnes ne disent pas -- "
+    "un enchainement, une condition, un cas particulier. Reste VIDE si tu n'as rien de "
+    "tel : une colonne toujours remplie cesse d'etre lue."
 )
 
 # A read that failed for a reason the model can act on. Everything else stops the
@@ -271,6 +283,16 @@ PROPOSAL_MESSAGE = (
 # conversation : c'est ce qui permet de la retrouver, d'en verifier le proprietaire
 # et de l'afficher au bon endroit.
 FIND_FIGMA_FRAME = "findFigmaFrame"
+
+# Dit au modele ce qu'il peut lire sans le chercher. La derniere phrase est la plus
+# utile : sans elle, il appelait findFigmaFrame pour obtenir une cle deja presente
+# dans le message.
+FIGMA_FILES_HEADER = (
+    "Maquettes Figma disponibles, avec leur cle de fichier. Utilise ces cles "
+    "directement -- extractFigmaProcess pour un processus, getFigmaFile pour la "
+    "structure -- sans passer par une recherche de cadre. Ne cherche un cadre que si "
+    "la question en nomme un precisement."
+)
 
 FRAME_FOUND_HEADER = (
     "Cadres trouves. Utilise getFigmaNode avec le fileKey et le nodeId pour en lire "
@@ -464,12 +486,6 @@ def _frame_catalogue_tool(
 
     if frames is None:
         return ()
-    maquettes = frames.describe()
-    connues = (
-        " Maquettes indexees : " + " ; ".join(maquettes) + "."
-        if maquettes
-        else ""
-    )
     return (
         {
             "type": "function",
@@ -478,7 +494,7 @@ def _frame_catalogue_tool(
                 "description": (
                     "Retrouve un cadre Figma par son nom parmi les maquettes du projet. "
                     "Rend son fileKey et son nodeId, avec lesquels il faut ensuite "
-                    "appeler getFigmaNode pour en lire le contenu." + connues
+                    "appeler getFigmaNode pour en lire le contenu."
                 ),
                 "parameters": {
                     "type": "object",
@@ -601,6 +617,15 @@ class AgentReadWorkflow:
         messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(self._replayed(history))
         messages.append({"role": "user", "content": question.question})
+        # Les maquettes disponibles, annoncees AVANT que le modele choisisse ses
+        # outils. Mise dans la description de l'outil de recherche, cette liste
+        # produisait l'effet inverse de celui voulu : le modele en deduisait qu'il
+        # fallait passer par cet outil pour obtenir une cle qu'il avait deja sous les
+        # yeux, et brulait ses etapes a chercher. Mesure : quatre etapes, aucune
+        # proposition.
+        maquettes = self._figma_turn()
+        if maquettes:
+            messages.append({"role": "system", "content": maquettes})
         pistes = await self._retrieve(question=question, context=context)
         if pistes:
             # Inserted as a system turn, after the question. Not as a user turn:
@@ -883,6 +908,21 @@ class AgentReadWorkflow:
                 explanation=proposal.explanation,
             ),
         )
+
+    def _figma_turn(self) -> str | None:
+        """Les maquettes indexees, dites une fois par question.
+
+        Courte a dessein : ce tour est renvoye a chaque etape, donc chaque mot y est
+        repaye. Elle porte la cle -- connue sans aucune lecture -- et le nom quand une
+        indexation a eu lieu.
+        """
+
+        if self._frames is None:
+            return None
+        maquettes = self._frames.describe()
+        if not maquettes:
+            return None
+        return FIGMA_FILES_HEADER + " " + " ; ".join(maquettes) + "."
 
     async def _find_frames(
         self,

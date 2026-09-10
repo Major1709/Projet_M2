@@ -527,12 +527,18 @@ def test_a_creation_needs_no_diff() -> None:
 
 
 @pytest.mark.anyio
-async def test_the_tool_description_names_the_indexed_maquettes() -> None:
-    """La description est recalculee a chaque appel, pas figee au demarrage : les noms
-    de maquettes ne sont connus qu'apres la premiere indexation, et une description
-    figee n'aurait jamais affiche que des cles."""
+async def test_the_available_maquettes_are_announced_before_any_tool_choice() -> None:
+    """Le defaut que ce test ferme, mesure en direct.
 
-    from app.agent.read_workflow import FIND_FIGMA_FRAME
+    La liste vivait d'abord dans la description de l'outil de recherche, et produisait
+    l'effet inverse de celui voulu : le modele en deduisait qu'il fallait appeler cet
+    outil pour obtenir une cle qu'il avait deja sous les yeux. Quatre etapes brulees a
+    chercher, aucune proposition.
+
+    Annoncee comme un tour systeme, la cle arrive AVANT qu'il choisisse ses outils.
+    """
+
+    from app.agent.read_workflow import FIGMA_FILES_HEADER
     from app.figma.catalogue import FigmaFrameCatalogue
 
     class ReadsWithName:
@@ -549,18 +555,58 @@ async def test_the_tool_description_names_the_indexed_maquettes() -> None:
     )
 
     await workflow.answer(question=a_question(None), context=CONTEXT)
-    outil = next(
-        t for t in provider.requests[0].tools if t["function"]["name"] == FIND_FIGMA_FRAME
-    )
-    assert "CLE123" in outil["function"]["description"]
 
+    systeme = [m for m in provider.requests[0].messages if m["role"] == "system"]
+    annonce = next(m["content"] for m in systeme if FIGMA_FILES_HEADER in m["content"])
+    # Avant toute indexation, la cle seule : annoncer un nom non lu serait inventer.
+    assert "CLE123" in annonce
+    # Et la consigne qui evite le detour par la recherche.
+    assert "sans passer par une recherche de cadre" in annonce
+
+
+@pytest.mark.anyio
+async def test_the_name_appears_once_the_maquette_has_been_indexed() -> None:
+    from app.figma.catalogue import FigmaFrameCatalogue
+
+    class ReadsWithName:
+        async def execute_call(self, *, call, context):
+            return _Named({"name": "PROCESS", "document": {"type": "CANVAS", "name": "P"}})
+
+    annuaire = FigmaFrameCatalogue(reads=ReadsWithName(), file_keys=("CLE123",))
     await annuaire.refresh(CONTEXT)
-    provider._responses.append(a_response(text="ok"))
-    await workflow.answer(question=a_question(None), context=CONTEXT)
-    outil = next(
-        t for t in provider.requests[1].tools if t["function"]["name"] == FIND_FIGMA_FRAME
+    provider = StubProvider(a_response(text="ok"))
+    workflow = AgentReadWorkflow(
+        provider=provider,
+        reads=StubReads(),
+        audit_sink=InMemoryApprovalUnitOfWork().audit,
+        frames=annuaire,
     )
-    assert "PROCESS (CLE123)" in outil["function"]["description"]
+
+    await workflow.answer(question=a_question(None), context=CONTEXT)
+
+    systeme = [m for m in provider.requests[0].messages if m["role"] == "system"]
+    assert any("PROCESS (CLE123)" in m["content"] for m in systeme)
+
+
+@pytest.mark.anyio
+async def test_no_maquette_no_announcement() -> None:
+    """Un tour systeme est renvoye a chaque etape : en ajouter un vide ferait payer
+    des mots qui ne disent rien."""
+
+    from app.agent.read_workflow import FIGMA_FILES_HEADER
+
+    provider = StubProvider(a_response(text="ok"))
+    workflow = AgentReadWorkflow(
+        provider=provider,
+        reads=StubReads(),
+        audit_sink=InMemoryApprovalUnitOfWork().audit,
+    )
+
+    await workflow.answer(question=a_question(None), context=CONTEXT)
+
+    assert not any(
+        FIGMA_FILES_HEADER in m["content"] for m in provider.requests[0].messages
+    )
 
 
 class _Named:
