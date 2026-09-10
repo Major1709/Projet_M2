@@ -16,6 +16,7 @@ a read of a source the delegated credential already covers.
 import hashlib
 import json
 import logging
+import unicodedata
 from collections.abc import Collection, Sequence
 from datetime import datetime
 from enum import StrEnum
@@ -184,29 +185,177 @@ SYSTEM_PROMPT = (
     "que tu n'as pas lu.\n"
     "\n"
     "Quand on te demande un CAHIER DES CHARGES ou un BACKLOG a partir d'un processus "
-    "Figma, lis-le avec extractFigmaProcess -- il suit les connecteurs, alors qu'une "
-    "lecture de noeud ne rend qu'une forme isolee. Rends ensuite un tableau markdown "
-    "avec exactement ces sept colonnes, dans cet ordre :\n"
-    "Bloc fonctionnel | Ref. PBS | Userstory | Description | "
-    "Criteres d'acceptation - Contexte | Criteres d'acceptation - Scenario | Remarques\n"
-    "Une ligne par etape du processus. Le tableau seul : aucune introduction, aucune "
-    "section numerotee, aucun texte avant ou apres.\n"
+    "Figma, lis-le avec extractFigmaProcess, et avec lui seul : il suit les "
+    "connecteurs et rend les etapes dans l'ordre, alors que getFigmaFile ne rend "
+    "qu'un arbre de formes ou l'enchainement n'apparait pas. La forme exacte du "
+    "tableau attendu te sera rappelee une fois le processus lu."
+)
+
+
+# Le format du cahier des charges, injecte APRES la lecture du processus plutot que
+# porte par le prompt systeme.
+#
+# La difference est mesuree, pas supposee. Decrit en tete de conversation, ce format
+# etait ignore : le modele rendait une page HTML a sections numerotees, et choisissait
+# meme getFigmaFile la ou la consigne nommait extractFigmaProcess. Le meme texte,
+# place juste avant la redaction, produit les sept colonnes. Un petit modele pondere
+# ce qu'il vient de lire ; trois resultats d'outils suffisent a enterrer une consigne
+# de forme.
+#
+# Le gabarit est LITTERAL, en-tete et ligne de separation compris. Un format decrit
+# ("sept colonnes, dans cet ordre") demande au modele de construire la syntaxe ; un
+# gabarit recopiable ne lui demande que de la completer.
+BACKLOG_FORMAT_TURN = (
+    "Rappel de forme, pour la reponse que tu vas maintenant rediger.\n"
+    "Produis un tableau markdown, et RIEN d'autre. Il commence exactement par ces "
+    "deux lignes, recopiees telles quelles :\n"
+    "| Bloc fonctionnel | Ref. PBS | Userstory | Description | Criteres d'acceptation"
+    " - Contexte | Criteres d'acceptation - Scenario | Remarques |\n"
+    "| --- | --- | --- | --- | --- | --- | --- |\n"
+    "Puis une ligne par etape du processus, sur le meme modele : sept cellules entre "
+    "barres verticales. Pas de titre, pas de phrase d'introduction, pas de section "
+    "numerotee, pas de liste a puces, pas de HTML, rien avant ni apres le tableau.\n"
+    "{lignes_attendues}"
+    "Couvre TOUTES les etapes lues, de la premiere a la derniere, y compris les "
+    "decisions et les branches. Un tableau qui s'arrete en chemin fait approuver un "
+    "backlog incomplet, et personne ne verra ce qui manque.\n"
     "Bloc fonctionnel : le nom de l'etape, tel que la maquette l'appelle.\n"
     "Ref. PBS : laisse VIDE. Cette reference est attribuee par l'equipe, et en "
     "inventer une creerait un renvoi vers un element qui n'existe pas.\n"
-    "Userstory : \"En tant que ..., je souhaite ..., afin de ...\".\n"
+    'Userstory : "En tant que ..., je souhaite ..., afin de ...".\n'
     "Description : ce qu'il faut mettre en place, en une ou deux phrases. Elle dit le "
     "COMMENT quand la user story dit le pourquoi ; si tu n'as rien a y ajouter, ne "
     "reformule pas la user story autrement.\n"
     "Criteres d'acceptation - Contexte : la situation de depart, sous la forme "
-    "\"Etant donne que l'utilisateur ...\".\n"
-    "Criteres d'acceptation - Scenario : le declencheur et le resultat observable, "
-    "sous la forme \"Lorsque ... Alors ...\". Ce qui suit Alors doit se constater, pas "
-    "s'esperer : un ecran qui s'affiche, un message, un etat qui change.\n"
+    '"Etant donne que l\'utilisateur ...".\n'
+    "Criteres d'acceptation - Scenario : le declencheur ET le resultat observable, "
+    'sous la forme "Lorsque ... Alors ...". Les deux moities sont obligatoires : le '
+    'mot "Alors" doit figurer dans chaque cellule de cette colonne. Un scenario qui '
+    "s'arrete au declencheur ne dit pas a quoi on reconnait que ca marche, donc il "
+    "ne se teste pas. Ce qui suit Alors doit se constater, pas s'esperer : un ecran "
+    "qui s'affiche, un message, un etat qui change.\n"
     "Remarques : ce que la maquette montre et que les autres colonnes ne disent pas -- "
     "un enchainement, une condition, un cas particulier. Reste VIDE si tu n'as rien de "
-    "tel : une colonne toujours remplie cesse d'etre lue."
+    "tel : une colonne toujours remplie cesse d'etre lue.\n"
+    "Si la demande te fait aussi creer ou mettre a jour une page Confluence, ce "
+    "tableau EST le corps de la page : recopie-le entier dans l'argument body, en "
+    "markdown et non en HTML, et n'appelle aucun autre outil de lecture avant. Un "
+    "corps qui annonce le cahier des charges sans le contenir fait approuver une page "
+    "vide."
 )
+
+# De quoi ecrire un tableau entier, quand la question en demande un.
+#
+# Le defaut de 1 024 jetons convient a une reponse de chat et rend un cahier des
+# charges impossible : vingt-trois lignes de sept colonnes n'y tiennent pas. Pire,
+# l'echec etait muet -- les modeles a raisonnement depensent ce meme budget a
+# reflechir, si bien que le plafond etait atteint AVANT le premier caractere et que
+# la reponse revenait vide, sans rien qui dise pourquoi.
+#
+# Releve pour cette question seulement, jamais pour les autres : une reponse de chat
+# n'a pas besoin de ce budget, et l'accorder partout ferait payer a chaque question
+# le cout du cas le plus lourd.
+BACKLOG_COMPLETION_TOKENS = 8_192
+
+# Le nombre d'etapes, glisse dans le rappel de forme quand on sait le compter.
+#
+# Mesure : sans ce chiffre, le modele rendait deux a huit lignes pour un processus
+# qui en comptait vingt et une, et de facon differente a chaque essai. Un backlog
+# tronque est pire qu'absent -- il a l'air complet. Une consigne qualitative
+# ("n'omets rien") ne corrigeait pas la troncature ; un nombre donne au modele de
+# quoi se relire.
+EXPECTED_ROWS = (
+    "Le processus que tu viens de lire compte {count} etapes. Le tableau doit donc "
+    "avoir {count} lignes sous l'en-tete -- compte-les avant de repondre.\n"
+)
+
+# Ce qui, dans le resultat de l'extracteur, marque une etape. Chaque etape porte un
+# "kind" (start, step, decision, end) ; les notes n'en portent pas.
+_STEP_MARKER = '"kind"'
+
+# Au-dela, le chiffre ne vient plus d'une lecture plausible mais d'un texte qui
+# ressemble a une. Le rappel se passe alors du nombre plutot que d'en annoncer un
+# faux.
+MAX_CREDIBLE_STEPS = 200
+
+
+def _step_count(observation: str) -> int | None:
+    """Combien d'etapes le processus lu comporte-t-il ?
+
+    Compte un marqueur dans le texte rendu au modele plutot que de re-parcourir la
+    charge : c'est exactement ce que le modele a sous les yeux, donc un chiffre qui
+    ne correspondrait pas a ce qu'il a lu ne peut pas etre produit ici.
+
+    Rend None des que le compte n'est pas credible. Un nombre faux serait pire que
+    pas de nombre : il ferait inventer des lignes pour l'atteindre.
+    """
+
+    compte = observation.count(_STEP_MARKER)
+    if compte < 1 or compte > MAX_CREDIBLE_STEPS:
+        return None
+    return compte
+
+
+# L'outil dont le resultat declenche le rappel de forme. C'est le bon point
+# d'accroche : il ne sert qu'a lire un processus, donc sa reussite dit qu'un
+# processus vient d'entrer dans la conversation.
+FIGMA_PROCESS_TOOL = "extractFigmaProcess"
+
+# Le choix de l'outil, rappele juste apres la question plutot que dans le prompt
+# systeme -- pour la meme raison mesuree que le format.
+#
+# Sans lui, le rappel de forme ne se declenchait jamais : le modele lisait la
+# maquette avec getFigmaFile, l'accroche n'etait pas atteinte, et la reponse partait
+# en prose. Les deux rappels forment donc une chaine, et celui-ci en est le premier
+# maillon.
+#
+# La difference entre les deux outils n'est pas cosmetique. getFigmaFile rend un
+# arbre de formes dans l'ordre du dessin ; extractFigmaProcess suit les connecteurs
+# et rend les etapes dans l'ordre du parcours. Un backlog tire du premier melange
+# les etapes et perd les branches -- exactement ce que les essais ont montre.
+BACKLOG_READ_TURN = (
+    "Pour cette demande, lis le processus avec extractFigmaProcess, et avec lui "
+    "seul. N'utilise ni getFigmaFile ni getFigmaNode : ils rendent un arbre de "
+    "formes ou l'enchainement n'apparait pas, alors qu'un cahier des charges se "
+    "construit sur l'ordre des etapes et sur les branches.\n"
+    "Passe-lui le fileKey de la maquette, pris dans la liste des maquettes indexees "
+    "ci-dessus. N'appelle pas findFigmaFrame : la personne nomme le FICHIER, et cet "
+    "outil cherche un cadre A L'INTERIEUR d'un fichier -- il ne trouvera rien, et "
+    "l'etape sera perdue. Une seule lecture suffit : ne la refais pas.\n"
+    "Si la demande nomme un espace Confluence, passe sa CLE telle quelle dans "
+    "spaceId : le fournisseur la resout lui-meme. Ne cherche ni l'espace, ni des "
+    "pages, ni des tickets -- ces lectures ne serviraient pas le cahier des charges, "
+    "et chacune consomme une etape que la redaction n'aura plus."
+)
+
+# Ce qui, dans la question de l'utilisateur, designe un cahier des charges.
+#
+# La detection porte sur les mots de la personne, jamais sur du contenu lu : une
+# maquette qui contiendrait le mot "backlog" ne doit pas imposer un format a une
+# question qui n'en demandait pas. Et ce rappel ne peut que mettre en forme -- il
+# n'ouvre aucun outil et n'elargit aucune autorisation.
+BACKLOG_MARKERS = (
+    "cahier des charges",
+    "cahier de charges",
+    "cahier de charge",
+    "backlog",
+    "user stories",
+    "userstories",
+    "user story",
+)
+
+
+def _wants_backlog(question: str) -> bool:
+    """La question demande-t-elle un cahier des charges ?
+
+    Replie casse et accents : "Cahier des Charges" et "cahier de charge" designent
+    la meme chose, et l'utilisateur ne devrait pas avoir a deviner la graphie.
+    """
+
+    sans_accent = unicodedata.normalize("NFKD", question)
+    reduit = "".join(c for c in sans_accent if not unicodedata.combining(c)).casefold()
+    return any(marqueur in reduit for marqueur in BACKLOG_MARKERS)
+
 
 # A read that failed for a reason the model can act on. Everything else stops the
 # loop, and that default is the point: an error added to the taxonomy later is
@@ -299,8 +448,18 @@ FRAME_FOUND_HEADER = (
     "le contenu ; ne decris pas un cadre a partir de son nom seul."
 )
 FRAME_NOT_FOUND = (
-    "Aucun cadre nomme \"{name}\" dans les maquettes du projet, meme apres relecture. "
+    'Aucun cadre nomme "{name}" dans les maquettes du projet, meme apres relecture. '
     "Verifie l'orthographe, ou demande a l'utilisateur le lien de la maquette."
+)
+
+# Rendu quand le nom demande designe une MAQUETTE et non un cadre. Mesure : une
+# personne nomme le fichier bien plus souvent qu'un cadre precis -- "le processus
+# Virement par empreinte" est le nom du fichier. Sans cette reponse, la recherche
+# echouait et le modele redemandait un lien que nous avions deja.
+FRAME_IS_A_FILE = (
+    "Il n'y a pas de cadre nomme \"{name}\", mais c'est le nom d'une MAQUETTE "
+    "indexee. Voici sa cle -- lis-la directement avec le fileKey, sans rechercher "
+    "de cadre :"
 )
 FRAME_QUERY_REQUIRED = "Indique le nom du cadre a chercher."
 
@@ -565,9 +724,7 @@ class AgentReadWorkflow:
         # to start -- the wrong direction is the safe one here.
         if max_reads_per_question < 1:
             raise ValueError("A question must be allowed at least one read")
-        self._max_reads_per_question = min(
-            max_reads_per_question, ABSOLUTE_MAX_READS_PER_QUESTION
-        )
+        self._max_reads_per_question = min(max_reads_per_question, ABSOLUTE_MAX_READS_PER_QUESTION)
         # Required rather than optional. An audit sink that may be omitted is one
         # that will be, and a deployment missing it would suppress calls with no
         # record that anything was suppressed.
@@ -626,6 +783,11 @@ class AgentReadWorkflow:
         maquettes = self._figma_turn()
         if maquettes:
             messages.append({"role": "system", "content": maquettes})
+        # Vraie une seule fois par question, et relue plus bas pour decider du rappel
+        # de forme. Calculee ici pour que la question ne soit examinee qu'une fois.
+        cahier_des_charges = _wants_backlog(question.question)
+        if cahier_des_charges and self._frames is not None:
+            messages.append({"role": "system", "content": BACKLOG_READ_TURN})
         pistes = await self._retrieve(question=question, context=context)
         if pistes:
             # Inserted as a system turn, after the question. Not as a user turn:
@@ -641,6 +803,8 @@ class AgentReadWorkflow:
         # source and spent its budget there.
         attempted_reads = 0
         last_text = ""
+        # Le rappel de forme n'est injecte qu'une fois par question.
+        backlog_format_recalled = False
 
         for step in range(1, question.max_steps + 1):
             response = await self._provider.generate(
@@ -649,7 +813,11 @@ class AgentReadWorkflow:
                     tools=self._static_catalogue + _frame_catalogue_tool(self._frames),
                     allowed_tool_names=self._allowed_tool_names,
                     max_steps=question.max_steps,
-                    max_completion_tokens=question.max_completion_tokens,
+                    max_completion_tokens=(
+                        max(question.max_completion_tokens, BACKLOG_COMPLETION_TOKENS)
+                        if cahier_des_charges
+                        else question.max_completion_tokens
+                    ),
                     correlation_id=question.correlation_id,
                 ),
                 context=context,
@@ -730,6 +898,28 @@ class AgentReadWorkflow:
                 if record is not None:
                     records.append(record)
                 messages.append(self._tool_turn(call, observation))
+                # Le rappel de forme suit immediatement le processus lu, une seule
+                # fois. Le repeter a chaque lecture ferait grossir le fil sans rien
+                # ajouter : c'est sa POSITION -- juste avant la redaction -- qui le
+                # fait suivre, pas le nombre de fois qu'il est dit.
+                if (
+                    record is not None
+                    and call.tool_name == FIGMA_PROCESS_TOOL
+                    and not backlog_format_recalled
+                    and cahier_des_charges
+                ):
+                    compte = _step_count(observation)
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": BACKLOG_FORMAT_TURN.format(
+                                lignes_attendues=(
+                                    EXPECTED_ROWS.format(count=compte) if compte else ""
+                                )
+                            ),
+                        }
+                    )
+                    backlog_format_recalled = True
 
         logger.info(
             "The orchestration loop reached its step limit",
@@ -944,6 +1134,17 @@ class AgentReadWorkflow:
             return FRAME_QUERY_REQUIRED
         trouves = await self._frames.find(query=demande, context=context)
         if not trouves:
+            # Avant de dire non : le nom demande designe peut-etre la maquette
+            # entiere. Rendre sa cle coute une ligne et evite de redemander un lien
+            # que nous avons deja.
+            fichiers = await self._frames.find_file(query=demande, context=context)
+            if fichiers:
+                lignes = [f"- {nom} | fileKey={cle}" for nom, cle in fichiers]
+                return (
+                    FRAME_IS_A_FILE.format(name=demande.strip()[:120])
+                    + chr(10)
+                    + chr(10).join(lignes)
+                )
             return FRAME_NOT_FOUND.format(name=demande.strip()[:120])
         lignes = [
             f"- {e.name} ({e.node_type}) | fileKey={e.file_key} nodeId={e.node_id} "
@@ -1133,6 +1334,14 @@ class AgentReadWorkflow:
         # which the step limit already bounds.
         performed.add(fingerprint)
         observation, truncated = self._render(result.content)
+        if not observation and result.structured_content is not None:
+            # Certains outils ne rendent AUCUN bloc de texte et ne repondent que par
+            # une charge structuree -- extractFigmaProcess est de ceux-la. Sans ce
+            # repli, l'observation partait vide : le modele recevait un encadrement
+            # sans contenu, puis redigeait a partir de rien tout en citant la source.
+            # Une reponse inventee sous une provenance exacte est le pire des deux
+            # mondes, et c'est ce qui arrivait.
+            observation, truncated = self._render_payload(result.structured_content)
         return (
             # Fenced here rather than in _render, because this is the only place
             # that holds the provenance the envelope must be labelled with -- and
@@ -1290,21 +1499,41 @@ class AgentReadWorkflow:
             # cut the reader off inside the text that mattered.
             rendered.append(reduce_markup(block.text))
 
-        observation = "\n".join(rendered)
-        if len(observation) > MAX_OBSERVATION_CHARACTERS:
-            return (
-                observation[:MAX_OBSERVATION_CHARACTERS]
-                + "\n[lecture tronquee : demande une portion plus petite si besoin]",
-                True,
-            )
-        return (observation, False)
+        return _bounded("\n".join(rendered))
+
+    @staticmethod
+    def _render_payload(payload: Any) -> tuple[str, bool]:
+        """Rendre une charge structuree, quand la lecture n'a rendu aucun texte.
+
+        Serialisee telle quelle, sans mise en forme : ce qui compte est que les
+        etapes et leur ordre arrivent au modele. Un rendu plus joli demanderait de
+        connaitre la forme de chaque outil, et se tairait justement sur celui qu'on
+        n'aurait pas prevu.
+
+        ``ensure_ascii`` reste faux : les libelles sont en francais, et les echapper
+        couterait le triple du budget d'observation pour le meme contenu.
+        """
+
+        try:
+            texte = json.dumps(_flattened(payload), ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            # La charge vient d'un fournisseur. Une valeur non serialisable ne doit
+            # pas emporter la question : le modele est traite comme s'il n'avait
+            # rien lu, ce qui est deja le cas.
+            logger.warning("A structured payload could not be rendered for the model")
+            return ("", False)
+        return _bounded(texte)
 
 
 __all__ = [
     "ABSOLUTE_MAX_READS_PER_QUESTION",
+    "BACKLOG_READ_TURN",
+    "BACKLOG_FORMAT_TURN",
+    "BACKLOG_MARKERS",
     "DEFAULT_MAX_READS_PER_QUESTION",
     "DEFAULT_MAX_STEPS",
     "EMPTY_ANSWER_MESSAGE",
+    "FIGMA_PROCESS_TOOL",
     "MAX_HISTORY_CHARACTERS",
     "MAX_HISTORY_MESSAGES",
     "MAX_OBSERVATION_CHARACTERS",
@@ -1321,6 +1550,44 @@ __all__ = [
     "PriorTurn",
     "tool_catalogue",
 ]
+
+
+def _flattened(value: Any) -> Any:
+    """Replier les blancs a l'interieur des textes d'une charge structuree.
+
+    Une etiquette Figma tient souvent sur deux lignes -- "Acceder au Menu Money
+    in/Out =>\\nVirement". Serialisee en JSON, cette coupure devient la sequence
+    "\\n" que le modele recopie telle quelle dans une cellule de tableau, ou elle
+    s'affiche litteralement.
+
+    Replier n'est pas censurer : une coupure de ligne dans un cadre de maquette est
+    une decision de mise en page, pas une information. Le texte, lui, est conserve
+    mot pour mot.
+    """
+
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, dict):
+        return {cle: _flattened(v) for cle, v in value.items()}
+    if isinstance(value, list):
+        return [_flattened(v) for v in value]
+    return value
+
+
+def _bounded(observation: str) -> tuple[str, bool]:
+    """Appliquer le budget d'observation, et dire quand il a mordu.
+
+    La troncature est annoncee plutot que silencieuse : un modele qui ne peut pas
+    savoir qu'il a recu un fragment repondra comme s'il avait recu le tout.
+    """
+
+    if len(observation) > MAX_OBSERVATION_CHARACTERS:
+        return (
+            observation[:MAX_OBSERVATION_CHARACTERS]
+            + "\n[lecture tronquee : demande une portion plus petite si besoin]",
+            True,
+        )
+    return (observation, False)
 
 
 def _as_text(value: Any) -> str | None:
