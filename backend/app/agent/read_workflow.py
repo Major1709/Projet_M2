@@ -205,6 +205,14 @@ SYSTEM_PROMPT = (
 # Le gabarit est LITTERAL, en-tete et ligne de separation compris. Un format decrit
 # ("sept colonnes, dans cet ordre") demande au modele de construire la syntaxe ; un
 # gabarit recopiable ne lui demande que de la completer.
+#
+# La consigne de REGROUPEMENT vient d'une comparaison avec le cahier des charges
+# officiel de l'equipe, sur le meme processus. Une ligne par forme dessinee donnait
+# une quinzaine de blocs la ou l'equipe en ecrit trois : "Effectuer virement", la
+# pop-up de confirmation, le choix OUI/NON et la pop-up de succes forment UNE
+# capacite metier, avec une seule userstory et quatre scenarios. Un tableau ou
+# chaque rectangle porte sa propre userstory n'est pas un backlog, c'est le
+# diagramme recopie -- et il se relit plus difficilement que le diagramme.
 BACKLOG_FORMAT_TURN = (
     "Rappel de forme, pour la reponse que tu vas maintenant rediger.\n"
     "Produis un tableau markdown, et RIEN d'autre. Il commence exactement par ces "
@@ -212,31 +220,59 @@ BACKLOG_FORMAT_TURN = (
     "| Bloc fonctionnel | Ref. PBS | Userstory | Description | Criteres d'acceptation"
     " - Contexte | Criteres d'acceptation - Scenario | Remarques |\n"
     "| --- | --- | --- | --- | --- | --- | --- |\n"
-    "Puis une ligne par etape du processus, sur le meme modele : sept cellules entre "
-    "barres verticales. Pas de titre, pas de phrase d'introduction, pas de section "
+    "Puis une ligne par SCENARIO, sur le meme modele : sept cellules entre barres "
+    "verticales. Pas de titre, pas de phrase d'introduction, pas de section "
     "numerotee, pas de liste a puces, pas de HTML, rien avant ni apres le tableau.\n"
+    "\n"
+    "LE REGROUPEMENT EST LA REGLE LA PLUS IMPORTANTE.\n"
+    "Un bloc fonctionnel n'est PAS une etape du diagramme : c'est une capacite "
+    "metier entiere, et elle porte UNE SEULE userstory. La suite d'etapes qui la "
+    "realise devient plusieurs LIGNES sous ce meme bloc, une par scenario. Attends-"
+    "toi a quelques blocs, pas a un par forme dessinee -- un tableau ou chaque "
+    "rectangle devient sa propre userstory n'est pas un backlog, c'est le diagramme "
+    "recopie.\n"
+    "Sur la premiere ligne d'un bloc, remplis Bloc fonctionnel, Userstory et "
+    "Description. Sur les lignes suivantes du MEME bloc, laisse ces trois cellules "
+    "VIDES : c'est ce qui montre qu'elles appartiennent au bloc du dessus.\n"
+    "Ouvre un nouveau bloc quand la capacite metier change, pas quand l'etape "
+    "change.\n"
     "{lignes_attendues}"
-    "Couvre TOUTES les etapes lues, de la premiere a la derniere, y compris les "
-    "decisions et les branches. Un tableau qui s'arrete en chemin fait approuver un "
-    "backlog incomplet, et personne ne verra ce qui manque.\n"
-    "Bloc fonctionnel : le nom de l'etape, tel que la maquette l'appelle.\n"
+    "\n"
+    "Bloc fonctionnel : le nom de la capacite metier, tire des etapes qu'elle "
+    "regroupe.\n"
     "Ref. PBS : laisse VIDE. Cette reference est attribuee par l'equipe, et en "
     "inventer une creerait un renvoi vers un element qui n'existe pas.\n"
-    'Userstory : "En tant que ..., je souhaite ..., afin de ...".\n'
+    'Userstory : "En tant que ..., je souhaite ..., afin de ...". Une seule par '
+    "bloc, et elle dit l'objectif de la capacite entiere, pas d'une etape.\n"
+    'N\'ecris JAMAIS de userstory pour un noeud de decision ("MONTANT <= 500 000 ?", '
+    '"< 3 virements consecutifs ?"). Ce sont des regles du systeme, pas des choses '
+    "qu'un utilisateur souhaite : personne ne desire qu'un montant soit verifie. "
+    "Une condition de ce genre devient le Contexte du scenario qu'elle gouverne, ou "
+    "une Remarque du bloc -- jamais un bloc a elle seule.\n"
+    "N'ecris pas non plus de bloc pour un START ou un END : ce sont les bornes du "
+    "parcours, elles se lisent dans le premier et le dernier scenario.\n"
     "Description : ce qu'il faut mettre en place, en une ou deux phrases. Elle dit le "
     "COMMENT quand la user story dit le pourquoi ; si tu n'as rien a y ajouter, ne "
     "reformule pas la user story autrement.\n"
     "Criteres d'acceptation - Contexte : la situation de depart, sous la forme "
-    '"Etant donne que l\'utilisateur ...".\n'
+    "\"Etant donne que l'utilisateur ...\". C'est ici que se place la condition qui "
+    "gouverne le scenario, quand le diagramme en pose une.\n"
     "Criteres d'acceptation - Scenario : le declencheur ET le resultat observable, "
     'sous la forme "Lorsque ... Alors ...". Les deux moities sont obligatoires : le '
     'mot "Alors" doit figurer dans chaque cellule de cette colonne. Un scenario qui '
     "s'arrete au declencheur ne dit pas a quoi on reconnait que ca marche, donc il "
     "ne se teste pas. Ce qui suit Alors doit se constater, pas s'esperer : un ecran "
     "qui s'affiche, un message, un etat qui change.\n"
-    "Remarques : ce que la maquette montre et que les autres colonnes ne disent pas -- "
-    "un enchainement, une condition, un cas particulier. Reste VIDE si tu n'as rien de "
-    "tel : une colonne toujours remplie cesse d'etre lue.\n"
+    "Remarques : ce que la maquette montre et que les autres colonnes ne disent pas. "
+    'C\'est la que vont les regles conditionnelles ("si Android ... si iOS ...", un '
+    "seuil de montant, une limite de tentatives) et le texte EXACT d'une pop-up, "
+    "recopie mot pour mot entre guillemets plutot que reformule. Les annotations "
+    'lues avec le processus -- le tableau "notes" de la lecture -- doivent se '
+    "retrouver ici, rattachees au bloc qu'elles concernent ; elles ne deviennent "
+    "jamais des lignes a elles seules. Ecarte en revanche celles qui decrivent la "
+    'CONVENTION du diagramme et non le produit -- "Debut de processus", "Action / '
+    'Traitement", "Decision" sont la legende du dessin, pas une exigence. Reste '
+    "VIDE si tu n'as rien de tel : une colonne toujours remplie cesse d'etre lue.\n"
     "Si la demande te fait aussi creer ou mettre a jour une page Confluence, ce "
     "tableau EST le corps de la page : recopie-le entier dans l'argument body, en "
     "markdown et non en HTML, et n'appelle aucun autre outil de lecture avant. Un "
@@ -265,8 +301,9 @@ BACKLOG_COMPLETION_TOKENS = 8_192
 # ("n'omets rien") ne corrigeait pas la troncature ; un nombre donne au modele de
 # quoi se relire.
 EXPECTED_ROWS = (
-    "Le processus que tu viens de lire compte {count} etapes. Le tableau doit donc "
-    "avoir {count} lignes sous l'en-tete -- compte-les avant de repondre.\n"
+    "Le processus que tu viens de lire compte {count} etapes. Chacune doit se "
+    "retrouver dans une ligne de scenario -- regroupees en quelques blocs, mais "
+    "aucune laissee de cote. Compte-les avant de repondre.\n"
 )
 
 # Ce qui, dans le resultat de l'extracteur, marque une etape. Chaque etape porte un
