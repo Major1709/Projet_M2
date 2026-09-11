@@ -343,3 +343,76 @@ def test_the_workflow_exposes_what_the_tests_lean_on() -> None:
 
     assert hasattr(AgentReadWorkflow, "_render_payload")
     assert hasattr(AgentReadWorkflow, "_render")
+
+
+# --- L'exemple travaille, il ne decore pas ------------------------------------------
+#
+# Mesure : decrite, la regle du "Alors" tenait sur cinq lignes de scenario sur sept.
+# Les deux qui la perdaient etaient les lignes d'OUVERTURE de bloc -- celles ou le
+# modele vient d'ecrire la userstory et la description. Un exemple montrant les deux
+# cas coute moins de mots qu'un paragraphe et se suit mieux.
+
+
+def test_the_worked_example_shows_a_block_of_two_lines() -> None:
+    """Un exemple d'une seule ligne n'apprendrait pas le regroupement, qui est
+    justement ce qui se passe entre la premiere ligne et la suivante."""
+
+    lignes = [
+        x
+        for x in BACKLOG_FORMAT_TURN.splitlines()
+        if x.startswith("| ") and "Bloc fonctionnel |" not in x and "---" not in x
+    ]
+
+    assert len(lignes) == 2
+
+
+def test_both_example_lines_carry_the_second_half_of_the_gherkin() -> None:
+    """Y compris la premiere, qui est precisement celle qui l'oubliait."""
+
+    lignes = [
+        x
+        for x in BACKLOG_FORMAT_TURN.splitlines()
+        if x.startswith("| ") and "Bloc fonctionnel |" not in x and "---" not in x
+    ]
+
+    for ligne in lignes:
+        assert "Lorsque " in ligne
+        assert " Alors " in ligne
+
+
+def test_the_continuation_line_leaves_its_first_three_cells_empty() -> None:
+    """C'est ce vide qui rattache la ligne au bloc du dessus, et c'est ce que
+    l'exemple doit rendre visible d'un coup d'oeil."""
+
+    lignes = [
+        x
+        for x in BACKLOG_FORMAT_TURN.splitlines()
+        if x.startswith("| ") and "Bloc fonctionnel |" not in x and "---" not in x
+    ]
+    cellules = [c.strip() for c in lignes[1].strip().strip("|").split("|")]
+
+    assert cellules[:4] == ["", "", "", ""]
+    assert cellules[4] and cellules[5]
+
+
+def test_the_example_says_it_is_a_shape_and_not_a_subject() -> None:
+    """Sans cet avertissement, un exemple concret invite a en reprendre le sujet --
+    et un cahier des charges de virement parlerait de consultation de solde."""
+
+    assert "n'en recopie ni les mots ni le sujet" in BACKLOG_FORMAT_TURN.lower().replace(
+        "N'EN", "n'en"
+    )
+
+
+def test_every_example_line_has_the_seven_columns() -> None:
+    """Un exemple mal forme apprendrait le mauvais gabarit, et le modele suit
+    l'exemple avant la description."""
+
+    lignes = [
+        x
+        for x in BACKLOG_FORMAT_TURN.splitlines()
+        if x.startswith("| ") and "Bloc fonctionnel |" not in x and "---" not in x
+    ]
+
+    for ligne in lignes:
+        assert len(ligne.strip().strip("|").split("|")) == 7
