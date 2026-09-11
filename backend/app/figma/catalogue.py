@@ -151,6 +151,11 @@ class FigmaFrameCatalogue:
         self._file_keys = tuple(dict.fromkeys(file_keys))
         self._interval = min_refresh_interval_seconds
         self._entries: tuple[FrameEntry, ...] = ()
+        # Le nom que Figma donne au fichier, releve a l'indexation. Sans lui, le
+        # modele ne connaitrait les maquettes que par des cles de vingt-deux
+        # caracteres -- et l'utilisateur devrait les recopier, ce que l'annuaire
+        # existe precisement pour eviter.
+        self._file_names: dict[str, str] = {}
         self._last_refresh: float | None = None
 
     @property
@@ -160,6 +165,19 @@ class FigmaFrameCatalogue:
     @property
     def size(self) -> int:
         return len(self._entries)
+
+    def describe(self) -> tuple[str, ...]:
+        """Les maquettes indexees, telles qu'on peut les nommer au modele.
+
+        Rend le nom quand l'indexation a eu lieu, la cle seule sinon. Une description
+        d'outil est construite au demarrage, avant tout appel reseau : annoncer un nom
+        qu'on n'a pas encore lu serait inventer, et la cle seule reste exacte.
+        """
+
+        return tuple(
+            f"{self._file_names[cle]} ({cle})" if cle in self._file_names else cle
+            for cle in self._file_keys
+        )
 
     async def find(
         self,
@@ -189,6 +207,49 @@ class FigmaFrameCatalogue:
             await self.refresh(context)
             trouves = self._match(query)
         return trouves
+
+    async def find_file(
+        self,
+        *,
+        query: str,
+        context: SecurityContext,
+    ) -> tuple[tuple[str, str], ...]:
+        """Retrouver une MAQUETTE par son nom, et non un cadre a l'interieur.
+
+        L'annuaire indexait les cadres et eux seuls, ce qui laissait un trou par
+        lequel les demandes reelles passaient : on nomme une maquette bien plus
+        souvent qu'un cadre precis -- "le processus Virement par empreinte" designe
+        le fichier. La recherche de cadre echouait alors sans rien dire d'utile,
+        alors que la cle cherchee etait deja connue.
+
+        Rend des couples (nom, cle), du plus precis au plus large, comme ``find``.
+        """
+
+        if self._last_refresh is None:
+            await self.refresh(context)
+
+        trouves = self._match_files(query)
+        if trouves or not self._can_refresh():
+            return trouves
+        await self.refresh(context)
+        return self._match_files(query)
+
+    def _match_files(self, query: str) -> tuple[tuple[str, str], ...]:
+        cible = _normalise(query)
+        if not cible:
+            return ()
+        exactes: list[tuple[str, str]] = []
+        approchants: list[tuple[str, str]] = []
+        for cle in self._file_keys:
+            nom = self._file_names.get(cle)
+            if nom is None:
+                continue
+            reduit = _normalise(nom)
+            if reduit == cible:
+                exactes.append((nom, cle))
+            elif cible in reduit or reduit in cible:
+                approchants.append((nom, cle))
+        return tuple(exactes or approchants)
 
     async def refresh(self, context: SecurityContext) -> int:
         """Relire tous les fichiers configures et reconstruire l'annuaire.
@@ -243,6 +304,9 @@ class FigmaFrameCatalogue:
         if charge is None:
             charge = _first_json(resultat)
         if isinstance(charge, dict):
+            nom = charge.get("name")
+            if isinstance(nom, str) and nom:
+                self._file_names[file_key] = nom
             return charge.get("document", charge)
         return None
 

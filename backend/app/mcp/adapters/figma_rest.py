@@ -114,6 +114,13 @@ _PROCESS_NOTE = {
         "id": {"type": "string"},
         "text": {"type": "string"},
         "section": {"type": ["string", "null"]},
+        # D'ou vient l'annotation. Un pense-bete, un bloc de texte libre et une
+        # forme laissee hors du flux ne se lisent pas de la meme facon, et le
+        # lecteur ne peut pas le deviner une fois les trois melanges.
+        "origin": {
+            "type": "string",
+            "enum": ["sticky", "text", "detached_shape"],
+        },
     },
 }
 _PROCESS_SCHEMA = {
@@ -202,6 +209,18 @@ def _shape_text(node: Mapping[str, Any]) -> str:
     return ""
 
 
+def _carries_meaning(text: str) -> bool:
+    """Le texte dit-il quelque chose, ou n'est-il qu'un residu de mise en page ?
+
+    Un board reel en porte : une zone de texte reduite a un guillemet orphelin, une
+    autre a un caractere de police privee laisse par une icone. Les deux passent le
+    filtre des blancs, tous deux arrivaient en annotation vide, et une remarque vide
+    dans un cahier des charges ressemble a une information qu'on aurait perdue.
+    """
+
+    return any(character.isalnum() for character in text)
+
+
 def _endpoint_id(endpoint: Any) -> str | None:
     """The shape a connector end is attached to, or None when it dangles."""
 
@@ -218,7 +237,7 @@ def _collect(
     depth: int,
     shapes: list[tuple[Mapping[str, Any], str | None]],
     connectors: list[Mapping[str, Any]],
-    notes: list[tuple[Mapping[str, Any], str | None]],
+    notes: list[tuple[Mapping[str, Any], str | None, str]],
 ) -> None:
     if depth > MAX_TREE_DEPTH or not isinstance(node, Mapping):
         return
@@ -231,7 +250,12 @@ def _collect(
     elif node_type == "CONNECTOR":
         connectors.append(node)
     elif node_type == "STICKY":
-        notes.append((node, section))
+        notes.append((node, section, "sticky"))
+    elif node_type == "TEXT":
+        # Un bloc de texte libre porte souvent la regle qui ne tient dans aucune
+        # forme -- "Si Android : empreinte / Si iOS : Face ID". Le laisser de cote
+        # revenait a jeter la condition la plus utile du tableau.
+        notes.append((node, section, "text"))
     children = node.get("children")
     if isinstance(children, list):
         for child in children:
@@ -246,7 +270,7 @@ def _build_process(
 ) -> dict[str, Any]:
     shapes: list[tuple[Mapping[str, Any], str | None]] = []
     connectors: list[Mapping[str, Any]] = []
-    sticky_notes: list[tuple[Mapping[str, Any], str | None]] = []
+    sticky_notes: list[tuple[Mapping[str, Any], str | None, str]] = []
     for root in roots:
         _collect(root, None, 0, shapes, connectors, sticky_notes)
 
@@ -270,9 +294,35 @@ def _build_process(
             }
         )
 
+    # Une forme qu'aucune fleche ne touche ne fait pas partie du parcours. C'est le
+    # signal qui separe une legende d'une etape, et il vient du dessin lui-meme :
+    # sur un board reel, la zone qui explique la convention ("START = debut",
+    # "losange = decision") est faite de formes posees a cote, sans connecteur.
+    # Sans ce partage, ces formes devenaient des lignes de backlog creuses.
+    #
+    # Le filtre ne s'applique que si le board porte des fleches. Un diagramme qui
+    # n'en a aucune verrait sinon TOUTES ses formes ecartees, ce qui remplacerait
+    # du bruit par du vide.
+    connected = incoming | outgoing
+    detached: list[tuple[Mapping[str, Any], str | None, str]] = []
+
     steps: list[dict[str, Any]] = []
     for shape, section in shapes:
         shape_id = str(shape.get("id", ""))
+        label = _shape_text(shape)
+        if connected and shape_id not in connected:
+            # Gardee comme annotation quand elle porte un texte : une legende dit
+            # parfois la regle qui manque au flux. Muette, elle ne dit rien que le
+            # tableau puisse porter.
+            if label:
+                detached.append((shape, section, "detached_shape"))
+            continue
+        if not label:
+            # Une forme sans texte ne porte aucune exigence. La garder produisait
+            # des lignes "[Etape sans libelle]" : du remplissage qui a l'air d'une
+            # specification. Son identifiant reste visible dans les transitions,
+            # donc l'enchainement n'est pas perdu.
+            continue
         shape_type = shape.get("shapeType")
         kind = _SHAPE_KINDS.get(shape_type, "step") if isinstance(shape_type, str) else "step"
         if kind == "terminal":
@@ -287,7 +337,7 @@ def _build_process(
                 kind = "end"
         step: dict[str, Any] = {
             "id": shape_id,
-            "label": _shape_text(shape),
+            "label": label,
             "kind": kind,
             "section": section,
         }
@@ -308,10 +358,12 @@ def _build_process(
         "notes": [
             {
                 "id": str(note.get("id", "")),
-                "text": _shape_text(note),
+                "text": text,
                 "section": section,
+                "origin": origin,
             }
-            for note, section in sticky_notes
+            for note, section, origin in (*sticky_notes, *detached)
+            if _carries_meaning(text := _shape_text(note))
         ],
     }
 
@@ -501,9 +553,7 @@ class FigmaRESTTransport:
             addresses = await self._resolver.resolve(hostname=hostname, port=HTTPS_PORT)
         except Exception as error:
             raise MCPDNSRejected() from error
-        if not addresses or any(
-            not is_approved_public_address(address) for address in addresses
-        ):
+        if not addresses or any(not is_approved_public_address(address) for address in addresses):
             raise MCPDNSRejected()
         # The address actually contacted, so no later resolution can substitute one
         # nobody validated.

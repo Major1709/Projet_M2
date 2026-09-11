@@ -428,9 +428,7 @@ def test_a_dangling_connector_is_reported_rather_than_dropped() -> None:
 
     process = call(session, "extractFigmaProcess", {"fileKey": "abc1234567"}).structured_content
 
-    assert process["transitions"] == [
-        {"id": "1:25", "from": "1:3", "to": None, "condition": None}
-    ]
+    assert process["transitions"] == [{"id": "1:25", "from": "1:3", "to": None, "condition": None}]
     assert process["steps"][0]["kind"] == "start"
 
 
@@ -445,7 +443,12 @@ def test_sticky_notes_are_kept_apart_from_the_flow() -> None:
 
     assert len(process["steps"]) == 1
     assert process["notes"] == [
-        {"id": "1:9", "text": "a valider avec le metier", "section": "Section 1"}
+        {
+            "id": "1:9",
+            "text": "a valider avec le metier",
+            "section": "Section 1",
+            "origin": "sticky",
+        }
     ]
 
 
@@ -473,3 +476,143 @@ def test_an_unrouted_provider_fails_rather_than_falling_back() -> None:
 
     with pytest.raises(MCPTransportFailure):
         asyncio.run(connect_once())
+
+
+# --- Distinguer la legende du flux reel ---------------------------------------------
+#
+# Sur le board Accesa, une zone explique la convention du diagramme : un START vide,
+# un rectangle "Action / Traitement", un losange "Decision". Ces formes ne sont
+# reliees a rien. Traitees comme des etapes, elles produisaient des lignes de backlog
+# creuses -- "[Etape sans libelle]" -- indiscernables d'une specification reelle.
+#
+# Le signal est dans le dessin : une forme qu'aucune fleche ne touche ne fait pas
+# partie du parcours.
+
+
+def test_a_shape_no_arrow_touches_is_not_a_step() -> None:
+    payload = _board(
+        _shape("1:3", "start", "ELLIPSE"),
+        _shape("1:24", "se connecter", "SQUARE"),
+        _connector("1:25", "1:3", "1:24"),
+        # La legende, posee a cote du flux.
+        _shape("1:80", "Action / Traitement", "SQUARE"),
+    )
+    session = FigmaRESTSession(client=FakeClient(FakeResponse(payload=payload)))
+
+    process = call(session, "extractFigmaProcess", {"fileKey": "abc1234567"}).structured_content
+
+    assert [s["id"] for s in process["steps"]] == ["1:3", "1:24"]
+
+
+def test_a_detached_shape_that_says_something_is_kept_as_a_note() -> None:
+    """Une legende porte parfois la regle qui manque au flux. L'ecarter comme etape
+    ne doit pas revenir a la jeter."""
+
+    payload = _board(
+        _shape("1:3", "start", "ELLIPSE"),
+        _shape("1:24", "se connecter", "SQUARE"),
+        _connector("1:25", "1:3", "1:24"),
+        _shape("1:88", "Si Android : empreinte. Si iOS : Face ID.", "SQUARE"),
+    )
+    session = FigmaRESTSession(client=FakeClient(FakeResponse(payload=payload)))
+
+    process = call(session, "extractFigmaProcess", {"fileKey": "abc1234567"}).structured_content
+
+    assert process["notes"] == [
+        {
+            "id": "1:88",
+            "text": "Si Android : empreinte. Si iOS : Face ID.",
+            "section": "Section 1",
+            "origin": "detached_shape",
+        }
+    ]
+
+
+def test_a_board_without_any_arrow_keeps_all_its_shapes() -> None:
+    """Sans fleche, rien ne distingue une legende d'une etape. Tout ecarter
+    remplacerait du bruit par du vide."""
+
+    payload = _board(
+        _shape("1:3", "une etape", "SQUARE"),
+        _shape("1:4", "une autre", "SQUARE"),
+    )
+    session = FigmaRESTSession(client=FakeClient(FakeResponse(payload=payload)))
+
+    process = call(session, "extractFigmaProcess", {"fileKey": "abc1234567"}).structured_content
+
+    assert [s["id"] for s in process["steps"]] == ["1:3", "1:4"]
+
+
+def test_a_shape_without_text_never_becomes_a_step() -> None:
+    """Une forme muette ne porte aucune exigence. La garder produisait du
+    remplissage qui avait l'air d'une specification."""
+
+    payload = _board(
+        _shape("1:3", "start", "ELLIPSE"),
+        _shape("1:24", "", "SQUARE"),
+        _shape("1:30", "fin", "ELLIPSE"),
+        _connector("1:25", "1:3", "1:24"),
+        _connector("1:26", "1:24", "1:30"),
+    )
+    session = FigmaRESTSession(client=FakeClient(FakeResponse(payload=payload)))
+
+    process = call(session, "extractFigmaProcess", {"fileKey": "abc1234567"}).structured_content
+
+    assert [s["id"] for s in process["steps"]] == ["1:3", "1:30"]
+    # L'enchainement reste lisible : la forme muette garde sa place dans les
+    # transitions, donc le chemin n'est pas coupe.
+    assert [(t["from"], t["to"]) for t in process["transitions"]] == [
+        ("1:3", "1:24"),
+        ("1:24", "1:30"),
+    ]
+
+
+def test_a_free_text_block_becomes_a_note() -> None:
+    """Sur un board reel, la regle conditionnelle la plus utile du tableau etait
+    dans un bloc de texte libre, que l'extraction ignorait."""
+
+    payload = _board(
+        _shape("1:3", "start", "ELLIPSE"),
+        {
+            "id": "1:88",
+            "type": "TEXT",
+            "characters": "REMARQUE Si Android : empreinte. Si iOS : Face ID.",
+        },
+    )
+    session = FigmaRESTSession(client=FakeClient(FakeResponse(payload=payload)))
+
+    process = call(session, "extractFigmaProcess", {"fileKey": "abc1234567"}).structured_content
+
+    assert [(n["text"], n["origin"]) for n in process["notes"]] == [
+        ("REMARQUE Si Android : empreinte. Si iOS : Face ID.", "text")
+    ]
+
+
+def test_an_empty_text_block_adds_no_note() -> None:
+    payload = _board(
+        _shape("1:3", "start", "ELLIPSE"),
+        {"id": "1:67", "type": "TEXT", "characters": "   "},
+    )
+    session = FigmaRESTSession(client=FakeClient(FakeResponse(payload=payload)))
+
+    process = call(session, "extractFigmaProcess", {"fileKey": "abc1234567"}).structured_content
+
+    assert process["notes"] == []
+
+
+def test_a_note_reduced_to_a_stray_character_is_not_kept() -> None:
+    """Deux zones de texte du board reel se reduisaient a un guillemet orphelin et a
+    un caractere de police privee. Une remarque vide dans un cahier des charges
+    ressemble a une information perdue."""
+
+    payload = _board(
+        _shape("1:3", "start", "ELLIPSE"),
+        {"id": "1:81", "type": "TEXT", "characters": "\u201d"},
+        {"id": "1:67", "type": "TEXT", "characters": "\ue2ff"},
+        {"id": "1:88", "type": "TEXT", "characters": "Si iOS : Face ID"},
+    )
+    session = FigmaRESTSession(client=FakeClient(FakeResponse(payload=payload)))
+
+    process = call(session, "extractFigmaProcess", {"fileKey": "abc1234567"}).structured_content
+
+    assert [n["id"] for n in process["notes"]] == ["1:88"]

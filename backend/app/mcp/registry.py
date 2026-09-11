@@ -693,6 +693,13 @@ _FIGMA_PROCESS_NOTE = {
         "id": {"type": "string"},
         "text": {"type": "string"},
         "section": {"type": ["string", "null"]},
+        # Doit rester en accord avec _PROCESS_NOTE cote adaptateur : ce schema
+        # valide ce que le fournisseur rend, donc un champ ajoute la-bas et oublie
+        # ici ferait echouer toutes les lectures de processus.
+        "origin": {
+            "type": "string",
+            "enum": ["sticky", "text", "detached_shape"],
+        },
     },
 }
 _FIGMA_PROCESS_SCHEMA = {
