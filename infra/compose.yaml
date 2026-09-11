@@ -70,6 +70,9 @@ x-backend-environment: &backend-environment
   # d'un utilisateur avec un jeton personnel -- la portee projects:read n'y est pas
   # offerte. Vide, l'annuaire n'est pas monte et son outil n'est pas offert au modele.
   PKA_FIGMA_INDEXED_FILE_KEYS: ${PKA_FIGMA_INDEXED_FILE_KEYS:-[]}
+  # L'espace ou un cahier des charges est propose quand la demande n'en nomme aucun.
+  # Vide, rien n'est propose d'office : aucun espace ne peut etre devine.
+  PKA_CONFLUENCE_DEFAULT_SPACE_KEY: ${PKA_CONFLUENCE_DEFAULT_SPACE_KEY:-}
   PKA_MCP_GRANT_BACKEND: ${PKA_MCP_GRANT_BACKEND:-disabled}
   OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}

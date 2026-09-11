@@ -26,7 +26,10 @@ from app.agent.read_workflow import (
     BACKLOG_COMPLETION_TOKENS,
     BACKLOG_FORMAT_TURN,
     BACKLOG_READ_TURN,
+    DEFAULT_PAGE_TURN,
     MAX_CREDIBLE_STEPS,
+    PAGE_ALWAYS,
+    PAGE_ON_DEMAND,
     AgentReadWorkflow,
     _bounded,
     _flattened,
@@ -56,6 +59,10 @@ PROCESSUS = {
 }
 
 DEMANDE = "Genere le cahier des charges du processus Virement par empreinte."
+
+# Le rappel tel qu'il part reellement, place-tenants rendus. Les tests qui
+# inspectent son texte doivent lire ce qui est envoye, pas le gabarit.
+RAPPEL = BACKLOG_FORMAT_TURN.format(lignes_attendues="", page_finale=PAGE_ON_DEMAND)
 
 
 def process_reads(payload: Any = None, *, text: str | None = None):
@@ -307,25 +314,25 @@ def test_the_recalled_format_names_the_seven_columns_in_order() -> None:
         "Remarques |"
     )
 
-    assert attendu in BACKLOG_FORMAT_TURN
+    assert attendu in RAPPEL
     # La reference PBS est attribuee par l'equipe : en inventer une creerait un
     # renvoi vers un element qui n'existe pas.
-    assert "Ref. PBS : laisse VIDE" in BACKLOG_FORMAT_TURN
+    assert "Ref. PBS : laisse VIDE" in RAPPEL
 
 
 def test_the_recalled_format_requires_both_halves_of_the_gherkin() -> None:
     """Mesure : sans cette exigence, la colonne Scenario s'arretait au declencheur,
     et un critere sans "Alors" ne dit pas a quoi on reconnait que ca marche."""
 
-    assert 'le mot "Alors" doit figurer dans chaque cellule' in BACKLOG_FORMAT_TURN
+    assert 'le mot "Alors" doit figurer dans chaque cellule' in RAPPEL
 
 
 def test_the_body_of_the_page_is_the_table_itself() -> None:
     """Sans cette phrase, le modele proposait une page dont le corps annonçait le
     cahier des charges en une ligne, sans le contenir."""
 
-    assert "tableau EST le corps de la page" in BACKLOG_FORMAT_TURN
-    assert "markdown et non en HTML" in BACKLOG_FORMAT_TURN
+    assert "tableau EST le corps de la page" in RAPPEL
+    assert "markdown et non en HTML" in RAPPEL
 
 
 def test_the_reading_advice_names_the_extractor_and_refuses_the_others() -> None:
@@ -359,7 +366,7 @@ def test_the_worked_example_shows_a_block_of_two_lines() -> None:
 
     lignes = [
         x
-        for x in BACKLOG_FORMAT_TURN.splitlines()
+        for x in RAPPEL.splitlines()
         if x.startswith("| ") and "Bloc fonctionnel |" not in x and "---" not in x
     ]
 
@@ -371,7 +378,7 @@ def test_both_example_lines_carry_the_second_half_of_the_gherkin() -> None:
 
     lignes = [
         x
-        for x in BACKLOG_FORMAT_TURN.splitlines()
+        for x in RAPPEL.splitlines()
         if x.startswith("| ") and "Bloc fonctionnel |" not in x and "---" not in x
     ]
 
@@ -386,7 +393,7 @@ def test_the_continuation_line_leaves_its_first_three_cells_empty() -> None:
 
     lignes = [
         x
-        for x in BACKLOG_FORMAT_TURN.splitlines()
+        for x in RAPPEL.splitlines()
         if x.startswith("| ") and "Bloc fonctionnel |" not in x and "---" not in x
     ]
     cellules = [c.strip() for c in lignes[1].strip().strip("|").split("|")]
@@ -399,7 +406,7 @@ def test_the_example_says_it_is_a_shape_and_not_a_subject() -> None:
     """Sans cet avertissement, un exemple concret invite a en reprendre le sujet --
     et un cahier des charges de virement parlerait de consultation de solde."""
 
-    assert "n'en recopie ni les mots ni le sujet" in BACKLOG_FORMAT_TURN.lower().replace(
+    assert "n'en recopie ni les mots ni le sujet" in RAPPEL.lower().replace(
         "N'EN", "n'en"
     )
 
@@ -410,9 +417,121 @@ def test_every_example_line_has_the_seven_columns() -> None:
 
     lignes = [
         x
-        for x in BACKLOG_FORMAT_TURN.splitlines()
+        for x in RAPPEL.splitlines()
         if x.startswith("| ") and "Bloc fonctionnel |" not in x and "---" not in x
     ]
 
     for ligne in lignes:
         assert len(ligne.strip().strip("|").split("|")) == 7
+
+
+# --- La page proposee d'office ------------------------------------------------------
+#
+# Un cahier des charges qui reste dans une reponse de chat ne sert a personne, et
+# nommer l'espace a chaque demande fait repeter une constante de l'equipe. Ce que
+# cela declenche reste une PROPOSITION : c'est l'approbation qui rend ce defaut sur.
+
+
+def agent_with_space(provider: Any, espace: str, *, with_desk: bool = True):
+    from app.approvals.workflow import ApprovalWorkflow
+    from app.conversations.adapters.memory import InMemoryConversationRepository
+    from app.figma.catalogue import FigmaFrameCatalogue
+    from app.mcp.mutation_registry import MCPMutationRegistry
+    from tests.test_agent_proposes_writes import (
+        InMemoryApprovalUnitOfWork,
+        RegistryMutationToolPin,
+    )
+
+    reads = process_reads()
+    uow = InMemoryApprovalUnitOfWork()
+    approvals = ApprovalWorkflow(
+        uow, InMemoryConversationRepository(), RegistryMutationToolPin(), 900, "session"
+    )
+    return agent_for(
+        provider,
+        reads,
+        audit_sink=uow.audit,
+        # Le conseil de lecture renvoie a la liste des maquettes indexees : sans
+        # annuaire, il pointerait vers une liste absente et n'est pas offert.
+        frames=FigmaFrameCatalogue(reads=reads, file_keys=('UVQmgXGaZC5vrtaQRU5nvo',)),
+        default_confluence_space=espace,
+        mutations=MCPMutationRegistry() if with_desk else None,
+        approvals=approvals if with_desk else None,
+    )
+
+
+def conseil_de(provider) -> str:
+    return "\n".join(
+        str(m["content"])
+        for m in provider.requests[0].messages
+        if m["role"] == "system" and "Passe-lui le fileKey" in str(m["content"])
+    )
+
+
+def test_a_default_space_makes_the_page_part_of_the_request() -> None:
+    provider = ScriptedProvider(reading_process(), answered("| ... |"))
+
+    ask(agent_with_space(provider, "DL"), question=DEMANDE)
+
+    conseil = conseil_de(provider)
+    assert "meme si la personne ne l'a pas demandee" in conseil
+    assert "l'espace DL" in conseil
+
+
+def test_without_a_default_space_nothing_is_proposed_of_its_own_accord() -> None:
+    """Aucun espace ne peut etre devine, et en inventer un ferait approuver une page
+    creee au mauvais endroit."""
+
+    provider = ScriptedProvider(reading_process(), answered("| ... |"))
+
+    ask(agent_with_space(provider, ""), question=DEMANDE)
+
+    assert "meme si la personne" not in conseil_de(provider)
+
+
+def test_the_default_page_says_it_is_only_submitted() -> None:
+    """Proposer d'office ce qui n'a pas ete demande ne tient que parce que la
+    decision reste a l'humain. Le modele doit le savoir, pour ne pas l'annoncer
+    comme un fait accompli."""
+
+    assert "soumise a approbation" in DEFAULT_PAGE_TURN
+
+
+def test_a_space_is_never_offered_without_an_approval_desk() -> None:
+    """Sans atelier d'approbation, la consigne promettrait une creation qui
+    n'arriverait jamais."""
+
+    provider = ScriptedProvider(reading_process(), answered("| ... |"))
+    ask(agent_with_space(provider, "DL", with_desk=False), question=DEMANDE)
+
+    assert "meme si la personne" not in conseil_de(provider)
+
+
+def test_the_final_instruction_names_the_space_when_one_is_configured() -> None:
+    """Dite uniquement au depart, la consigne de creer la page etait oubliee : le
+    modele rendait le tableau dans le chat et s'arretait la. C'est le dernier tour
+    avant la redaction qui est suivi."""
+
+    provider = ScriptedProvider(reading_process(), answered("| ... |"))
+
+    ask(agent_with_space(provider, "DL"), question=DEMANDE)
+
+    rappel = provider.requests[1].messages[-1]["content"]
+    assert "createConfluencePage" in rappel
+    assert "spaceId=DL" in rappel
+
+
+def test_without_a_space_the_page_stays_conditional() -> None:
+    provider = ScriptedProvider(reading_process(), answered("| ... |"))
+
+    ask(agent_with_space(provider, ""), question=DEMANDE)
+
+    rappel = provider.requests[1].messages[-1]["content"]
+    assert "Si la demande te fait aussi creer" in rappel
+    assert "createConfluencePage" not in rappel
+
+
+def test_both_endings_refuse_a_body_that_only_announces_the_table() -> None:
+    for fin in (PAGE_ALWAYS, PAGE_ON_DEMAND):
+        assert "fait approuver une page vide" in fin
+        assert "markdown" in fin

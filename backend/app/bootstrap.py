@@ -379,6 +379,7 @@ def _build_agent(
         mutations=MCPMutationRegistry() if _writes_are_open(settings, approvals) else None,
         approvals=approvals if _writes_are_open(settings, approvals) else None,
         frames=_build_frame_catalogue(settings, mcp_reads),
+        default_confluence_space=settings.confluence_default_space_key,
         # The same sink the provider and the reads write to, so a question and
         # everything it caused share one trail.
         audit_sink=audit_sink,
