@@ -168,6 +168,13 @@ describe("askQuestion", () => {
       sources: [],
       approval: {
         target: "jira",
+        // La cible du domaine est conservée telle quelle : réviser une proposition
+        // l'exige, et la reconstruire de mémoire reviendrait à la deviner.
+        actionTarget: {
+          source_system: "jira",
+          resource_type: "User Story",
+          container_id: "PKA",
+        },
         action: "Créer un ticket",
         actionClass: "CREATE",
         destination: "Jira · PKA",

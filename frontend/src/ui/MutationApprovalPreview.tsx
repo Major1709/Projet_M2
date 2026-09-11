@@ -9,8 +9,69 @@ import {
   type NexiaApproval,
   type NexiaGateway,
   type NexiaMutationExecution,
+  type NexiaMutationPayload,
   type NexiaMutationProposalState,
 } from "@/adapters/nexia-api";
+
+import { opensABlock, parseMarkdownTable } from "./markdown-table";
+
+/**
+ * Le corps d'une page, rendu comme Confluence le rendra.
+ *
+ * Un cahier des charges part en markdown : sept colonnes de barres verticales que
+ * l'aperçu affichait en texte brut. Approuver ce qu'on ne peut pas relire n'est pas
+ * approuver, et c'est pourtant ce qu'on demandait.
+ *
+ * Une ligne dont la première cellule est vide continue le bloc du dessus -- c'est la
+ * convention de la page de l'équipe. Elle est marquée plutôt que laissée en trous,
+ * qu'un relecteur prendrait pour un oubli.
+ */
+function SpecificationBody({ body, fallback }: { body: string; fallback?: string }) {
+  if (!body.trim()) {
+    // Une proposition sans corps ne devrait pas exister, mais une boite vide ne dit
+    // pas si le contenu manque ou si l'affichage a echoue.
+    return <p>{fallback || "Aucun contenu à écrire."}</p>;
+  }
+  const table = parseMarkdownTable(body);
+  if (!table) {
+    // Pas de tableau : on montre ce qu'il y a. Un corps en prose est justement ce
+    // que la consigne interdit, donc le cacher priverait le relecteur du défaut.
+    return <pre className="approval-body-raw">{body}</pre>;
+  }
+
+  return (
+    <>
+      {table.before ? <p className="approval-body-stray">{table.before}</p> : null}
+      <div className="approval-table-scroll">
+        <table className="approval-table">
+          <thead>
+            <tr>
+              {table.headers.map((header, index) => (
+                <th key={`${header}-${index}`} scope="col">{header}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {table.rows.map((row, rowIndex) => (
+              <tr
+                key={rowIndex}
+                className={opensABlock(row) ? "approval-table__block" : "approval-table__continued"}
+              >
+                {row.map((cell, cellIndex) => (
+                  <td key={cellIndex}>{cell}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {table.after ? <p className="approval-body-stray">{table.after}</p> : null}
+      <p className="approval-table-count">
+        {table.rows.filter(opensABlock).length} bloc(s) fonctionnel(s) · {table.rows.length} ligne(s)
+      </p>
+    </>
+  );
+}
 
 type ApprovalUiState =
   | "pending"
@@ -32,7 +93,10 @@ type MutationApprovalPreviewProps = {
   target?: NexiaApproval["target"];
   gateway?: Pick<
     NexiaGateway,
-    "approveActionProposal" | "rejectActionProposal" | "executeActionProposal"
+    | "approveActionProposal"
+    | "rejectActionProposal"
+    | "reviseActionProposal"
+    | "executeActionProposal"
   >;
   onDecision?: (status: "approved" | "rejected") => void;
   onEdit?: () => void;
@@ -197,6 +261,10 @@ export function MutationApprovalPreview({
   const [status, setStatus] = useState<ApprovalUiState>(statusFromProposal(approval?.state));
   const [execution, setExecution] = useState<NexiaMutationExecution | null>(null);
   const [busy, setBusy] = useState(false);
+  // La charge en cours d'edition, ou null quand on relit sans modifier. Separee de
+  // la proposition : tant que la revision n'est pas enregistree, ce qui sera ecrit
+  // reste ce que le serveur porte, et non ce qui est tape a l'ecran.
+  const [draft, setDraft] = useState<NexiaMutationPayload | null>(null);
   const headingId = `approval-panel-title-${useId().replace(/:/g, "")}`;
   const baseDetails = TARGETS[selectedTarget];
   const payload = currentApproval?.payload ?? {};
@@ -228,7 +296,15 @@ export function MutationApprovalPreview({
       && currentApproval.decisionToken
       && currentApproval.version !== undefined,
   );
-  const canApprove = status === "pending" && !busy;
+  const editing = draft !== null;
+  // Ce qui est a l'ecran : le brouillon pendant l'edition, la proposition sinon.
+  const shown: NexiaMutationPayload = draft ?? payload;
+  // Une page se reconnait a son corps, pas a son systeme : c'est ce champ qui
+  // decide de ce qu'il y a a montrer, et un ticket n'en porte jamais.
+  const isPage = typeof shown.body === "string" || selectedTarget === "confluence";
+  // On n'approuve pas pendant qu'on modifie : le bouton porterait sur un texte que
+  // le serveur ne connait pas encore.
+  const canApprove = status === "pending" && !busy && !editing;
   const canExecute = status === "approved" && !busy;
   const remainingMinutes = expiresInMinutes(currentApproval);
 
@@ -294,6 +370,55 @@ export function MutationApprovalPreview({
       reportError(caught instanceof NexiaApiError
         ? caught
         : new NexiaApiError("Le refus n’a pas pu être enregistré.", 0));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startEditing() {
+    setDraft({ ...payload });
+    onEdit?.();
+  }
+
+  function editField(field: string, value: string) {
+    setDraft((previous) => ({ ...(previous ?? payload), [field]: value }));
+  }
+
+  /**
+   * Enregistrer la revision : le serveur remplace la proposition par une neuve.
+   *
+   * Ni le jeton ni la version d'avant ne valent plus rien apres coup, donc on repart
+   * entierement de ce que le serveur rend. Reutiliser les anciens ferait echouer
+   * l'approbation suivante avec un conflit que personne ne saurait expliquer.
+   */
+  async function handleSaveRevision() {
+    if (!draft || busy) return;
+    if (!remoteProposal || !currentApproval?.actionTarget) {
+      // Sans proposition serveur -- l'aperçu de démonstration -- la modification
+      // reste locale. Annoncer un enregistrement qui n'a pas lieu serait pire.
+      setCurrentApproval((previous) => (previous ? { ...previous, payload: draft } : previous));
+      setDraft(null);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const revision = await gateway.reviseActionProposal({
+        proposalId: currentApproval.proposalId!,
+        expectedVersion: currentApproval.version!,
+        decisionToken: currentApproval.decisionToken!,
+        target: currentApproval.actionTarget,
+        payload: draft,
+        ...(currentApproval.explanation ? { explanation: currentApproval.explanation } : {}),
+        reason: "Modifiee avant approbation",
+      });
+      setCurrentApproval(revision.replacement);
+      setStatus(statusFromProposal(revision.replacement.state));
+      setDraft(null);
+    } catch (caught) {
+      reportError(caught instanceof NexiaApiError
+        ? caught
+        : new NexiaApiError("La modification n’a pas pu être enregistrée.", 0));
     } finally {
       setBusy(false);
     }
@@ -434,23 +559,115 @@ export function MutationApprovalPreview({
       </div>
 
       <div className="approval-content-preview">
-        <div className="approval-section-label">Contenu à écrire</div>
-        <div className="approval-field">
-          <span>Projet</span>
-          <strong>{payload.projectKey ?? details.project}</strong>
+        <div className="approval-section-label">
+          {editing ? "Contenu à écrire — modification" : "Contenu à écrire"}
         </div>
-        <div className="approval-field">
-          <span>Type de ticket</span>
-          <strong>{payload.issueTypeName ?? details.objectType}</strong>
-        </div>
-        <div className="approval-field">
-          <span>Titre</span>
-          <strong>{payload.summary ?? details.title}</strong>
-        </div>
-        <div className="approval-field approval-field--description">
-          <span>Description</span>
-          <p>{(payload.description ?? details.description) || "Aucune description."}</p>
-        </div>
+
+        {isPage ? (
+          <>
+            <div className="approval-field">
+              <span>Espace</span>
+              <strong>{shown.spaceId ?? details.project}</strong>
+            </div>
+            <div className="approval-field">
+              <span>Titre de la page</span>
+              {editing ? (
+                <input
+                  className="approval-input"
+                  type="text"
+                  aria-label="Titre de la page"
+                  value={String(shown.title ?? "")}
+                  onChange={(event) => editField("title", event.target.value)}
+                />
+              ) : (
+                <strong>{shown.title ?? details.title}</strong>
+              )}
+            </div>
+            <div className="approval-field approval-field--description">
+              <span>Cahier des charges</span>
+              {editing ? (
+                <>
+                  <textarea
+                    className="approval-textarea"
+                    aria-label="Corps de la page en markdown"
+                    rows={14}
+                    value={String(shown.body ?? "")}
+                    onChange={(event) => editField("body", event.target.value)}
+                  />
+                  {/* L'aperçu suit la frappe : sans lui, on modifierait un tableau
+                      en markdown sans jamais voir ce qu'il devient. */}
+                  <div className="approval-section-label">Aperçu</div>
+                  <SpecificationBody body={String(shown.body ?? "")} />
+                </>
+              ) : (
+                <SpecificationBody
+                  body={String(shown.body ?? "")}
+                  fallback={details.description}
+                />
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="approval-field">
+              <span>Projet</span>
+              <strong>{shown.projectKey ?? details.project}</strong>
+            </div>
+            <div className="approval-field">
+              <span>Type de ticket</span>
+              <strong>{shown.issueTypeName ?? details.objectType}</strong>
+            </div>
+            <div className="approval-field">
+              <span>Titre</span>
+              {editing ? (
+                <input
+                  className="approval-input"
+                  type="text"
+                  aria-label="Titre du ticket"
+                  value={String(shown.summary ?? "")}
+                  onChange={(event) => editField("summary", event.target.value)}
+                />
+              ) : (
+                <strong>{shown.summary ?? details.title}</strong>
+              )}
+            </div>
+            <div className="approval-field approval-field--description">
+              <span>Description</span>
+              {editing ? (
+                <textarea
+                  className="approval-textarea"
+                  aria-label="Description du ticket"
+                  rows={6}
+                  value={String(shown.description ?? "")}
+                  onChange={(event) => editField("description", event.target.value)}
+                />
+              ) : (
+                <p>{(shown.description ?? details.description) || "Aucune description."}</p>
+              )}
+            </div>
+          </>
+        )}
+
+        {editing ? (
+          <div className="approval-actions__row">
+            <button
+              className="approval-button approval-button--secondary"
+              type="button"
+              disabled={busy}
+              onClick={() => setDraft(null)}
+            >
+              Annuler
+            </button>
+            <button
+              className="approval-button approval-button--approve"
+              type="button"
+              disabled={busy}
+              onClick={handleSaveRevision}
+            >
+              {busy ? "Enregistrement…" : "Enregistrer les modifications"}
+            </button>
+          </div>
+        ) : null}
       </div>
 
       {details.explanation ? (
@@ -470,21 +687,23 @@ export function MutationApprovalPreview({
 
       {status === "pending" ? (
         <div className="approval-actions">
-          {onEdit ? (
+          {editing ? null : (
             <button
               className="approval-button approval-button--secondary"
               type="button"
               disabled={busy}
-              onClick={onEdit}
+              onClick={startEditing}
             >
               Modifier la proposition
             </button>
-          ) : null}
+          )}
           <div className="approval-actions__row">
+            {/* Decider pendant qu'on modifie porterait sur un texte que le serveur
+                ne connait pas encore : l'ecran et la proposition auraient diverge. */}
             <button
               className="approval-button approval-button--reject"
               type="button"
-              disabled={busy}
+              disabled={!canApprove}
               onClick={handleReject}
             >
               {busy ? "Traitement…" : "Refuser"}
@@ -492,7 +711,7 @@ export function MutationApprovalPreview({
             <button
               className="approval-button approval-button--approve"
               type="button"
-              disabled={busy}
+              disabled={!canApprove}
               onClick={handleApprove}
             >
               <span aria-hidden="true">✓</span>

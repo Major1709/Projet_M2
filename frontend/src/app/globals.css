@@ -1759,3 +1759,120 @@ a.message-source:hover {
     border-radius: 22px;
   }
 }
+
+/* --- Le cahier des charges dans l'apercu d'approbation ---------------------------
+ *
+ * Le corps part en markdown vers Confluence. Affiche en texte brut, un tableau a
+ * sept colonnes est illisible -- et approuver ce qu'on ne peut pas relire n'est pas
+ * approuver. Il est donc rendu comme un tableau, dans la largeur dont il a besoin :
+ * c'est lui qui defile, jamais la page.
+ */
+
+.approval-table-scroll {
+  margin-top: 8px;
+  overflow-x: auto;
+  border: 1px solid #e8e4df;
+  border-radius: 13px;
+  background: #ffffff;
+}
+
+.approval-table {
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.approval-table th,
+.approval-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #f0ece7;
+  color: #3f3a36;
+  text-align: left;
+  vertical-align: top;
+}
+
+.approval-table th {
+  position: sticky;
+  top: 0;
+  background: #f7f4f1;
+  color: #6b6259;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Une ligne de continuation laisse ses trois premieres cellules vides : c'est la
+ * convention des cellules fusionnees de la page de l'equipe. Le trait la rattache
+ * au bloc du dessus, pour qu'on n'y lise pas un oubli. */
+.approval-table__block td:first-child {
+  border-left: 3px solid #c8a35a;
+  font-weight: 700;
+}
+
+.approval-table__continued td:first-child {
+  border-left: 3px solid #ece4d3;
+}
+
+.approval-table-count {
+  margin: 8px 0 0;
+  color: #9b9292;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Ce qui deborde du tableau est montre, pas cache : la consigne interdit toute
+ * introduction, donc en masquer une priverait le relecteur du defaut. */
+.approval-body-stray {
+  display: block;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-left: 3px solid #d98d4a;
+  color: #8a5a2b;
+  font-size: 11px;
+  -webkit-line-clamp: none;
+}
+
+.approval-body-raw {
+  margin: 8px 0 0;
+  max-height: 260px;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid #e8e4df;
+  border-radius: 13px;
+  background: #fcfbfa;
+  color: #5f5959;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.approval-input,
+.approval-textarea {
+  width: 100%;
+  margin-top: 6px;
+  padding: 9px 11px;
+  border: 1px solid #d9d2ca;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #273746;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.approval-textarea {
+  min-height: 120px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+
+.approval-input:focus-visible,
+.approval-textarea:focus-visible {
+  outline: 2px solid #c8a35a;
+  outline-offset: 1px;
+}
