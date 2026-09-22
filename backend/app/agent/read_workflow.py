@@ -404,6 +404,40 @@ _SYSTEM_LABELS = {
 }
 
 
+# L'outil par lequel une page est creee. Nomme ici parce que le rattrapage en a
+# besoin, et qu'un nom epele dans la boucle se serait desynchronise du registre.
+CONFLUENCE_CREATE_TOOL = "createConfluencePage"
+
+# L'en-tete qui identifie le tableau attendu. Deux colonnes suffisent a le
+# reconnaitre, et exiger les sept refuserait un tableau correct qu'un modele aurait
+# ponctue autrement.
+_TABLE_MARKERS = ("| Bloc fonctionnel", "Ref. PBS")
+
+
+def _is_specification_table(text: str) -> bool:
+    """Ce texte est-il le cahier des charges lui-meme, et non un propos a son sujet ?
+
+    Le rattrapage ne doit se declencher que sur le tableau. Une reponse qui explique
+    pourquoi il n'a pas pu etre produit deviendrait sinon le corps d'une page, et
+    l'humain approuverait une page qui parle du document au lieu de le contenir.
+    """
+
+    if not text.startswith("|"):
+        return False
+    premiere = text.splitlines()[0]
+    return all(marqueur in premiere for marqueur in _TABLE_MARKERS)
+
+
+def _specification_title(maquette: str | None) -> str:
+    """Nommer la page d'apres la maquette lue.
+
+    Sans nom releve, un titre generique reste juste : mieux vaut une page a renommer
+    qu'un titre invente qui designerait une maquette dont on n'est pas sur.
+    """
+
+    return f"Cahier des charges - {maquette}" if maquette else "Cahier des charges"
+
+
 def _is_exploration(contract: ToolContract | None) -> bool:
     """La lecture cherche-t-elle, ou designe-t-elle une ressource ?
 
@@ -971,6 +1005,10 @@ class AgentReadWorkflow:
         # Les systemes reellement lus, et le rappel de croisement, une seule fois.
         systems_read: set[MCPReadSourceSystem] = set()
         cross_source_recalled = False
+        # La maquette dont le processus a ete lu. Sert a nommer la page si le modele
+        # oublie de la proposer : un titre tire de ce qui a ete lu vaut mieux qu'un
+        # titre generique, et mieux encore qu'un titre invente.
+        process_file_key: str | None = None
 
         for step in range(1, question.max_steps + 1):
             response = await self._provider.generate(
@@ -995,6 +1033,27 @@ class AgentReadWorkflow:
                 last_text = response.text
 
             if not response.tool_calls:
+                # Le modele a rendu le tableau sans proposer la page. Mesure : une
+                # fois sur trois, quelle que soit la fermete de la consigne et quel
+                # que soit le budget d'etapes. Une consigne ne peut pas rendre un
+                # comportement impossible -- la proposition est donc construite ici.
+                #
+                # Rien n'est ecrit pour autant : ce chemin passe par le meme atelier
+                # d'approbation, donc un humain voit et decide, exactement comme si
+                # le modele avait appele l'outil lui-meme.
+                rattrapage = self._page_for(
+                    text=response.text or last_text,
+                    wanted=cahier_des_charges,
+                    file_key=process_file_key,
+                )
+                if rattrapage is not None:
+                    return await self._propose(
+                        call=rattrapage,
+                        question=question,
+                        context=context,
+                        step=step,
+                        records=records,
+                    )
                 return AgentAnswer(
                     # Same rule as the step-limit exit, and for the same reason: an
                     # empty body is indistinguishable from an assistant that had
@@ -1102,6 +1161,14 @@ class AgentReadWorkflow:
                 if (
                     record is not None
                     and call.tool_name == FIGMA_PROCESS_TOOL
+                    and cahier_des_charges
+                ):
+                    cle = call.arguments.get("fileKey")
+                    if isinstance(cle, str) and cle:
+                        process_file_key = cle
+                if (
+                    record is not None
+                    and call.tool_name == FIGMA_PROCESS_TOOL
                     and not backlog_format_recalled
                     and cahier_des_charges
                 ):
@@ -1150,6 +1217,54 @@ class AgentReadWorkflow:
             "name": call.tool_name,
             "content": observation,
         }
+
+    def _page_for(
+        self,
+        *,
+        text: str,
+        wanted: bool,
+        file_key: str | None,
+    ) -> ProposedToolCall | None:
+        """La page que le modele aurait du proposer, quand il ne l'a pas fait.
+
+        Rend None des que le moindre element manque, et c'est le point important :
+        ce rattrapage ne doit jamais INVENTER une ecriture. Il ne se declenche que
+        si la personne a demande un cahier des charges, que le deploiement designe
+        un espace, qu'un atelier d'approbation existe, et que ce que le modele vient
+        d'ecrire est bien le tableau attendu -- pas de la prose qui en parle.
+
+        Le titre vient du nom de la maquette lue, non d'une formule generique : une
+        page nommee "Cahier des charges" parmi vingt autres ne se retrouve pas.
+        """
+
+        if not (wanted and self._default_space and self._mutation_contracts):
+            return None
+        corps = text.strip()
+        if not _is_specification_table(corps):
+            return None
+        contract = self._mutation_contracts.get(CONFLUENCE_CREATE_TOOL)
+        if contract is None:
+            return None
+        return ProposedToolCall(
+            call_id=f"rattrapage-{hashlib.sha256(corps.encode()).hexdigest()[:12]}",
+            tool_name=CONFLUENCE_CREATE_TOOL,
+            action_class=contract.action_class,
+            arguments={
+                "spaceId": self._default_space,
+                "title": _specification_title(self._maquette_name(file_key)),
+                "body": corps,
+            },
+        )
+
+    def _maquette_name(self, file_key: str | None) -> str | None:
+        """Le nom que Figma donne a la maquette, s'il a ete releve a l'indexation."""
+
+        if file_key is None or self._frames is None:
+            return None
+        for described in self._frames.describe():
+            if described.endswith(f"({file_key})"):
+                return described.rsplit(" (", 1)[0]
+        return None
 
     async def _propose(
         self,
