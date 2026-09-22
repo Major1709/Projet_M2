@@ -365,6 +365,58 @@ def _step_count(observation: str) -> int | None:
     return compte
 
 
+# Le rappel de croisement, quand une exploration n'a touche qu'une des deux sources
+# Atlassian.
+#
+# Mesure : sur trois questions larges posees sans nommer d'outil -- "fais-moi le point
+# sur le projet KAN", "ou en est le projet KAN", "resume-moi tout ce qu'on sait" -- le
+# modele croisait deux fois sur trois. La troisieme, il s'arretait a Jira, et sa
+# reponse paraissait complete alors qu'elle etait partielle. Rien ne lui disait qu'un
+# projet vit dans plusieurs sources.
+#
+# Il vise aussi le gaspillage constate au passage : sur un essai, la meme recherche
+# Jira a ete relancee trois fois avec des criteres differents, ce qui a brule trois
+# lectures sur quatre du meme cote. Le registre ne refuse que les repetitions a
+# l'identique ; celles-la passaient.
+CROSS_SOURCE_TURN = (
+    "Tu viens de chercher dans {explore} sans avoir rien lu dans {absente}. Sur une "
+    "question large -- un projet, un sujet, un etat d'avancement -- les deux se "
+    "completent : {jira} porte ce qui est en cours et qui s'en occupe, {confluence} "
+    "porte ce qui a ete decide et ecrit. Une reponse tiree d'une seule des deux est "
+    "partielle, et rien dans sa forme ne le dira au lecteur.\n"
+    "Va donc chercher dans {absente} avant de repondre, sauf si la question ne porte "
+    "vraiment que sur {explore}. Une seule recherche par source suffit : relancer la "
+    "meme avec d'autres criteres consomme les lectures qui manqueront a l'autre "
+    "source."
+)
+
+# La paire qui se complete. Figma en est absent volontairement : une maquette ne
+# documente pas l'avancement d'un ticket, et renvoyer vers elle une question de
+# projet ferait depenser une lecture pour rien.
+_COMPLEMENTARY = {
+    MCPReadSourceSystem.JIRA: MCPReadSourceSystem.CONFLUENCE,
+    MCPReadSourceSystem.CONFLUENCE: MCPReadSourceSystem.JIRA,
+}
+
+_SYSTEM_LABELS = {
+    MCPReadSourceSystem.JIRA: "Jira",
+    MCPReadSourceSystem.CONFLUENCE: "Confluence",
+}
+
+
+def _is_exploration(contract: ToolContract | None) -> bool:
+    """La lecture cherche-t-elle, ou designe-t-elle une ressource ?
+
+    Le registre porte deja la reponse : un contrat sans ``resource_reference_path``
+    ne designe rien en particulier -- c'est une recherche ou un inventaire. Le signal
+    vient donc du comportement du modele, et non de mots devines dans la question.
+    C'est ce qui distingue une question large d'une question sur un ticket precis,
+    qui va droit a l'outil qui le nomme.
+    """
+
+    return contract is not None and contract.resource_reference_path is None
+
+
 # L'outil dont le resultat declenche le rappel de forme. C'est le bon point
 # d'accroche : il ne sert qu'a lire un processus, donc sa reussite dit qu'un
 # processus vient d'entrer dans la conversation.
@@ -851,6 +903,14 @@ class AgentReadWorkflow:
             + tuple(self._mutation_contracts)
             + ((FIND_FIGMA_FRAME,) if frames is not None else ())
         )
+        # Les systemes reellement offerts, pour ne rappeler que ce qui est lisible.
+        # Conseiller d'aller voir Confluence quand le connecteur est eteint enverrait
+        # le modele vers un refus, et lui ferait perdre l'etape qui restait.
+        self._offered = frozenset(
+            offered_systems
+            if offered_systems is not None
+            else {contract.source_system for contract in self._registry.contracts}
+        )
 
     async def answer(
         self,
@@ -908,6 +968,9 @@ class AgentReadWorkflow:
         last_text = ""
         # Le rappel de forme n'est injecte qu'une fois par question.
         backlog_format_recalled = False
+        # Les systemes reellement lus, et le rappel de croisement, une seule fois.
+        systems_read: set[MCPReadSourceSystem] = set()
+        cross_source_recalled = False
 
         for step in range(1, question.max_steps + 1):
             response = await self._provider.generate(
@@ -1001,6 +1064,37 @@ class AgentReadWorkflow:
                 if record is not None:
                     records.append(record)
                 messages.append(self._tool_turn(call, observation))
+                contract = self._contracts.get(call.tool_name)
+                if record is not None and contract is not None:
+                    systems_read.add(contract.source_system)
+                # Le rappel de croisement suit une EXPLORATION, jamais la lecture
+                # d'une ressource nommee : une question sur un ticket precis va droit
+                # a l'outil qui le designe, et n'a rien a gagner a ouvrir Confluence.
+                if (
+                    record is not None
+                    and not cross_source_recalled
+                    and _is_exploration(contract)
+                ):
+                    partenaire = _COMPLEMENTARY.get(contract.source_system)
+                    if (
+                        partenaire is not None
+                        and partenaire in self._offered
+                        and partenaire not in systems_read
+                    ):
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": CROSS_SOURCE_TURN.format(
+                                    explore=_SYSTEM_LABELS[contract.source_system],
+                                    absente=_SYSTEM_LABELS[partenaire],
+                                    jira=_SYSTEM_LABELS[MCPReadSourceSystem.JIRA],
+                                    confluence=_SYSTEM_LABELS[
+                                        MCPReadSourceSystem.CONFLUENCE
+                                    ],
+                                ),
+                            }
+                        )
+                        cross_source_recalled = True
                 # Le rappel de forme suit immediatement le processus lu, une seule
                 # fois. Le repeter a chaque lecture ferait grossir le fil sans rien
                 # ajouter : c'est sa POSITION -- juste avant la redaction -- qui le
@@ -1636,6 +1730,7 @@ class AgentReadWorkflow:
 __all__ = [
     "ABSOLUTE_MAX_READS_PER_QUESTION",
     "BACKLOG_READ_TURN",
+    "CROSS_SOURCE_TURN",
     "DEFAULT_PAGE_TURN",
     "BACKLOG_FORMAT_TURN",
     "BACKLOG_MARKERS",
