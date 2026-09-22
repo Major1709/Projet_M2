@@ -17,6 +17,16 @@ function createGateway(overrides: Partial<NexiaGateway> = {}): NexiaGateway {
       version: 1,
       state: "PENDING_APPROVAL",
     }),
+    reviseActionProposal: vi.fn().mockResolvedValue({
+      replacement: {
+        target: "jira",
+        proposalId: "proposal-2",
+        decisionToken: "decision-token-223456789012345",
+        version: 1,
+        state: "PENDING_APPROVAL",
+      },
+      decisionToken: "decision-token-223456789012345",
+    }),
     approveActionProposal: vi.fn().mockResolvedValue({
       target: "jira",
       proposalId: "proposal-1",

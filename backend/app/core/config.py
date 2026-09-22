@@ -209,6 +209,18 @@ class Settings(BaseSettings):
     #
     # Vide, l'annuaire n'est pas monte et son outil n'est pas offert au modele.
     figma_indexed_file_keys: tuple[str, ...] = ()
+    # L'espace ou un cahier des charges est propose quand la demande n'en nomme
+    # aucun. Un cahier des charges n'a d'interet qu'ecrit quelque part, et exiger
+    # que la personne nomme l'espace a chaque fois lui fait repeter une constante
+    # de son equipe.
+    #
+    # La cle d'espace, pas son identifiant : c'est ce qu'un humain lit dans l'URL
+    # Confluence, et le fournisseur la resout lui-meme.
+    #
+    # Vide, rien n'est propose d'office et la demande se comporte comme avant --
+    # aucun espace ne peut etre devine, et en inventer un ferait approuver une page
+    # creee au mauvais endroit.
+    confluence_default_space_key: str = Field(default="", max_length=255)
     mcp_atlassian_jira_cloud_id: UUID | None = None
     mcp_atlassian_confluence_cloud_id: UUID | None = None
     # The Groq endpoint is fixed in the adapter, not declared here. A destination

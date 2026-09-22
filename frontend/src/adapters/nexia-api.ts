@@ -26,11 +26,34 @@ export type NexiaMutationProposalState =
   | "FAILED"
   | "PARTIAL";
 
+/**
+ * La charge d'une proposition, telle que le serveur la rend.
+ *
+ * Les champs nommés sont ceux que l'aperçu sait présenter ; l'index conserve les
+ * autres. Cette conservation n'est pas du confort : réviser une proposition renvoie
+ * la charge entière au serveur, et une clé perdue ici serait une clé effacée de
+ * l'écriture — un espace Confluence, un identifiant de page. Le premier aperçu ne
+ * gardait que quatre champs Jira, si bien qu'un cahier des charges arrivait vide.
+ */
 export type NexiaMutationPayload = {
   projectKey?: string;
   issueTypeName?: string;
   summary?: string;
   description?: string;
+  /** Confluence : le titre de la page. */
+  title?: string;
+  /** Confluence : le corps, en markdown -- c'est là que vit le cahier des charges. */
+  body?: string;
+  spaceId?: string;
+  pageId?: string;
+  [key: string]: unknown;
+};
+
+export type NexiaRevision = {
+  /** La proposition neuve, qui remplace celle qu'on a revisee. */
+  replacement: NexiaApproval;
+  /** Le jeton de la neuve. Celui d'avant ne vaut plus rien. */
+  decisionToken: string;
 };
 
 export type NexiaActionTarget = {
@@ -49,6 +72,8 @@ export type NexiaActionTarget = {
  */
 export type NexiaApproval = {
   target: NexiaApprovalTarget;
+  /** La cible telle que le domaine la porte. Necessaire pour reviser. */
+  actionTarget?: NexiaActionTarget;
   proposalId?: string;
   decisionToken?: string;
   version?: number;
@@ -116,6 +141,15 @@ export type NexiaGateway = {
     decisionToken: string;
     reason?: string;
   }) => Promise<NexiaApproval>;
+  reviseActionProposal: (input: {
+    proposalId: string;
+    expectedVersion: number;
+    decisionToken: string;
+    target: NexiaActionTarget;
+    payload: NexiaMutationPayload;
+    explanation?: string;
+    reason: string;
+  }) => Promise<NexiaRevision>;
   executeActionProposal: (input: {
     proposalId: string;
     expectedVersion: number;
@@ -351,15 +385,20 @@ function parseApproval(value: unknown): NexiaApproval | undefined {
   const normalizedState = proposalState && validStates.has(proposalState as NexiaMutationProposalState)
     ? proposalState as NexiaMutationProposalState
     : undefined;
-  const mutationPayload: NexiaMutationPayload = {
-    ...(typeof payload.projectKey === "string" ? { projectKey: payload.projectKey } : {}),
-    ...(typeof payload.issueTypeName === "string" ? { issueTypeName: payload.issueTypeName } : {}),
-    ...(typeof payload.summary === "string" ? { summary: payload.summary } : {}),
-    ...(typeof payload.description === "string" ? { description: payload.description } : {}),
-  };
+  // Recopiée telle quelle plutôt que triée champ par champ. Une révision renvoie la
+  // charge entière au serveur : ce qui serait écarté ici serait effacé de l'écriture.
+  const mutationPayload: NexiaMutationPayload = { ...payload };
+
+  // La cible du domaine, conservée telle que le serveur la rend. ``target`` au-dessus
+  // n'est qu'une étiquette d'affichage ; réviser exige la cible complète, et la
+  // reconstruire de mémoire reviendrait à la deviner.
+  const actionTarget = typeof targetRecord.source_system === "string"
+    ? (targetRecord as unknown as NexiaActionTarget)
+    : undefined;
 
   return {
     target,
+    ...(actionTarget ? { actionTarget } : {}),
     ...(firstString(candidate.id) ? { proposalId: firstString(candidate.id) } : {}),
     ...(firstString(candidate.decision_token, candidate.decisionToken)
       ? { decisionToken: firstString(candidate.decision_token, candidate.decisionToken) }
@@ -534,6 +573,49 @@ export async function rejectActionProposal(input: {
   return decideActionProposal(input.proposalId, "reject", input);
 }
 
+/**
+ * Reviser une proposition : la remplacer par une autre, avant toute approbation.
+ *
+ * Le serveur ne modifie jamais une proposition en place. Il marque celle-ci
+ * SUPERSEDED, en cree une neuve avec son propre jeton de decision et sa propre
+ * fenetre, et trace les deux. C'est ce qui fait qu'une relecture porte toujours sur
+ * ce qui sera ecrit, et jamais sur un texte remplace depuis.
+ *
+ * Consequence pour l'appelant : le jeton et la version d'avant ne valent plus rien.
+ * Il faut repartir de ``replacement`` et du nouveau jeton.
+ */
+export async function reviseActionProposal(input: {
+  proposalId: string;
+  expectedVersion: number;
+  decisionToken: string;
+  target: NexiaActionTarget;
+  payload: NexiaMutationPayload;
+  explanation?: string;
+  reason: string;
+}): Promise<NexiaRevision> {
+  const response = await request(`/api/actions/${encodeURIComponent(input.proposalId)}/revise`, {
+    method: "POST",
+    body: JSON.stringify({
+      expected_version: input.expectedVersion,
+      decision_token: input.decisionToken,
+      target: input.target,
+      payload: input.payload,
+      ...(input.explanation ? { explanation: input.explanation } : {}),
+      reason: input.reason,
+    }),
+  });
+  const body = await parseJson(response) as Record<string, unknown>;
+  const replacement = requireApproval(body.replacement, response.status);
+  const decisionToken = firstString(body.decision_token, body.decisionToken);
+  if (!decisionToken) {
+    throw new NexiaApiError(
+      "La revision n'a pas rendu de jeton de decision.",
+      response.status,
+    );
+  }
+  return { replacement: { ...replacement, decisionToken }, decisionToken };
+}
+
 export async function executeActionProposal(input: {
   proposalId: string;
   expectedVersion: number;
@@ -555,6 +637,7 @@ export const nexiaApi: NexiaGateway = {
   createActionProposal,
   approveActionProposal,
   rejectActionProposal,
+  reviseActionProposal,
   executeActionProposal,
   signOut,
 };

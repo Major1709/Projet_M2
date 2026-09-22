@@ -68,6 +68,7 @@ describe("MutationApprovalPreview", () => {
         state: "APPROVED",
       }),
       rejectActionProposal: vi.fn(),
+      reviseActionProposal: vi.fn(),
       executeActionProposal: vi.fn().mockResolvedValue({
         succeeded: true,
         partial: false,
@@ -110,6 +111,7 @@ describe("MutationApprovalPreview", () => {
         "MCP_MUTATIONS_DISABLED",
       )),
       rejectActionProposal: vi.fn(),
+      reviseActionProposal: vi.fn(),
       executeActionProposal: vi.fn(),
     };
 

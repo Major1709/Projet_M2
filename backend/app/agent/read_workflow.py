@@ -286,11 +286,30 @@ BACKLOG_FORMAT_TURN = (
     'CONVENTION du diagramme et non le produit -- "Debut de processus", "Action / '
     'Traitement", "Decision" sont la legende du dessin, pas une exigence. Reste '
     "VIDE si tu n'as rien de tel : une colonne toujours remplie cesse d'etre lue.\n"
+    "{page_finale}"
+)
+
+# La derniere phrase du rappel de forme, selon qu'un espace par defaut existe.
+#
+# Elle est ici et pas seulement dans le conseil de lecture, pour la raison deja
+# mesuree deux fois : c'est le dernier tour avant la redaction qui est suivi. Dite
+# uniquement au depart, la consigne de creer la page etait oubliee -- le modele
+# rendait le tableau dans le chat et s'arretait la.
+PAGE_ON_DEMAND = (
     "Si la demande te fait aussi creer ou mettre a jour une page Confluence, ce "
     "tableau EST le corps de la page : recopie-le entier dans l'argument body, en "
     "markdown et non en HTML, et n'appelle aucun autre outil de lecture avant. Un "
     "corps qui annonce le cahier des charges sans le contenir fait approuver une page "
     "vide."
+)
+
+PAGE_ALWAYS = (
+    "Ta reponse ne s'arrete pas au tableau. Appelle maintenant createConfluencePage "
+    "avec spaceId={space}, un titre tire du processus, et body = ce tableau entier "
+    "en markdown -- pas en HTML, et sans rien ajouter avant ni apres. N'appelle "
+    "aucun autre outil de lecture avant. Un cahier des charges laisse dans une "
+    "reponse de chat ne sert a personne, et un corps qui l'annonce sans le contenir "
+    "fait approuver une page vide."
 )
 
 # De quoi ecrire un tableau entier, quand la question en demande un.
@@ -351,6 +370,23 @@ def _step_count(observation: str) -> int | None:
 # processus vient d'entrer dans la conversation.
 FIGMA_PROCESS_TOOL = "extractFigmaProcess"
 
+# Glisse dans le conseil de lecture quand le deploiement designe un espace par
+# defaut. Un cahier des charges n'a d'interet qu'ecrit quelque part, et nommer
+# l'espace a chaque demande fait repeter une constante de l'equipe.
+#
+# Ce que cela declenche reste une PROPOSITION : la page n'est pas creee, elle est
+# soumise. Proposer d'office ce que la personne n'a pas demande ne serait pas
+# acceptable si l'approbation ne restait pas entre ses mains -- c'est elle qui rend
+# ce defaut sur, et non l'inverse.
+DEFAULT_PAGE_TURN = (
+    "Cette demande se termine par la creation d'une page Confluence, meme si la "
+    "personne ne l'a pas demandee : un cahier des charges qui reste dans une "
+    "reponse de chat ne sert a personne. Utilise l'espace {space} et donne a la "
+    "page un titre tire du processus. La page n'est pas creee tout de suite, elle "
+    "est soumise a approbation -- tu ne decides donc rien a la place de qui que ce "
+    "soit.\n"
+)
+
 # Le choix de l'outil, rappele juste apres la question plutot que dans le prompt
 # systeme -- pour la meme raison mesuree que le format.
 #
@@ -372,6 +408,7 @@ BACKLOG_READ_TURN = (
     "ci-dessus. N'appelle pas findFigmaFrame : la personne nomme le FICHIER, et cet "
     "outil cherche un cadre A L'INTERIEUR d'un fichier -- il ne trouvera rien, et "
     "l'etape sera perdue. Une seule lecture suffit : ne la refais pas.\n"
+    "{page_par_defaut}"
     "Si la demande nomme un espace Confluence, passe sa CLE telle quelle dans "
     "spaceId : le fournisseur la resout lui-meme. Ne cherche ni l'espace, ni des "
     "pages, ni des tickets -- ces lectures ne serviraient pas le cahier des charges, "
@@ -757,6 +794,7 @@ class AgentReadWorkflow:
         # Absent quand aucun fichier Figma n'est designe. L'outil n'est alors pas
         # offert, plutot qu'offert et toujours bredouille.
         frames: "FigmaFrameCatalogue | None" = None,
+        default_confluence_space: str = "",
         max_reads_per_question: int = DEFAULT_MAX_READS_PER_QUESTION,
         semantic_index: SemanticIndex | None = None,
         retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
@@ -794,6 +832,10 @@ class AgentReadWorkflow:
             {c.tool_name: c for c in mutations.contracts} if mutations is not None else {}
         )
         self._frames = frames
+        # Une page ne peut etre proposee d'office que si un atelier d'approbation
+        # existe pour la recevoir. Sans lui, la consigne promettrait au modele une
+        # creation qui n'arriverait jamais.
+        self._default_space = default_confluence_space.strip() if approvals is not None else ""
         # La partie stable du catalogue. L'outil de recherche de cadres n'en fait pas
         # partie : sa description nomme les maquettes indexees, et ces noms ne sont
         # connus qu'apres la premiere indexation. Fige au demarrage, il n'aurait jamais
@@ -837,7 +879,18 @@ class AgentReadWorkflow:
         # de forme. Calculee ici pour que la question ne soit examinee qu'une fois.
         cahier_des_charges = _wants_backlog(question.question)
         if cahier_des_charges and self._frames is not None:
-            messages.append({"role": "system", "content": BACKLOG_READ_TURN})
+            messages.append(
+                {
+                    "role": "system",
+                    "content": BACKLOG_READ_TURN.format(
+                        page_par_defaut=(
+                            DEFAULT_PAGE_TURN.format(space=self._default_space)
+                            if self._default_space
+                            else ""
+                        )
+                    ),
+                }
+            )
         pistes = await self._retrieve(question=question, context=context)
         if pistes:
             # Inserted as a system turn, after the question. Not as a user turn:
@@ -965,7 +1018,12 @@ class AgentReadWorkflow:
                             "content": BACKLOG_FORMAT_TURN.format(
                                 lignes_attendues=(
                                     EXPECTED_ROWS.format(count=compte) if compte else ""
-                                )
+                                ),
+                                page_finale=(
+                                    PAGE_ALWAYS.format(space=self._default_space)
+                                    if self._default_space
+                                    else PAGE_ON_DEMAND
+                                ),
                             ),
                         }
                     )
@@ -1578,6 +1636,7 @@ class AgentReadWorkflow:
 __all__ = [
     "ABSOLUTE_MAX_READS_PER_QUESTION",
     "BACKLOG_READ_TURN",
+    "DEFAULT_PAGE_TURN",
     "BACKLOG_FORMAT_TURN",
     "BACKLOG_MARKERS",
     "DEFAULT_MAX_READS_PER_QUESTION",
