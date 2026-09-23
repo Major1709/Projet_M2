@@ -13,7 +13,12 @@ import {
   type NexiaMutationProposalState,
 } from "@/adapters/nexia-api";
 
-import { opensABlock, parseMarkdownTable } from "./markdown-table";
+import {
+  formatMarkdownTable,
+  opensABlock,
+  parseMarkdownTable,
+  type MarkdownTable,
+} from "./markdown-table";
 
 /**
  * Le corps d'une page, rendu comme Confluence le rendra.
@@ -26,7 +31,103 @@ import { opensABlock, parseMarkdownTable } from "./markdown-table";
  * convention de la page de l'équipe. Elle est marquée plutôt que laissée en trous,
  * qu'un relecteur prendrait pour un oubli.
  */
-function SpecificationBody({ body, fallback }: { body: string; fallback?: string }) {
+function TableCount({ rows }: { rows: string[][] }) {
+  return (
+    <p className="approval-table-count">
+      {rows.filter(opensABlock).length} bloc(s) fonctionnel(s) · {rows.length} ligne(s)
+    </p>
+  );
+}
+
+/**
+ * Le tableau corrigé là où il est lu : une cellule, un champ.
+ *
+ * Corriger une user story passait avant par le markdown brut, sous l'aperçu : il
+ * fallait retrouver sa ligne en comptant des barres verticales, et une barre tapée
+ * par mégarde décalait toutes les colonnes suivantes. On modifie maintenant la
+ * cellule elle-même, et le markdown est réécrit pour nous.
+ *
+ * Les cellules vivent ici plutôt que dans le markdown du parent : recomposer le
+ * corps à chaque frappe puis le relire mangerait l'espace qu'on vient de taper,
+ * puisque relire une cellule la débarrasse de ses blancs de bord.
+ *
+ * Les en-têtes ne sont pas modifiables. Les sept colonnes sont celles de la page de
+ * l'équipe ; en renommer une ici ne changerait rien au gabarit et ferait diverger
+ * cette page des autres.
+ */
+function EditableSpecificationTable({
+  table,
+  onChange,
+}: {
+  table: MarkdownTable;
+  onChange: (body: string) => void;
+}) {
+  const [rows, setRows] = useState(table.rows);
+
+  function editCell(rowIndex: number, cellIndex: number, value: string) {
+    const next = rows.map((row, index) =>
+      index === rowIndex ? row.map((cell, position) => (position === cellIndex ? value : cell)) : row,
+    );
+    setRows(next);
+    // Ce qui entoure le tableau est conservé : le perdre effacerait, sans le dire,
+    // une phrase que le relecteur voit à l'écran et croit approuver.
+    onChange(
+      [table.before, formatMarkdownTable(table.headers, next), table.after]
+        .filter((part) => part !== "")
+        .join("\n\n"),
+    );
+  }
+
+  return (
+    <>
+      {table.before ? <p className="approval-body-stray">{table.before}</p> : null}
+      <div className="approval-table-scroll">
+        <table className="approval-table approval-table--editable">
+          <thead>
+            <tr>
+              {table.headers.map((header, index) => (
+                <th key={`${header}-${index}`} scope="col">{header}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rowIndex) => (
+              <tr
+                key={rowIndex}
+                className={opensABlock(row) ? "approval-table__block" : "approval-table__continued"}
+              >
+                {row.map((cell, cellIndex) => (
+                  <td key={cellIndex}>
+                    <textarea
+                      className="approval-cell"
+                      aria-label={`${table.headers[cellIndex] ?? `Colonne ${cellIndex + 1}`} — ligne ${rowIndex + 1}`}
+                      rows={1}
+                      value={cell}
+                      onChange={(event) => editCell(rowIndex, cellIndex, event.target.value)}
+                    />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {table.after ? <p className="approval-body-stray">{table.after}</p> : null}
+      <TableCount rows={rows} />
+    </>
+  );
+}
+
+function SpecificationBody({
+  body,
+  fallback,
+  onChange,
+}: {
+  body: string;
+  fallback?: string;
+  /** Fourni, le tableau devient modifiable cellule par cellule. */
+  onChange?: (body: string) => void;
+}) {
   if (!body.trim()) {
     // Une proposition sans corps ne devrait pas exister, mais une boite vide ne dit
     // pas si le contenu manque ou si l'affichage a echoue.
@@ -37,6 +138,9 @@ function SpecificationBody({ body, fallback }: { body: string; fallback?: string
     // Pas de tableau : on montre ce qu'il y a. Un corps en prose est justement ce
     // que la consigne interdit, donc le cacher priverait le relecteur du défaut.
     return <pre className="approval-body-raw">{body}</pre>;
+  }
+  if (onChange) {
+    return <EditableSpecificationTable table={table} onChange={onChange} />;
   }
 
   return (
@@ -66,9 +170,7 @@ function SpecificationBody({ body, fallback }: { body: string; fallback?: string
         </table>
       </div>
       {table.after ? <p className="approval-body-stray">{table.after}</p> : null}
-      <p className="approval-table-count">
-        {table.rows.filter(opensABlock).length} bloc(s) fonctionnel(s) · {table.rows.length} ligne(s)
-      </p>
+      <TableCount rows={table.rows} />
     </>
   );
 }
@@ -302,6 +404,10 @@ export function MutationApprovalPreview({
   // Une page se reconnait a son corps, pas a son systeme : c'est ce champ qui
   // decide de ce qu'il y a a montrer, et un ticket n'en porte jamais.
   const isPage = typeof shown.body === "string" || selectedTarget === "confluence";
+  // Sept colonnes ne tiennent pas dans la largeur d'une bulle de conversation.
+  // Le panneau s'elargit donc quand il porte un tableau, et seulement alors :
+  // elargir un ticket a trois champs laisserait une bande vide a lire.
+  const wide = parseMarkdownTable(String(shown.body ?? "")) !== null;
   // On n'approuve pas pendant qu'on modifie : le bouton porterait sur un texte que
   // le serveur ne connait pas encore.
   const canApprove = status === "pending" && !busy && !editing;
@@ -489,7 +595,10 @@ export function MutationApprovalPreview({
   }
 
   return (
-    <aside className="approval-panel approval-panel--inline" aria-labelledby={headingId}>
+    <aside
+      className={`approval-panel approval-panel--inline${wide ? " approval-panel--wide" : ""}`}
+      aria-labelledby={headingId}
+    >
       <div className="approval-panel__header">
         <div>
           <div className="approval-panel__eyebrow">Action à valider</div>
@@ -586,7 +695,16 @@ export function MutationApprovalPreview({
             <div className="approval-field approval-field--description">
               <span>Cahier des charges</span>
               {editing ? (
-                <>
+                wide ? (
+                  /* Le tableau se corrige dans le tableau. Le markdown brut
+                     obligeait à retrouver sa ligne en comptant des barres. */
+                  <SpecificationBody
+                    body={String(shown.body ?? "")}
+                    onChange={(body) => editField("body", body)}
+                  />
+                ) : (
+                  /* Pas de tableau à corriger : reste le texte, qu'il faut bien
+                     pouvoir reprendre -- c'est souvent lui, le défaut. */
                   <textarea
                     className="approval-textarea"
                     aria-label="Corps de la page en markdown"
@@ -594,11 +712,7 @@ export function MutationApprovalPreview({
                     value={String(shown.body ?? "")}
                     onChange={(event) => editField("body", event.target.value)}
                   />
-                  {/* L'aperçu suit la frappe : sans lui, on modifierait un tableau
-                      en markdown sans jamais voir ce qu'il devient. */}
-                  <div className="approval-section-label">Aperçu</div>
-                  <SpecificationBody body={String(shown.body ?? "")} />
-                </>
+                )
               ) : (
                 <SpecificationBody
                   body={String(shown.body ?? "")}
