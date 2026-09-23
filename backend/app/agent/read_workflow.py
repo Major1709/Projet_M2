@@ -1026,8 +1026,10 @@ class AgentReadWorkflow:
         # source and spent its budget there.
         attempted_reads = 0
         last_text = ""
-        # Le rappel de forme n'est injecte qu'une fois par question.
+        # Le rappel de forme n'est injecte qu'une fois par question -- une seule fois
+        # de plus si le processus, lu apres coup, apporte enfin le nombre de lignes.
         backlog_format_recalled = False
+        backlog_rows_recalled = False
         # Les systemes reellement lus, et le rappel de croisement, une seule fois.
         systems_read: set[MCPReadSourceSystem] = set()
         cross_source_recalled = False
@@ -1192,37 +1194,50 @@ class AgentReadWorkflow:
                 # fois. Le repeter a chaque lecture ferait grossir le fil sans rien
                 # ajouter : c'est sa POSITION -- juste avant la redaction -- qui le
                 # fait suivre, pas le nombre de fois qu'il est dit.
-                if (
-                    record is not None
-                    and call.tool_name == FIGMA_PROCESS_TOOL
-                    and cahier_des_charges
-                ):
-                    cle = call.arguments.get("fileKey")
-                    if isinstance(cle, str) and cle:
-                        process_file_key = cle
-                if (
-                    record is not None
-                    and call.tool_name == FIGMA_PROCESS_TOOL
-                    and not backlog_format_recalled
-                    and cahier_des_charges
-                ):
-                    compte = _step_count(observation)
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": BACKLOG_FORMAT_TURN.format(
-                                lignes_attendues=(
-                                    EXPECTED_ROWS.format(count=compte) if compte else ""
+                if record is not None and cahier_des_charges:
+                    processus = call.tool_name == FIGMA_PROCESS_TOOL
+                    if processus:
+                        cle = call.arguments.get("fileKey")
+                        if isinstance(cle, str) and cle:
+                            process_file_key = cle
+                    # Le nombre de lignes attendu ne se compte que sur un processus.
+                    compte = _step_count(observation) if processus else None
+                    # Le rappel suivait la lecture du processus, et elle seule. Une
+                    # question qui trouvait sa matiere ailleurs -- une page Confluence
+                    # existante, par exemple -- ne le recevait donc jamais, et le
+                    # modele repondait en prose libre : ni tableau a sept colonnes, ni
+                    # page proposee. Constate a l'ecran sur "genere le cahier de charge
+                    # du process access virement par empreinte".
+                    #
+                    # La forme demandee ne depend pas de la source. Le rappel suit donc
+                    # la matiere, d'ou qu'elle vienne.
+                    #
+                    # Redit une seule fois de plus, quand le processus arrive apres coup
+                    # et apporte enfin le compte : le premier rappel ne pouvait pas le
+                    # porter, et c'est lui qui empeche un bloc par etape.
+                    if not backlog_format_recalled or (
+                        compte and not backlog_rows_recalled
+                    ):
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": BACKLOG_FORMAT_TURN.format(
+                                    lignes_attendues=(
+                                        EXPECTED_ROWS.format(count=compte)
+                                        if compte
+                                        else ""
+                                    ),
+                                    page_finale=(
+                                        PAGE_ALWAYS.format(space=self._default_space)
+                                        if self._default_space
+                                        else PAGE_ON_DEMAND
+                                    ),
                                 ),
-                                page_finale=(
-                                    PAGE_ALWAYS.format(space=self._default_space)
-                                    if self._default_space
-                                    else PAGE_ON_DEMAND
-                                ),
-                            ),
-                        }
-                    )
-                    backlog_format_recalled = True
+                            }
+                        )
+                        backlog_format_recalled = True
+                        if compte:
+                            backlog_rows_recalled = True
 
         logger.info(
             "The orchestration loop reached its step limit",
