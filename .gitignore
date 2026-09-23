@@ -29,6 +29,12 @@ infra/backups/
 # versioned, they read as current status long after the branch they name is gone.
 .codex-temp/
 
+# L'index de connaissance, derive du code et non source de verite. Il se regenere
+# par `graphify update .`, sans cout d'API. Versionne, il perimait a chaque
+# modification, pesait 128 000 lignes pour un seul fichier, et deux personnes qui le
+# regenerent produisent un conflit que personne ne peut relire.
+graphify-out/
+
 # Editors and operating systems
 .vscode/
 .idea/
