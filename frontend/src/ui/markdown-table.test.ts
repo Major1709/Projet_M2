@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { opensABlock, parseMarkdownTable } from "./markdown-table";
+import { formatMarkdownTable, opensABlock, parseMarkdownTable } from "./markdown-table";
 
 /**
  * Le corps réellement proposé par NEXIA, relevé plutôt qu'inventé : sept colonnes,
@@ -99,5 +99,40 @@ describe("opensABlock", () => {
 
     expect(opensABlock(table!.rows[0])).toBe(true);
     expect(opensABlock(table!.rows[1])).toBe(false);
+  });
+});
+
+describe("formatMarkdownTable", () => {
+  it("refait un tableau que parseMarkdownTable relit a l'identique", () => {
+    const table = parseMarkdownTable(CORPS)!;
+
+    const relu = parseMarkdownTable(formatMarkdownTable(table.headers, table.rows))!;
+
+    expect(relu.headers).toEqual(table.headers);
+    expect(relu.rows).toEqual(table.rows);
+  });
+
+  it("echappe une barre verticale tapee dans une cellule", () => {
+    // Sans cela, un caractere saisi par un relecteur couperait la ligne en deux et
+    // decalerait toutes les colonnes suivantes.
+    const rendu = formatMarkdownTable(["A", "B"], [["oui | non", "x"]]);
+
+    // Echappee sur la ligne, relue telle qu'elle a ete tapee : l'echappement est
+    // une affaire de transport, pas de contenu.
+    expect(rendu.split("\n")[2]).toContain("oui \\| non");
+    expect(parseMarkdownTable(rendu)?.rows).toEqual([["oui | non", "x"]]);
+  });
+
+  it("replie un retour a la ligne, qui ne tient pas dans une cellule", () => {
+    const rendu = formatMarkdownTable(["A"], [["deux\nlignes"]]);
+
+    expect(rendu.split("\n")).toHaveLength(3);
+    expect(parseMarkdownTable(rendu)?.rows).toEqual([["deux lignes"]]);
+  });
+
+  it("garde les cellules vides, qui rattachent une ligne a son bloc", () => {
+    const rendu = formatMarkdownTable(["A", "B", "C"], [["", "", "suite"]]);
+
+    expect(parseMarkdownTable(rendu)?.rows).toEqual([["", "", "suite"]]);
   });
 });

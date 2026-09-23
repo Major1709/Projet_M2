@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { type NexiaApproval } from "@/adapters/nexia-api";
 
+import { parseMarkdownTable } from "./markdown-table";
+
 import { MutationApprovalPreview } from "./MutationApprovalPreview";
 
 /**
@@ -229,5 +231,134 @@ describe("Corriger avant d'ecrire", () => {
       summary: "Export CSV absent",
       description: "Manquant.",
     });
+  });
+});
+
+describe("Corriger dans le tableau", () => {
+  /**
+   * Le markdown brut obligeait à retrouver sa ligne en comptant des barres
+   * verticales, sous un aperçu qui, lui, était lisible. On corrige maintenant la
+   * cellule là où on la lit.
+   */
+
+  it("garde le tableau a l'ecran pendant la modification", async () => {
+    const user = userEvent.setup();
+
+    render(<MutationApprovalPreview approval={pageApproval()} gateway={gatewayFor()} />);
+    await user.click(screen.getByRole("button", { name: "Modifier la proposition" }));
+
+    const table = screen.getByRole("table");
+    expect(within(table).getAllByRole("columnheader")).toHaveLength(7);
+    // Sept colonnes sur deux lignes : chaque cellule est un champ.
+    expect(within(table).getAllByRole("textbox")).toHaveLength(14);
+  });
+
+  it("n'expose plus le markdown brut quand le corps est un tableau", async () => {
+    const user = userEvent.setup();
+
+    render(<MutationApprovalPreview approval={pageApproval()} gateway={gatewayFor()} />);
+    await user.click(screen.getByRole("button", { name: "Modifier la proposition" }));
+
+    expect(screen.queryByLabelText("Corps de la page en markdown")).not.toBeInTheDocument();
+  });
+
+  it("garde le markdown brut quand il n'y a pas de tableau a corriger", async () => {
+    // Un corps en prose est justement le defaut a reprendre : sans champ, il ne
+    // resterait qu'a refuser la proposition.
+    const user = userEvent.setup();
+    const approval = pageApproval();
+
+    render(
+      <MutationApprovalPreview
+        approval={{ ...approval, payload: { ...approval.payload, body: "En prose." } }}
+        gateway={gatewayFor()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Modifier la proposition" }));
+
+    expect(screen.getByLabelText("Corps de la page en markdown")).toBeInTheDocument();
+  });
+
+  it("envoie le corps recompose a partir de la cellule corrigee", async () => {
+    const user = userEvent.setup();
+    const reviseActionProposal = revisionRendant({ spaceId: "DL", title: "Cahier", body: CORPS });
+
+    render(
+      <MutationApprovalPreview
+        approval={pageApproval()}
+        gateway={gatewayFor({ reviseActionProposal })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Modifier la proposition" }));
+    const cellule = screen.getByLabelText("Remarques — ligne 1");
+    await user.clear(cellule);
+    await user.type(cellule, "Android uniquement");
+    await user.click(screen.getByRole("button", { name: "Enregistrer les modifications" }));
+
+    const envoye = reviseActionProposal.mock.calls[0][0].payload.body as string;
+    expect(envoye).toContain("Android uniquement");
+    expect(envoye).not.toContain("Face ID");
+    // Les six autres colonnes de la ligne sont intactes, et la ligne de
+    // continuation avec : recomposer le corps ne doit rien perdre en passant.
+    const relu = parseMarkdownTable(envoye)!;
+    expect(relu.headers).toHaveLength(7);
+    expect(relu.rows).toHaveLength(2);
+    expect(relu.rows[0][2]).toBe("En tant qu'utilisateur, je souhaite m'authentifier.");
+    expect(relu.rows[1].slice(0, 4)).toEqual(["", "", "", ""]);
+  });
+
+  it("ne laisse pas renommer les colonnes", async () => {
+    // Les sept colonnes sont celles de la page de l'equipe. En renommer une ici ne
+    // changerait pas le gabarit, et ferait diverger cette page des autres.
+    const user = userEvent.setup();
+
+    render(<MutationApprovalPreview approval={pageApproval()} gateway={gatewayFor()} />);
+    await user.click(screen.getByRole("button", { name: "Modifier la proposition" }));
+
+    const entete = screen.getByRole("columnheader", { name: "Bloc fonctionnel" });
+    expect(within(entete).queryByRole("textbox")).toBeNull();
+  });
+});
+
+describe("La largeur du panneau", () => {
+  it("s'elargit quand il porte un tableau", () => {
+    // Sept colonnes ne tiennent pas dans les 500 px d'une bulle de conversation :
+    // le tableau s'affichait tronque a la quatrieme colonne.
+    const { container } = render(
+      <MutationApprovalPreview approval={pageApproval()} gateway={gatewayFor()} />,
+    );
+
+    expect(container.querySelector(".approval-panel--wide")).not.toBeNull();
+  });
+
+  it("garde sa largeur pour un ticket", () => {
+    // Elargir un ticket a trois champs laisserait une bande vide a parcourir.
+    const { container } = render(
+      <MutationApprovalPreview
+        approval={{
+          target: "jira",
+          proposalId: "p1",
+          decisionToken: "decision-token-123456789012345",
+          version: 1,
+          state: "PENDING_APPROVAL",
+          payload: { projectKey: "KAN", summary: "Export CSV" },
+        }}
+        gateway={gatewayFor()}
+      />,
+    );
+
+    expect(container.querySelector(".approval-panel--wide")).toBeNull();
+  });
+
+  it("garde sa largeur quand le corps n'est pas un tableau", () => {
+    const approval = pageApproval();
+    const { container } = render(
+      <MutationApprovalPreview
+        approval={{ ...approval, payload: { ...approval.payload, body: "En prose." } }}
+        gateway={gatewayFor()}
+      />,
+    );
+
+    expect(container.querySelector(".approval-panel--wide")).toBeNull();
   });
 });

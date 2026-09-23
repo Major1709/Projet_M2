@@ -305,8 +305,37 @@ async def test_every_field_the_front_end_reads_is_present() -> None:
         "explanation",
         "expires_at",
         "source_system",
+        "target",
     ):
         assert champ in approval, champ
+
+
+@pytest.mark.anyio
+async def test_the_target_comes_back_so_the_proposal_can_be_revised() -> None:
+    """Le defaut que ce champ repare, constate a l'ecran.
+
+    La route /revise exige la cible entiere, qu'aucune interface ne peut reconstruire
+    de memoire. Elle manquait ici : l'interface retombait alors sur une modification
+    gardee dans le navigateur, qui disparaissait au premier retour du serveur -- et
+    c'est la proposition d'origine, non corrigee, qui partait a l'ecriture.
+
+    Rien ne le signalait : ni erreur, ni trace. La correction etait simplement perdue.
+    """
+
+    import json
+
+    provider = StubProvider(a_response(a_call()))
+    workflow, repository = workflow_for(provider)
+
+    answer = await workflow.answer(
+        question=a_question(a_conversation(repository)), context=CONTEXT
+    )
+    target = json.loads(answer.model_dump_json())["approval"]["target"]
+
+    # ``source_system`` est ce que le frontend cherche pour reconnaitre une vraie
+    # cible ; sans lui, il la tient pour absente.
+    assert target["source_system"] == "jira"
+    assert target["resource_type"]
 
 
 @pytest.mark.anyio

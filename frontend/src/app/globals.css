@@ -1777,11 +1777,23 @@ a.message-source:hover {
 }
 
 .approval-table {
-  min-width: 720px;
+  width: 100%;
+  min-width: 560px;
   border-collapse: collapse;
   font-size: 11px;
   line-height: 1.4;
 }
+
+/* Sept colonnes n'ont pas le meme poids. Sans ces largeurs, "Ref. PBS" -- vide par
+ * construction -- prenait autant de place que la user story, et le tableau
+ * debordait pour rien. */
+.approval-table th:nth-child(1) { width: 14%; }
+.approval-table th:nth-child(2) { width: 6%; }
+.approval-table th:nth-child(3) { width: 20%; }
+.approval-table th:nth-child(4) { width: 15%; }
+.approval-table th:nth-child(5) { width: 15%; }
+.approval-table th:nth-child(6) { width: 20%; }
+.approval-table th:nth-child(7) { width: 10%; }
 
 .approval-table th,
 .approval-table td {
@@ -1800,8 +1812,8 @@ a.message-source:hover {
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.04em;
+  line-height: 1.25;
   text-transform: uppercase;
-  white-space: nowrap;
 }
 
 /* Une ligne de continuation laisse ses trois premieres cellules vides : c'est la
@@ -1823,6 +1835,41 @@ a.message-source:hover {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+/* Le tableau en modification. Les cellules restent a leur place : un champ qui
+ * s'encadrerait redessinerait la grille a l'ouverture de l'edition, et le relecteur
+ * perdrait la ligne qu'il cherchait. Le fond ne change qu'au survol et au focus,
+ * juste assez pour dire ou l'on tape. */
+.approval-table--editable td {
+  padding: 2px 4px;
+}
+
+.approval-cell {
+  display: block;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #3f3a36;
+  font: inherit;
+  line-height: 1.4;
+  /* La cellule suit son contenu la ou le navigateur le sait faire ; ailleurs, elle
+   * garde sa hauteur et se fait derouler. */
+  field-sizing: content;
+  resize: vertical;
+}
+
+.approval-cell:hover {
+  border-color: #e8e4df;
+}
+
+.approval-cell:focus-visible {
+  outline: 2px solid #c8a35a;
+  outline-offset: -1px;
+  background: #fffdf8;
 }
 
 /* Ce qui deborde du tableau est montre, pas cache : la consigne interdit toute
@@ -1875,4 +1922,34 @@ a.message-source:hover {
 .approval-textarea:focus-visible {
   outline: 2px solid #c8a35a;
   outline-offset: 1px;
+}
+
+
+/* Le panneau elargi, quand il porte un cahier des charges.
+ *
+ * La bulle de conversation est calibree pour du texte : 500 px, ou sept colonnes ne
+ * peuvent pas tenir. Le panneau deborde donc volontairement de la colonne, sans la
+ * modifier -- un ticket a trois champs garde sa largeur, ou une bande vide serait a
+ * lire de gauche a droite pour rien.
+ *
+ * La borne basse tient compte de l'avatar et des marges ; au-dela, .conversation
+ * masque ce qui depasse a droite, et le tableau serait coupe sans le dire. */
+.approval-panel--inline.approval-panel--wide {
+  --approval-wide: min(860px, calc(100vw - 280px));
+  width: var(--approval-wide);
+  max-width: none;
+  /* Le surplus de largeur part vers la GAUCHE, ou l'espace est libre. A droite il
+   * sortait du cadre, et .conversation masque ce qui depasse : la derniere colonne
+   * disparaissait sans que rien ne le dise. Jamais positif, pour qu'un panneau plus
+   * etroit que la bulle ne se decale pas. */
+  margin-left: min(0px, calc(500px - var(--approval-wide)));
+}
+
+@media (max-width: 900px) {
+  /* Trop etroit pour tout montrer : on rend la largeur a la colonne et le tableau
+   * reprend son defilement horizontal, qui reste lisible a defaut d'etre confortable. */
+  .approval-panel--inline.approval-panel--wide {
+    width: 100%;
+    max-width: 500px;
+  }
 }

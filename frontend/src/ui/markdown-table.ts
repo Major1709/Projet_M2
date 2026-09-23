@@ -31,8 +31,11 @@ function isTableLine(line: string): boolean {
 }
 
 function cellsOf(line: string): string[] {
-  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-  return trimmed.split("|").map((cell) => cell.trim());
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|(?<!\\\|)$/, "");
+  // Coupe sur les barres NON échappées, et rend son sens littéral à celles qui le
+  // sont. Sans cela, une barre verticale tapée dans une cellule couperait la ligne
+  // en deux et décalerait toutes les colonnes suivantes.
+  return trimmed.split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, "|"));
 }
 
 /**
@@ -83,4 +86,26 @@ export function parseMarkdownTable(source: string): MarkdownTable | null {
  */
 export function opensABlock(row: string[]): boolean {
   return (row[0] ?? "") !== "";
+}
+
+/**
+ * Réécrire un tableau markdown à partir de ses cellules.
+ *
+ * L'inverse de `parseMarkdownTable`, pour que l'édition se fasse dans le tableau et
+ * non dans le markdown brut. Corriger une user story ne devrait pas obliger à
+ * compter des barres verticales.
+ *
+ * Les barres verticales tapées dans une cellule sont échappées : sans cela, un
+ * caractère saisi par un relecteur couperait la ligne en deux et déplacerait toutes
+ * les colonnes suivantes — la table serait cassée par une frappe ordinaire.
+ *
+ * Les retours à la ligne sont repliés pour la même raison : une cellule markdown
+ * tient sur une ligne.
+ */
+export function formatMarkdownTable(headers: string[], rows: string[][]): string {
+  const cell = (value: string) =>
+    value.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ").trim();
+  const ligne = (cells: string[]) => `| ${cells.map(cell).join(" | ")} |`;
+  const separation = `| ${headers.map(() => "---").join(" | ")} |`;
+  return [ligne(headers), separation, ...rows.map((row) => ligne(row))].join("\n");
 }
