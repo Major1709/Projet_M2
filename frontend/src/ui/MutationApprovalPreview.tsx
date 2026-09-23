@@ -499,11 +499,23 @@ export function MutationApprovalPreview({
    */
   async function handleSaveRevision() {
     if (!draft || busy) return;
-    if (!remoteProposal || !currentApproval?.actionTarget) {
+    if (!remoteProposal) {
       // Sans proposition serveur -- l'aperçu de démonstration -- la modification
       // reste locale. Annoncer un enregistrement qui n'a pas lieu serait pire.
       setCurrentApproval((previous) => (previous ? { ...previous, payload: draft } : previous));
       setDraft(null);
+      return;
+    }
+    if (!currentApproval?.actionTarget) {
+      // Une proposition du serveur sans sa cible ne peut pas être révisée : /revise
+      // exige la cible entière, et la reconstruire de mémoire reviendrait à la
+      // deviner. La garder en local serait pire que de le dire -- la correction
+      // disparaîtrait au premier retour du serveur, et c'est la proposition
+      // d'origine qui partirait à l'écriture.
+      reportError(new NexiaApiError(
+        "Cette proposition ne peut pas être modifiée : sa cible est absente.",
+        0,
+      ));
       return;
     }
 

@@ -708,6 +708,14 @@ class ProposedMutationView(BaseModel):
     tool_name: str
     source_system: SourceSystem
     action_class: ToolActionClass
+    # La cible du domaine, et pas seulement le systeme.
+    #
+    # Elle manquait, et la revision en dependait : la route /revise exige la cible
+    # entiere, qu'aucune interface ne peut reconstruire de memoire. Sans elle, une
+    # correction faite avant l'approbation restait dans le navigateur, disparaissait
+    # au premier retour du serveur, et c'est la proposition d'origine qui partait a
+    # l'ecriture -- une correction perdue sans que rien ne le dise.
+    target: ActionTarget
     payload: dict[str, Any]
     # L'etat pilote ce que l'interface propose : des boutons tant que la proposition
     # attend, un compte rendu une fois qu'elle est tranchee. Sans lui, une interface
@@ -1409,6 +1417,7 @@ class AgentReadWorkflow:
                 tool_name=proposal.tool_name,
                 source_system=proposal.source_system,
                 action_class=proposal.action_class,
+                target=proposal.target,
                 payload=proposal.payload,
                 state=proposal.state,
                 expires_at=proposal.expires_at,
