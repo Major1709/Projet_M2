@@ -56,6 +56,23 @@ export type NexiaRevision = {
   decisionToken: string;
 };
 
+/**
+ * Un changement, tel que l'historique le rend.
+ *
+ * Les champs facultatifs le sont chez le serveur aussi : tous les evenements ne
+ * portent pas un outil, et seuls ceux qui ont abouti portent un identifiant ecrit.
+ */
+export type NexiaAuditEvent = {
+  id: string;
+  eventType: string;
+  occurredAt: string;
+  actionProposalId?: string;
+  sourceSystem?: string;
+  toolName?: string;
+  actionClass?: string;
+  externalIds: string[];
+};
+
 export type NexiaActionTarget = {
   source_system: NexiaApprovalTarget;
   resource_type: string;
@@ -157,6 +174,8 @@ export type NexiaGateway = {
   signOut: () => Promise<void>;
   /** Le nom de la personne connectee, pour que l'ecran puisse la nommer. */
   fetchSignedInName: () => Promise<string | null>;
+  /** Les derniers changements, les plus recents en tete. */
+  fetchAuditEvents: (limit?: number) => Promise<NexiaAuditEvent[]>;
 };
 
 export type NexiaMutationExecution = {
@@ -653,6 +672,52 @@ export async function fetchSignedInName(): Promise<string | null> {
   return typeof nom === "string" && nom.trim() ? nom.trim() : null;
 }
 
+/**
+ * Les derniers changements de ce tenant.
+ *
+ * Les erreurs remontent telles quelles, contrairement au nom d'affichage : ici la
+ * personne a ouvert une fenetre POUR voir cette liste. Une liste vide en cas de
+ * panne se lirait « rien ne s'est passe », ce qui serait un mensonge sur une piste
+ * d'audit.
+ */
+export async function fetchAuditEvents(limit = 50): Promise<NexiaAuditEvent[]> {
+  const response = await request(`/api/audit/events?limit=${encodeURIComponent(limit)}`, {
+    method: "GET",
+  });
+  const body = (await parseJson(response)) as { events?: unknown };
+  const events = Array.isArray(body.events) ? body.events : [];
+  return events.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const row = value as Record<string, unknown>;
+    const id = firstString(row.id);
+    const eventType = firstString(row.event_type, row.eventType);
+    const occurredAt = firstString(row.occurred_at, row.occurredAt);
+    // Une ligne sans identite ni date ne peut ni s'afficher ni se situer. La laisser
+    // passer mettrait un trou dans une liste dont l'interet est d'etre complete.
+    if (!id || !eventType || !occurredAt) return [];
+    return [{
+      id,
+      eventType,
+      occurredAt,
+      ...(firstString(row.action_proposal_id, row.actionProposalId)
+        ? { actionProposalId: firstString(row.action_proposal_id, row.actionProposalId)! }
+        : {}),
+      ...(firstString(row.source_system, row.sourceSystem)
+        ? { sourceSystem: firstString(row.source_system, row.sourceSystem)! }
+        : {}),
+      ...(firstString(row.tool_name, row.toolName)
+        ? { toolName: firstString(row.tool_name, row.toolName)! }
+        : {}),
+      ...(firstString(row.action_class, row.actionClass)
+        ? { actionClass: firstString(row.action_class, row.actionClass)! }
+        : {}),
+      externalIds: Array.isArray(row.external_ids)
+        ? row.external_ids.filter((x): x is string => typeof x === "string")
+        : [],
+    }];
+  });
+}
+
 export async function signOut(): Promise<void> {
   await request("/api/auth/atlassian/signout", { method: "POST" });
 }
@@ -667,4 +732,5 @@ export const nexiaApi: NexiaGateway = {
   executeActionProposal,
   signOut,
   fetchSignedInName,
+  fetchAuditEvents,
 };

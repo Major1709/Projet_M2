@@ -46,6 +46,7 @@ function createGateway(overrides: Partial<NexiaGateway> = {}): NexiaGateway {
     }),
     signOut: vi.fn().mockResolvedValue(undefined),
     fetchSignedInName: vi.fn().mockResolvedValue("Fanny Andrianaly"),
+    fetchAuditEvents: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -96,7 +97,10 @@ describe("NexiaChat", () => {
     expect(screen.getByRole("menuitem", { name: "Se déconnecter" })).toBeInTheDocument();
   });
 
-  it("ouvre l’historique avec un état indisponible honnête", async () => {
+  it("ouvre l’historique et y place le focus", async () => {
+    // Le dialogue annonçait son propre vide en dur ; il porte maintenant la piste
+    // d'audit. Ce qui ne change pas, c'est l'accessibilite : le focus entre dans le
+    // dialogue, sinon la tabulation continue derriere lui.
     const user = userEvent.setup();
     render(<NexiaChat gateway={createGateway()} />);
 
@@ -104,7 +108,6 @@ describe("NexiaChat", () => {
     await user.click(screen.getByRole("menuitem", { name: "Historique des changements" }));
 
     expect(screen.getByRole("dialog", { name: "Historique des changements" })).toBeInTheDocument();
-    expect(screen.getByText("L’historique n’est pas encore disponible.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Fermer l’historique" })).toHaveFocus();
   });
 
@@ -348,5 +351,80 @@ describe("L'initiale de la personne connectee", () => {
     );
 
     expect(gateway.fetchSignedInName).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("L'historique des changements", () => {
+  /**
+   * Le bouton ouvrait une phrase en dur : « L'historique n'est pas encore
+   * disponible. » La piste d'audit, elle, etait deja ecrite -- elle etait seulement
+   * en ecriture seule.
+   */
+
+  const ECRITURE = {
+    id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+    eventType: "MUTATION_EXECUTED",
+    occurredAt: "2026-09-27T14:30:00Z",
+    sourceSystem: "jira",
+    actionClass: "CREATE",
+    externalIds: ["KAN-42"],
+  };
+
+  async function ouvrirHistorique(gateway: ReturnType<typeof createGateway>) {
+    const user = userEvent.setup();
+    render(<NexiaChat gateway={gateway} />);
+    await user.click(screen.getByRole("button", { name: "Ouvrir le menu du profil" }));
+    await user.click(screen.getByRole("menuitem", { name: "Historique des changements" }));
+  }
+
+  it("montre les changements enregistres", async () => {
+    await ouvrirHistorique(
+      createGateway({ fetchAuditEvents: vi.fn().mockResolvedValue([ECRITURE]) }),
+    );
+
+    expect(await screen.findByText("Écrite")).toBeInTheDocument();
+    // La cle Jira : la seule chose que la personne peut aller verifier elle-meme.
+    expect(screen.getByText("KAN-42")).toBeInTheDocument();
+    expect(screen.getByText("Création · Jira")).toBeInTheDocument();
+  });
+
+  it("ne demande l'historique qu'a l'ouverture du dialogue", async () => {
+    // Personne ne paie une requete pour une fenetre qu'il n'ouvrira peut-etre jamais.
+    const gateway = createGateway();
+    render(<NexiaChat gateway={gateway} />);
+
+    expect(gateway.fetchAuditEvents).not.toHaveBeenCalled();
+  });
+
+  it("dit qu'il n'y a rien, sans laisser croire a une panne", async () => {
+    await ouvrirHistorique(createGateway({ fetchAuditEvents: vi.fn().mockResolvedValue([]) }));
+
+    expect(
+      await screen.findByText("Aucun changement enregistré pour l’instant."),
+    ).toBeInTheDocument();
+  });
+
+  it("annonce la panne au lieu de montrer une liste vide", async () => {
+    // Une liste vide en cas d'echec se lirait « rien ne s'est passe » -- un mensonge
+    // sur une piste d'audit.
+    await ouvrirHistorique(
+      createGateway({
+        fetchAuditEvents: vi.fn().mockRejectedValue(new Error("hors ligne")),
+      }),
+    );
+
+    const alerte = await screen.findByRole("alert");
+    expect(alerte).toHaveTextContent("L’historique n’a pas pu être chargé.");
+    expect(
+      screen.queryByText("Aucun changement enregistré pour l’instant."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ne dit plus qu'il n'est pas disponible", async () => {
+    await ouvrirHistorique(
+      createGateway({ fetchAuditEvents: vi.fn().mockResolvedValue([ECRITURE]) }),
+    );
+
+    expect(screen.queryByText(/pas encore disponible/)).not.toBeInTheDocument();
   });
 });

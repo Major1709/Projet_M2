@@ -747,6 +747,65 @@ a.message-source:hover {
   line-height: 1.5;
 }
 
+/* Une panne se dit. Une liste vide a sa place se lirait "rien ne s'est passe", ce
+ * qui serait un mensonge sur une piste d'audit. */
+.history-dialog__error {
+  margin: 28px 0 0;
+  padding: 16px 18px;
+  border: 1px solid #e6c2c2;
+  border-radius: 16px;
+  color: #8a3d3d;
+  background: #fdf5f5;
+  line-height: 1.5;
+}
+
+.history-list {
+  margin: 20px 0 0;
+  padding: 0;
+  max-height: 55vh;
+  overflow-y: auto;
+  list-style: none;
+}
+
+/* Une ligne par evenement : ce qui s'est passe, quand, sur quoi, et ce qui a ete
+ * ecrit. L'ordre est celui de la lecture, pas celui de la base. */
+.history-entry {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  padding: 12px 4px;
+  border-bottom: 1px solid #eef0f6;
+}
+
+.history-entry__label {
+  color: #273746;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.history-entry__moment {
+  color: var(--nexia-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.history-entry__target {
+  color: var(--nexia-muted);
+  font-size: 12px;
+}
+
+/* La cle Jira ou l'identifiant de page : la seule chose que la personne peut aller
+ * verifier elle-meme, donc la seule qu'on met en evidence. */
+.history-entry__ids {
+  grid-column: 2;
+  color: #3f6b4a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-align: right;
+}
+
 .history-dialog__close {
   position: absolute;
   top: 18px;
