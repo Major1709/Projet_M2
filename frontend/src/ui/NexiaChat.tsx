@@ -17,6 +17,8 @@ import {
 } from "@/adapters/nexia-api";
 import { MutationApprovalPreview } from "@/ui/MutationApprovalPreview";
 
+import { initialOf } from "./initial";
+
 type ChatMessage =
   | { id: string; role: "user"; text: string }
   | {
@@ -100,6 +102,9 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
   const [profileOpen, setProfileOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Le nom de la personne connectee. `null` tant qu'on ne le sait pas, et aussi
+  // quand il n'y en a pas : dans les deux cas l'avatar reste neutre.
+  const [signedInName, setSignedInName] = useState<string | null>(null);
 
   const profileButtonRef = useRef<HTMLButtonElement>(null);
   const profileMenuRef = useRef<HTMLDivElement>(null);
@@ -107,6 +112,24 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const dialogCloseRef = useRef<HTMLButtonElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Demande une fois, au montage. Le nom ne change pas pendant une session, et le
+  // redemander a chaque rendu ferait un appel reseau par frappe au clavier.
+  useEffect(() => {
+    let abandonne = false;
+    gateway
+      .fetchSignedInName()
+      .then((nom) => {
+        if (!abandonne) setSignedInName(nom);
+      })
+      // Sans nom, l'avatar reste neutre. Une pastille d'avatar ne vaut pas une
+      // banniere d'erreur, et la conversation dira bien assez tot qu'il faut se
+      // reconnecter.
+      .catch(() => undefined);
+    return () => {
+      abandonne = true;
+    };
+  }, [gateway]);
 
   const hasConversation = messages.length > 0;
   const normalizedQuestion = question.trim();
@@ -280,12 +303,14 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
             aria-controls="profile-menu"
             onClick={() => setProfileOpen((open) => !open)}
           >
-            <span aria-hidden="true">U</span>
+            <span aria-hidden="true">{initialOf(signedInName)}</span>
           </button>
 
           {profileOpen ? (
             <div ref={profileMenuRef} id="profile-menu" className="profile__menu" role="menu">
-              <p className="profile__identity" role="presentation">Profil utilisateur</p>
+              <p className="profile__identity" role="presentation">
+                {signedInName ?? "Profil utilisateur"}
+              </p>
               <button
                 ref={historyMenuItemRef}
                 type="button"
@@ -330,7 +355,7 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
                 className={`message-row message-row--${message.role}`}
               >
                 <div className={`message-avatar message-avatar--${message.role}`} aria-hidden="true">
-                  {message.role === "user" ? "U" : <NexiaOrb />}
+                  {message.role === "user" ? initialOf(signedInName) : <NexiaOrb />}
                 </div>
                 <div
                   className={`message-content ${

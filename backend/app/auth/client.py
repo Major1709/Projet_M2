@@ -11,6 +11,7 @@ from app.auth.domain import (
     ATLASSIAN_ME_ENDPOINT,
     ATLASSIAN_OAUTH_TOKEN_ENDPOINT,
     ATLASSIAN_SCOPES,
+    AtlassianAccount,
     AtlassianSite,
     code_challenge_for,
 )
@@ -197,11 +198,24 @@ class AtlassianOAuthClient:
             raise AmbiguousSiteGrant()
         return sites[0]
 
-    async def account_id(self, access_token: str) -> str:
+    async def account(self, access_token: str) -> AtlassianAccount:
+        """L'identifiant de compte, et le nom quand le fournisseur le donne.
+
+        Le nom est tronque plutot que refuse : il vient du fournisseur, il n'est
+        qu'un libelle d'affichage, et echouer une connexion parce qu'un nom depasse
+        deux cents caracteres serait absurde.
+        """
+
         payload = await self._get(ATLASSIAN_ME_ENDPOINT, access_token)
         if not isinstance(payload, dict) or not payload.get("account_id"):
             raise ProviderRefused()
-        return str(payload["account_id"])
+        nom = payload.get("name")
+        return AtlassianAccount(
+            account_id=str(payload["account_id"]),
+            display_name=(
+                nom.strip()[:200] if isinstance(nom, str) and nom.strip() else None
+            ),
+        )
 
     async def _post_form(self, endpoint: str, form: dict[str, str]) -> dict[str, Any]:
         async with await self._client_for(endpoint) as client:

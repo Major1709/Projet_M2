@@ -155,6 +155,8 @@ export type NexiaGateway = {
     expectedVersion: number;
   }) => Promise<NexiaMutationExecution>;
   signOut: () => Promise<void>;
+  /** Le nom de la personne connectee, pour que l'ecran puisse la nommer. */
+  fetchSignedInName: () => Promise<string | null>;
 };
 
 export type NexiaMutationExecution = {
@@ -627,6 +629,30 @@ export async function executeActionProposal(input: {
   return parseMutationExecution(await parseJson(response), response.status);
 }
 
+/**
+ * Le nom de la personne connectee, ou `null` quand il n'y en a pas.
+ *
+ * `null` plutot qu'une erreur pour les deux cas ou l'ecran doit simplement se
+ * passer d'initiale : pas de session, ou une session ouverte avant que le nom soit
+ * conserve. Une bannière d'erreur pour une pastille d'avatar serait disproportionnée,
+ * et la conversation, elle, dira bien assez tôt qu'il faut se reconnecter.
+ */
+export async function fetchSignedInName(): Promise<string | null> {
+  let response: Response;
+  try {
+    response = await fetch(`${getApiBaseUrl()}/api/auth/atlassian/me`, {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+  const body = await response.json().catch(() => null);
+  const nom = (body as { display_name?: unknown } | null)?.display_name;
+  return typeof nom === "string" && nom.trim() ? nom.trim() : null;
+}
+
 export async function signOut(): Promise<void> {
   await request("/api/auth/atlassian/signout", { method: "POST" });
 }
@@ -640,4 +666,5 @@ export const nexiaApi: NexiaGateway = {
   reviseActionProposal,
   executeActionProposal,
   signOut,
+  fetchSignedInName,
 };

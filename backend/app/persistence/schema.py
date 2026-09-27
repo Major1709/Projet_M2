@@ -191,6 +191,9 @@ sessions = Table(
     Column("token_hash", String(64), nullable=False, unique=True),
     Column("tenant_id", String(200), nullable=False),
     Column("user_id", String(200), nullable=False),
+    # Facultatif : l'identite tient a user_id, et une session ouverte avant que ce
+    # champ existe doit rester valable.
+    Column("display_name", String(200), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("expires_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("expires_at > created_at", name="expiry_after_creation"),

@@ -29,6 +29,7 @@ class PostgresSessionStore:
                     token_hash=session.token_hash,
                     tenant_id=session.tenant_id,
                     user_id=session.user_id,
+                    display_name=session.display_name,
                     created_at=session.created_at,
                     expires_at=session.expires_at,
                 )

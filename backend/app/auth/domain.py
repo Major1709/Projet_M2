@@ -112,6 +112,20 @@ class DelegatedCredentials(BaseModel):
     __str__ = __repr__
 
 
+class AtlassianAccount(BaseModel):
+    """Qui vient de se connecter, tel que le fournisseur le decrit.
+
+    ``display_name`` est facultatif la ou ``account_id`` ne l'est pas : l'identite
+    tient a l'identifiant, le nom ne sert qu'a nommer la personne a l'ecran. Un
+    fournisseur qui ne le rend pas ne doit pas empecher de se connecter.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    account_id: str = Field(min_length=1, max_length=200)
+    display_name: str | None = Field(default=None, max_length=200)
+
+
 class AtlassianSite(BaseModel):
     """One site the granted token covers."""
 

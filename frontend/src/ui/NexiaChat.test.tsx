@@ -45,6 +45,7 @@ function createGateway(overrides: Partial<NexiaGateway> = {}): NexiaGateway {
       externalIds: ["KAN-42"],
     }),
     signOut: vi.fn().mockResolvedValue(undefined),
+    fetchSignedInName: vi.fn().mockResolvedValue("Fanny Andrianaly"),
     ...overrides,
   };
 }
@@ -280,5 +281,72 @@ describe("NexiaChat", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Votre session a expiré. Veuillez vous reconnecter.",
     );
+  });
+});
+
+describe("L'initiale de la personne connectee", () => {
+  /**
+   * L'avatar affichait un « U » en dur, le meme pour tout le monde. Sur un outil qui
+   * ecrit dans Jira et Confluence au nom de cette personne, savoir qui est connecte
+   * n'est pas un detail d'ornement.
+   */
+
+  it("affiche l'initiale du nom dans la pastille de profil", async () => {
+    render(<NexiaChat gateway={createGateway()} />);
+
+    const bouton = screen.getByRole("button", { name: "Ouvrir le menu du profil" });
+    await waitFor(() => expect(bouton).toHaveTextContent("F"));
+  });
+
+  it("nomme la personne dans le menu, au lieu d'un libelle generique", async () => {
+    const user = userEvent.setup();
+    render(<NexiaChat gateway={createGateway()} />);
+
+    await user.click(screen.getByRole("button", { name: "Ouvrir le menu du profil" }));
+
+    expect(await screen.findByText("Fanny Andrianaly")).toBeInTheDocument();
+  });
+
+  it("garde une pastille neutre quand aucun nom n'est connu", async () => {
+    // Session ouverte avant que le nom soit conserve, ou fournisseur avare. Inventer
+    // une initiale afficherait celle de personne.
+    render(
+      <NexiaChat
+        gateway={createGateway({ fetchSignedInName: vi.fn().mockResolvedValue(null) })}
+      />,
+    );
+
+    const bouton = screen.getByRole("button", { name: "Ouvrir le menu du profil" });
+    await waitFor(() => expect(bouton).toHaveTextContent("U"));
+  });
+
+  it("n'empeche pas d'utiliser NEXIA quand le nom est introuvable", async () => {
+    // Une pastille d'avatar ne vaut pas une banniere d'erreur, et surtout pas un
+    // ecran bloque.
+    const gateway = createGateway({
+      fetchSignedInName: vi.fn().mockRejectedValue(new Error("hors ligne")),
+    });
+
+    render(<NexiaChat gateway={gateway} />);
+
+    expect(
+      screen.getByRole("textbox", { name: "Votre message" }),
+    ).toBeEnabled();
+    await waitFor(() => expect(gateway.fetchSignedInName).toHaveBeenCalled());
+  });
+
+  it("ne demande le nom qu'une seule fois", async () => {
+    // Il ne change pas pendant une session ; le redemander a chaque rendu ferait un
+    // appel reseau par frappe au clavier.
+    const user = userEvent.setup();
+    const gateway = createGateway();
+    render(<NexiaChat gateway={gateway} />);
+
+    await user.type(
+      screen.getByRole("textbox", { name: "Votre message" }),
+      "bonjour",
+    );
+
+    expect(gateway.fetchSignedInName).toHaveBeenCalledTimes(1);
   });
 });

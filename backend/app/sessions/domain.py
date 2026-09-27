@@ -41,6 +41,13 @@ class Session(BaseModel):
     token_hash: str = Field(min_length=64, max_length=64)
     tenant_id: str = Field(min_length=1, max_length=200)
     user_id: str = Field(min_length=1, max_length=200)
+    # Le nom que la personne se connait, pour qu'une interface puisse la nommer.
+    #
+    # Facultatif, et il doit le rester : l'identite tient a ``user_id``, qui est
+    # l'identifiant de compte du fournisseur. Un nom absent -- fournisseur avare,
+    # session ouverte avant que ce champ existe -- ne doit jamais empecher de se
+    # connecter, seulement priver l'ecran d'une initiale.
+    display_name: str | None = Field(default=None, max_length=200)
     created_at: datetime = Field(default_factory=utc_now)
     # Absolute, not sliding. A session that renews itself on every request never
     # ends for an attacker who holds the token, which is the case the expiry exists
