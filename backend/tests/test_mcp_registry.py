@@ -163,3 +163,74 @@ def test_the_distinction_holds_at_depth() -> None:
     }
 
     assert schema_sha256(profond) != schema_sha256(ampute)
+
+
+# --- Ce qui a ete approuve le 30/09/2026 -------------------------------------------
+#
+# Atlassian a ajoute "actionSource" a ses trois outils Jira. La derive a ete
+# constatee par le controle d'empreinte, qui a refuse toutes les lectures Jira
+# jusqu'a ce que le changement soit lu.
+#
+# Ces tests ne verifient pas que le champ existe -- ils fixent ce qui a ete approuve
+# EN L'ACCEPTANT : facultatif, jamais offert au modele. Si une prochaine derive le
+# rendait obligatoire ou l'exposait, ces tests tomberaient, et c'est leur seul but.
+
+JIRA_TOOLS_WITH_ACTION_SOURCE = (
+    "getJiraIssue",
+    "searchJiraIssuesUsingJql",
+    "getTransitionsForJiraIssue",
+)
+
+
+def test_the_provider_schema_carries_the_field_atlassian_added() -> None:
+    """Sans lui, l'empreinte ne correspond plus et toute lecture Jira est refusee."""
+
+    registry = MCPToolRegistry()
+
+    for nom in JIRA_TOOLS_WITH_ACTION_SOURCE:
+        contract = registry.get(SourceSystem.JIRA, nom)
+        assert contract is not None, nom
+        assert "actionSource" in contract.provider_input_schema["properties"], nom
+
+
+def test_the_added_field_is_optional() -> None:
+    """Un champ devenu obligatoire ne serait plus une derive documentaire : nos appels
+    existants cesseraient d'etre valides, et l'accepter en silence les casserait."""
+
+    registry = MCPToolRegistry()
+
+    for nom in JIRA_TOOLS_WITH_ACTION_SOURCE:
+        contract = registry.get(SourceSystem.JIRA, nom)
+        assert contract is not None, nom
+        assert "actionSource" not in contract.provider_input_schema.get("required", []), nom
+
+
+def test_the_added_field_is_never_offered_to_the_model() -> None:
+    """Le schema public est ce que le modele voit et peut remplir. Un champ
+    d'attribution choisi par le modele dirait au fournisseur ce qu'on veut, et non ce
+    qui est -- et le catalogue public n'existe que pour ne rien offrir de plus que le
+    strict necessaire."""
+
+    registry = MCPToolRegistry()
+
+    for nom in JIRA_TOOLS_WITH_ACTION_SOURCE:
+        contract = registry.get(SourceSystem.JIRA, nom)
+        assert contract is not None, nom
+        assert "actionSource" not in contract.public_input_schema["properties"], nom
+
+
+def test_the_required_arguments_did_not_move() -> None:
+    """La verification qui autorisait l'approbation : aucun argument obligatoire n'a
+    change, donc les lectures d'avant restent exactement aussi valides."""
+
+    registry = MCPToolRegistry()
+    attendu = {
+        "getJiraIssue": {"cloudId", "issueIdOrKey"},
+        "searchJiraIssuesUsingJql": {"cloudId", "jql"},
+        "getTransitionsForJiraIssue": {"cloudId", "issueIdOrKey"},
+    }
+
+    for nom, requis in attendu.items():
+        contract = registry.get(SourceSystem.JIRA, nom)
+        assert contract is not None, nom
+        assert set(contract.provider_input_schema["required"]) == requis, nom

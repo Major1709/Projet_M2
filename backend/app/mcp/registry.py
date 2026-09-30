@@ -236,6 +236,16 @@ def _array(item: dict[str, Any], *, maximum: int) -> dict[str, Any]:
 
 _REMOTE_STRING = {"type": "string"}
 _CLOUD_ID = {"type": "string"}
+
+# Ajoute par Atlassian sur ses trois outils Jira le 30/09/2026, et constate par la
+# derive : les lectures Jira ont ete refusees jusqu'a ce que ce champ soit lu et
+# approuve.
+#
+# Facultatif, declaratif, et NEXIA ne l'envoie pas : il sert au fournisseur a savoir
+# si l'appel vient de son propre widget ou d'une boucle de modele. Il figure ici
+# parce que l'empreinte couvre le schema ENTIER que le serveur annonce -- l'omettre
+# laisserait les lectures refusees.
+_ACTION_SOURCE = {"type": "string", "enum": ["jira_mcp_card", "model_tool_call"]}
 _EMPTY = _object_schema()
 # Mirrors what the Atlassian server actually publishes for its argument-free
 # tools: an open object, without the additionalProperties guard we impose on our
@@ -320,6 +330,7 @@ _JIRA_CONTRACTS = (
                 "nextPageToken": _REMOTE_STRING,
                 "responseContentFormat": {"type": "string", "enum": ["adf", "markdown"]},
                 "searchResultMode": {"type": "string", "enum": ["all", "count", "issues"]},
+                "actionSource": _ACTION_SOURCE,
             },
             ("cloudId", "jql"),
         ),
@@ -353,6 +364,7 @@ _JIRA_CONTRACTS = (
                 "updateHistory": {"type": "boolean"},
                 "failFast": {"type": "boolean"},
                 "responseContentFormat": {"type": "string", "enum": ["adf", "markdown"]},
+                "actionSource": _ACTION_SOURCE,
             },
             ("cloudId", "issueIdOrKey"),
         ),
@@ -387,6 +399,7 @@ _JIRA_CONTRACTS = (
                 "skipRemoteOnlyCondition": {"type": "boolean"},
                 "includeUnavailableTransitions": {"type": "boolean"},
                 "sortByOpsBarAndStatus": {"type": "boolean"},
+                "actionSource": _ACTION_SOURCE,
             },
             ("cloudId", "issueIdOrKey"),
         ),
