@@ -19,8 +19,10 @@ allongerait une reponse qui allait bien.
 from typing import Any
 
 from app.agent.read_workflow import (
+    ABSOLUTE_MAX_STEPS,
     CROSS_SOURCE_TURN,
     AgentReadWorkflow,
+    AgentStopReason,
     _is_exploration,
 )
 from app.mcp.domain import MCPReadSourceSystem as SourceSystem
@@ -171,3 +173,80 @@ def test_the_workflow_keeps_what_the_recall_leans_on() -> None:
 
     assert hasattr(AgentReadWorkflow, "answer")
     assert "{absente}" in CROSS_SOURCE_TURN
+
+
+# --- Les moyens de ce qu'on demande -------------------------------------------------
+#
+# Mesure sur une vraie question, "Fais-moi le point sur le projet KAN" : quatre
+# etapes, quatre lectures -- Jira puis trois fois Confluence -- et plus une seule pour
+# rediger. La personne recevait "je n'ai pas pu terminer" APRES que les deux sources
+# aient ete lues. La meme question repond en cinq etapes.
+#
+# La cause n'etait pas la largeur de la question : c'est le rappel lui-meme qui pousse
+# a lire une seconde source, donc a depenser une etape de plus, sur un budget
+# inchange. Les questions pour lesquelles le croisement a ete construit etaient les
+# plus exposees a en manquer.
+
+
+def test_the_recall_also_grants_the_steps_it_costs() -> None:
+    """Quatre tours de lecture, puis la redaction : sans la rallonge, le cinquieme
+    tour n'aurait jamais lieu et la reponse serait perdue."""
+
+    provider = ScriptedProvider(
+        searching_jira(call_id="c1"),
+        searching_jira(jql="project = KAN AND status != Done", call_id="c2"),
+        searching_jira(jql="project = KAN ORDER BY created", call_id="c3"),
+        searching_jira(jql="project = KAN AND type = Bug", call_id="c4"),
+        answered("Voici le point."),
+    )
+    agent = agent_for(provider, reads_of(SourceSystem.JIRA, "searchJiraIssuesUsingJql"))
+
+    answer = ask(agent, question=LARGE)
+
+    assert len(provider.requests) == 5
+    assert answer.text == "Voici le point."
+
+
+def test_a_narrow_question_gets_no_extra_step() -> None:
+    """La rallonge suit le rappel, pas la question. Lire un ticket nomme ne declenche
+    aucun rappel, donc ne coute rien de plus -- et n'obtient rien de plus."""
+
+    provider = ScriptedProvider(
+        proposing(call_id="c1"),
+        proposing(call_id="c2"),
+        proposing(call_id="c3"),
+        proposing(call_id="c4"),
+        answered("Jamais atteint."),
+    )
+    agent = agent_for(provider, reads_of(SourceSystem.JIRA, "getJiraIssue"))
+
+    answer = ask(agent, question="Que contient le ticket KAN-1 ?")
+
+    assert len(provider.requests) == 4
+    assert answer.stop_reason is AgentStopReason.STEP_LIMIT_REACHED
+
+
+def test_the_extension_is_granted_once_and_not_per_read() -> None:
+    """Le rappel ne part qu'une fois ; la rallonge non plus. Une rallonge par lecture
+    ferait une boucle sans fin tant que le modele continue de chercher."""
+
+    provider = ScriptedProvider(*[searching_jira(call_id=f"c{i}") for i in range(1, 9)])
+    agent = agent_for(provider, reads_of(SourceSystem.JIRA, "searchJiraIssuesUsingJql"))
+
+    answer = ask(agent, question=LARGE)
+
+    # Quatre de depart, deux rendues, et pas une de plus.
+    assert len(provider.requests) == 6
+    assert answer.stop_reason is AgentStopReason.STEP_LIMIT_REACHED
+
+
+def test_the_extension_never_exceeds_the_promised_ceiling() -> None:
+    """``max_steps`` est borne a huit par le schema. Une rallonge qui depasserait
+    rendrait fausse la limite annoncee a l'appelant."""
+
+    provider = ScriptedProvider(*[searching_jira(call_id=f"c{i}") for i in range(1, 12)])
+    agent = agent_for(provider, reads_of(SourceSystem.JIRA, "searchJiraIssuesUsingJql"))
+
+    ask(agent, question=LARGE, max_steps=8)
+
+    assert len(provider.requests) == ABSOLUTE_MAX_STEPS

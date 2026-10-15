@@ -343,6 +343,26 @@ BACKLOG_COMPLETION_TOKENS = 8_192
 # etapes, parce qu'elle n'a rien a faire de plus.
 BACKLOG_MAX_STEPS = 6
 
+# Les etapes rendues a une question large, quand on vient de lui en demander plus.
+#
+# Mesure sur "Fais-moi le point sur le projet KAN" : quatre etapes, quatre lectures,
+# et plus une seule pour rediger -- la personne recevait "je n'ai pas pu terminer"
+# apres que les deux sources aient ete lues. La meme question repond en cinq etapes.
+#
+# La cause n'est pas la largeur de la question : c'est que le rappel de croisement
+# POUSSE le modele a lire une seconde source, donc a depenser une etape de plus, sans
+# que le budget en tienne compte. Les questions pour lesquelles le croisement a ete
+# construit etaient ainsi les plus exposees a manquer de place.
+#
+# Rendu au moment ou le rappel part, et pas avant : c'est ce rappel qui cree la
+# depense. Une question large que le modele traite d'une seule source ne coute rien de
+# plus et ne recoit rien de plus.
+CROSS_SOURCE_EXTRA_STEPS = 2
+
+# Le plafond que le schema promet deja (``max_steps`` est borne a 8). Les rallonges
+# internes s'y arretent : depasser rendrait la limite annoncee fausse.
+ABSOLUTE_MAX_STEPS = 8
+
 # Le nombre d'etapes, glisse dans le rappel de forme quand on sait le compter.
 #
 # Mesure : sans ce chiffre, le modele rendait deux a huit lignes pour un processus
@@ -1046,7 +1066,11 @@ class AgentReadWorkflow:
             else question.max_steps
         )
 
-        for step in range(1, etapes + 1):
+        # Une boucle a borne mobile : le budget peut grandir quand le systeme
+        # lui-meme demande une lecture de plus. Un range l'aurait fige a la creation.
+        step = 0
+        while step < etapes:
+            step += 1
             response = await self._provider.generate(
                 request=LLMRequest(
                     messages=tuple(messages),
@@ -1190,6 +1214,12 @@ class AgentReadWorkflow:
                             }
                         )
                         cross_source_recalled = True
+                        # On vient de demander une lecture de plus : on en rend les
+                        # moyens. Sans cela le rappel depense une etape et en
+                        # provoque une autre, sur un budget inchange.
+                        etapes = min(
+                            etapes + CROSS_SOURCE_EXTRA_STEPS, ABSOLUTE_MAX_STEPS
+                        )
                 # Le rappel de forme suit immediatement le processus lu, une seule
                 # fois. Le repeter a chaque lecture ferait grossir le fil sans rien
                 # ajouter : c'est sa POSITION -- juste avant la redaction -- qui le
@@ -1920,6 +1950,7 @@ __all__ = [
     "BACKLOG_FORMAT_TURN",
     "BACKLOG_MARKERS",
     "BACKLOG_MAX_STEPS",
+    "CROSS_SOURCE_EXTRA_STEPS",
     "DEFAULT_MAX_READS_PER_QUESTION",
     "DEFAULT_MAX_STEPS",
     "EMPTY_ANSWER_MESSAGE",
