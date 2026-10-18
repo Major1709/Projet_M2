@@ -1,3 +1,5 @@
+import { labelForTool } from "@/ui/source-label";
+
 const DEFAULT_API_BASE_URL = "http://localhost:8000";
 
 export type NexiaSource = {
@@ -300,15 +302,23 @@ function parseSources(value: unknown): NexiaSource[] {
     }
 
     const candidate = source as Record<string, unknown>;
-    const title = candidate.tool_name;
-    if (typeof title !== "string" || !title.trim()) {
+    const toolName = candidate.tool_name;
+    if (typeof toolName !== "string" || !toolName.trim()) {
       return [];
     }
+
+    // Le titre rendu par le serveur d'abord : c'est le nom sous lequel la personne
+    // reconnait la ressource. A defaut -- une recherche, qui ne designe rien --, le
+    // nom de l'outil traduit, plutot que sa forme technique.
+    const serveur = candidate.title;
+    const title = typeof serveur === "string" && serveur.trim()
+      ? serveur.trim()
+      : labelForTool(toolName.trim());
 
     const safeUrl = getSafeSourceUrl(candidate.url);
 
     return [{
-      title: title.trim(),
+      title,
       ...(safeUrl ? { url: safeUrl } : {}),
       ...(typeof candidate.source_system === "string"
         ? { provider: candidate.source_system.trim() }

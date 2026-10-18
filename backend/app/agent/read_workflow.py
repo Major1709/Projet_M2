@@ -26,7 +26,7 @@ from uuid import UUID
 import anyio.to_thread
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.agent.citations import AgentSource, ReadRecord, sources_from
+from app.agent.citations import AgentSource, ReadRecord, sources_from, title_of
 from app.agent.domain import LLMProvider, LLMRequest, ProposedToolCall
 from app.agent.errors import AgentAuditUnavailable
 from app.agent.markup import reduce_markup
@@ -1764,7 +1764,11 @@ class AgentReadWorkflow:
             # that holds the provenance the envelope must be labelled with -- and
             # an envelope without one is refused, so the label cannot be forgotten.
             wrap_untrusted(observation, origin=self._origin(result.provenance)),
-            ReadRecord(provenance=result.provenance, truncated=truncated),
+            ReadRecord(
+                provenance=result.provenance,
+                truncated=truncated,
+                title=title_of(result),
+            ),
             1,
         )
 

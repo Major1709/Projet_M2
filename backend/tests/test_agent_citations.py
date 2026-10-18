@@ -1,8 +1,15 @@
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any
 
-from app.agent.citations import AgentSource, ReadRecord, sources_from
-from app.mcp.domain import MCPProvider, MCPReadProvenance
+from app.agent.citations import (
+    MAX_TITLE_LENGTH,
+    AgentSource,
+    ReadRecord,
+    sources_from,
+    title_of,
+)
+from app.mcp.domain import MCPProvider, MCPReadContent, MCPReadProvenance, MCPReadResult
 from app.mcp.domain import MCPReadSourceSystem as SourceSystem
 
 DIGEST = "a" * 64
@@ -142,6 +149,10 @@ def test_no_internal_digest_reaches_a_source() -> None:
         "url",
         "retrieved_at",
         "truncated",
+        # Ajoute sciemment : le nom sous lequel la personne reconnait la source. Il
+        # vient de la charge lue, jamais de la provenance -- c'est pour cela qu'il
+        # peut figurer ici sans ouvrir la porte aux empreintes internes.
+        "title",
     }
 
 
@@ -171,3 +182,114 @@ def test_the_earliest_read_time_is_the_one_reported() -> None:
     # First occurrence wins, so the timestamp matches the order the sources are
     # listed in rather than drifting to whichever read happened last.
     assert source.retrieved_at == WHEN
+
+
+# --- Le nom sous lequel la personne reconnait une source ----------------------------
+#
+# L'ecran citait le nom de l'outil -- "getConfluencePage", "searchJiraIssuesUsingJql"
+# -- qui dit COMMENT la lecture a ete faite et jamais CE QUI a ete lu. Un lecteur ne
+# peut pas verifier une source qu'il ne sait pas nommer.
+#
+# Les charges ci-dessous sont relevees sur de vraies lectures, pas inventees : les
+# serveurs Atlassian rendent du JSON dans un bloc de texte, l'adaptateur Figma une
+# charge structuree.
+
+
+def result_for(
+    source_system: SourceSystem,
+    *,
+    text: str | None = None,
+    structured: Any = None,
+    reference: str | None = "https://andrianalyfanny.atlassian.net/browse/KAN-39",
+) -> MCPReadResult:
+    return MCPReadResult(
+        content=(
+            (
+                MCPReadContent(
+                    kind="text",
+                    text=text,
+                    size_bytes=len(text.encode("utf-8")),
+                    sha256=sha256(text.encode("utf-8")).hexdigest(),
+                ),
+            )
+            if text is not None
+            else ()
+        ),
+        structured_content=structured,
+        provenance=provenance(source_system=source_system, resource_reference=reference),
+    )
+
+
+def test_a_jira_issue_is_named_by_its_key_and_summary() -> None:
+    import json
+
+    charge = json.dumps({"key": "KAN-39", "fields": {"summary": "Suivi de projet"}})
+
+    assert title_of(result_for(SourceSystem.JIRA, text=charge)) == "KAN-39 - Suivi de projet"
+
+
+def test_a_confluence_page_is_named_by_its_title() -> None:
+    import json
+
+    charge = json.dumps({"id": "8060929", "type": "page", "title": "CDCF K20"})
+
+    assert title_of(result_for(SourceSystem.CONFLUENCE, text=charge)) == "CDCF K20"
+
+
+def test_a_figma_process_is_named_by_its_file() -> None:
+    """La charge Figma arrive structuree et non en texte : les deux chemins sont lus."""
+
+    charge = {"file": {"key": "UVQmgXGaZC5vrtaQRU5nvo", "name": "ACCESA - Virement"}}
+
+    assert title_of(result_for(SourceSystem.FIGMA, structured=charge)) == "ACCESA - Virement"
+
+
+def test_a_search_is_never_named_after_its_first_result() -> None:
+    """Une recherche ne designe rien. La nommer d'apres un resultat laisserait croire
+    qu'une seule page a ete consultee."""
+
+    import json
+
+    charge = json.dumps({"issues": [{"key": "KAN-1", "fields": {"summary": "Premier"}}]})
+
+    assert title_of(result_for(SourceSystem.JIRA, text=charge, reference=None)) is None
+
+
+def test_a_payload_without_a_title_yields_none_rather_than_a_guess() -> None:
+    """Un titre invente ferait cliquer vers une page dont le nom ne correspond pas."""
+
+    import json
+
+    assert title_of(result_for(SourceSystem.CONFLUENCE, text=json.dumps({"id": "1"}))) is None
+    assert title_of(result_for(SourceSystem.CONFLUENCE, text="pas du json")) is None
+
+
+def test_an_absurdly_long_summary_is_trimmed() -> None:
+    import json
+
+    charge = json.dumps({"key": "KAN-1", "fields": {"summary": "x" * 400}})
+
+    titre = title_of(result_for(SourceSystem.JIRA, text=charge))
+    assert titre is not None
+    assert len(titre) == MAX_TITLE_LENGTH
+
+
+def test_the_title_travels_to_the_source() -> None:
+    (source,) = sources_from((ReadRecord(provenance=provenance(), title="CDCF K20"),))
+
+    assert source.title == "CDCF K20"
+
+
+def test_a_later_read_may_add_a_title_but_never_rename_one() -> None:
+    """La premiere lecture reste celle qui nomme la source : une seconde ne doit pas
+    la renommer sous le lecteur."""
+
+    sans, avec = ReadRecord(provenance=provenance()), ReadRecord(
+        provenance=provenance(), title="CDCF K20"
+    )
+
+    (complete,) = sources_from((sans, avec))
+    assert complete.title == "CDCF K20"
+
+    (premiere,) = sources_from((avec, ReadRecord(provenance=provenance(), title="Autre nom")))
+    assert premiere.title == "CDCF K20"
