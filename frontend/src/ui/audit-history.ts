@@ -63,3 +63,60 @@ export function momentOf(occurredAt: string): string {
     minute: "2-digit",
   });
 }
+
+const OBJETS: Record<string, string> = {
+  page: "une page",
+  issue: "un ticket",
+};
+
+const ACTIONS: Record<string, string> = {
+  CREATE: "créer",
+  UPDATE: "modifier",
+  DELETE: "supprimer",
+};
+
+/**
+ * Ce que l'événement raconte, en une phrase.
+ *
+ * L'historique affichait « Écrite · Création · Jira » : trois fragments justes qui
+ * obligent le lecteur à les recoller lui-même. Une ligne d'historique sert à
+ * retrouver ce qui s'est passé — elle doit pouvoir se lire d'un trait.
+ *
+ * Composée à partir de champs et jamais d'un texte stocké : le titre vient de la
+ * proposition, la nature de l'événement, et le système du contrat. Une phrase
+ * écrite au moment de l'audit aurait figé une formulation et une langue.
+ *
+ * Chaîne vide quand il n'y a rien d'utile à dire — un événement sans ressource ni
+ * système se lit alors sous son seul libellé, ce qui vaut mieux qu'une phrase creuse.
+ */
+export function describe(event: NexiaAuditEvent): string {
+  const objet = event.resourceType ? OBJETS[event.resourceType] ?? "un élément" : "";
+  const systeme = event.sourceSystem ? SYSTEMS[event.sourceSystem] ?? event.sourceSystem : "";
+  const verbe = event.actionClass ? ACTIONS[event.actionClass] : undefined;
+  const nomme = event.resourceTitle ? `« ${event.resourceTitle} »` : "";
+
+  // "créer une page Confluence" : le sujet de l'action, independamment de son sort.
+  const quoi = [verbe, objet, systeme].filter(Boolean).join(" ");
+  if (!quoi && !nomme) return "";
+
+  switch (event.eventType) {
+    case "ACTION_PROPOSED":
+      return nomme ? `Proposition de ${quoi} : ${nomme}` : `Proposition de ${quoi}`;
+    case "ACTION_APPROVED":
+      return nomme ? `Vous avez approuvé ${nomme}` : `Vous avez approuvé : ${quoi}`;
+    case "ACTION_REJECTED":
+      return nomme ? `Vous avez refusé ${nomme}` : `Vous avez refusé : ${quoi}`;
+    case "ACTION_REVISED":
+      return nomme ? `Vous avez corrigé ${nomme} avant écriture` : `Corrigé avant écriture : ${quoi}`;
+    case "MUTATION_DISPATCHED":
+      return nomme ? `Envoi de ${nomme} vers ${systeme || "la source"}` : `Envoi vers ${systeme}`;
+    case "MUTATION_EXECUTED":
+      return nomme ? `${nomme} écrit dans ${systeme || "la source"}` : `Écrit dans ${systeme}`;
+    case "MUTATION_FAILED":
+      return nomme
+        ? `L'écriture de ${nomme} a échoué`
+        : `L'écriture a échoué${systeme ? ` dans ${systeme}` : ""}`;
+    default:
+      return quoi;
+  }
+}

@@ -18,7 +18,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
-from app.audit.domain import AuditEvent, AuditEventType
+from app.audit.domain import AuditChange, AuditEventType
 from app.core.errors import IDENTITY_RESPONSES, responses_for
 from app.core.identity import SecurityContext, get_security_context
 
@@ -56,6 +56,10 @@ class AuditEventView(BaseModel):
     # La cle Jira ou l'identifiant de page reellement crees. C'est la seule chose que
     # la personne peut aller verifier elle-meme.
     external_ids: tuple[str, ...] = ()
+    # Ce que l'action touchait, joint depuis la proposition. Sans eux, l'historique
+    # ne dit que la nature de l'evenement -- "ecrite" -- et jamais ce qui l'a ete.
+    resource_title: str | None = None
+    resource_type: str | None = None
 
 
 class AuditPage(BaseModel):
@@ -69,7 +73,8 @@ def _text(details: dict[str, Any], key: str) -> str | None:
     return str(value) if isinstance(value, str | int) and str(value) else None
 
 
-def _view(event: AuditEvent) -> AuditEventView:
+def _view(change: AuditChange) -> AuditEventView:
+    event = change.event
     details = event.model_dump(mode="json").get("details") or {}
     if not isinstance(details, dict):
         details = {}
@@ -87,6 +92,8 @@ def _view(event: AuditEvent) -> AuditEventView:
             if isinstance(identifiants, list)
             else ()
         ),
+        resource_title=change.resource_title,
+        resource_type=change.resource_type,
     )
 
 
@@ -123,4 +130,4 @@ def recent_changes(
         event_types=CHANGE_EVENTS,
         limit=limit,
     )
-    return AuditPage(events=tuple(_view(event) for event in evenements))
+    return AuditPage(events=tuple(_view(change) for change in evenements))

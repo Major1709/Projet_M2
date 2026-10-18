@@ -1,8 +1,8 @@
 from sqlalchemy import insert, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.audit.domain import AuditEvent
-from app.persistence.schema import audit_events
+from app.audit.domain import AuditChange, AuditEvent
+from app.persistence.schema import action_proposals, audit_events
 
 
 class PostgresAuditSink:
@@ -55,11 +55,51 @@ class PostgresAuditTrail:
         tenant_id: str,
         event_types: tuple[str, ...],
         limit: int,
-    ) -> tuple[AuditEvent, ...]:
-        statement = select(audit_events).where(audit_events.c.tenant_id == tenant_id)
+    ) -> tuple[AuditChange, ...]:
+        """Les evenements, et la ressource que chacun touchait.
+
+        La ressource est jointe depuis la proposition plutot que recopiee dans les
+        details au moment de l'ecriture. Deux raisons : les evenements deja
+        enregistres redeviennent lisibles sans migration, et la piste ne duplique pas
+        une verite dont le proprietaire est ailleurs -- une page renommee se lit
+        renommee, ce qui est ce qu'on veut d'un historique qui sert a retrouver.
+
+        Jointure externe : un evenement qui ne porte pas de proposition reste dans la
+        liste, sous son seul libelle. Le perdre serait pire que de l'afficher nu.
+        """
+
+        cible = action_proposals.c.target
+        statement = (
+            select(
+                audit_events,
+                cible["title"].as_string().label("resource_title"),
+                cible["resource_type"].as_string().label("resource_type"),
+            )
+            .select_from(
+                audit_events.outerjoin(
+                    action_proposals,
+                    (audit_events.c.tenant_id == action_proposals.c.tenant_id)
+                    & (audit_events.c.action_proposal_id == action_proposals.c.id),
+                )
+            )
+            .where(audit_events.c.tenant_id == tenant_id)
+        )
         if event_types:
             statement = statement.where(audit_events.c.event_type.in_(event_types))
         statement = statement.order_by(audit_events.c.occurred_at.desc()).limit(limit)
         with self._session_factory() as session:
             lignes = session.execute(statement).mappings().all()
-        return tuple(AuditEvent.model_validate(dict(ligne)) for ligne in lignes)
+        return tuple(
+            AuditChange(
+                event=AuditEvent.model_validate(
+                    {
+                        cle: valeur
+                        for cle, valeur in dict(ligne).items()
+                        if cle not in {"resource_title", "resource_type"}
+                    }
+                ),
+                resource_title=ligne["resource_title"],
+                resource_type=ligne["resource_type"],
+            )
+            for ligne in lignes
+        )

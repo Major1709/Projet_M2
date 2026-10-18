@@ -1,7 +1,7 @@
 from threading import RLock
 from typing import Any
 
-from app.audit.domain import AuditEvent
+from app.audit.domain import AuditChange, AuditEvent
 
 
 class InMemoryAuditSink:
@@ -21,9 +21,13 @@ class InMemoryAuditSink:
         tenant_id: str,
         event_types: tuple[str, ...],
         limit: int,
-    ) -> tuple[AuditEvent, ...]:
+    ) -> tuple[AuditChange, ...]:
         """La meme lecture que l'adaptateur durable, pour que les deux se comportent
-        pareil : borne au tenant, filtree, la plus recente en tete."""
+        pareil : borne au tenant, filtree, la plus recente en tete.
+
+        Sans la ressource touchee : ce puits de developpement ne connait pas les
+        propositions, et inventer un titre serait pire que de n'en donner aucun.
+        """
 
         with self._lock:
             retenus = [
@@ -33,7 +37,7 @@ class InMemoryAuditSink:
                 and (not event_types or event.event_type.value in event_types)
             ]
         retenus.sort(key=lambda event: event.occurred_at, reverse=True)
-        return tuple(retenus[:limit])
+        return tuple(AuditChange(event=event) for event in retenus[:limit])
 
     def snapshot(self) -> tuple[AuditEvent, ...]:
         with self._lock:

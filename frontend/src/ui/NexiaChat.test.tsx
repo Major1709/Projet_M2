@@ -385,7 +385,28 @@ describe("L'historique des changements", () => {
     expect(await screen.findByText("Écrite")).toBeInTheDocument();
     // La cle Jira : la seule chose que la personne peut aller verifier elle-meme.
     expect(screen.getByText("KAN-42")).toBeInTheDocument();
-    expect(screen.getByText("Création · Jira")).toBeInTheDocument();
+  });
+
+  it("raconte l'action en une phrase, au lieu de trois fragments", async () => {
+    await ouvrirHistorique(
+      createGateway({
+        fetchAuditEvents: vi.fn().mockResolvedValue([
+          { ...ECRITURE, resourceType: "issue", resourceTitle: "Export CSV manquant" },
+        ]),
+      }),
+    );
+
+    expect(
+      await screen.findByText("« Export CSV manquant » écrit dans Jira"),
+    ).toBeInTheDocument();
+  });
+
+  it("reste lisible quand la proposition ne portait pas de titre", async () => {
+    await ouvrirHistorique(
+      createGateway({ fetchAuditEvents: vi.fn().mockResolvedValue([ECRITURE]) }),
+    );
+
+    expect(await screen.findByText("Écrit dans Jira")).toBeInTheDocument();
   });
 
   it("ne demande l'historique qu'a l'ouverture du dialogue", async () => {

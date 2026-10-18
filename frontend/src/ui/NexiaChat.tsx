@@ -18,7 +18,7 @@ import {
 } from "@/adapters/nexia-api";
 import { MutationApprovalPreview } from "@/ui/MutationApprovalPreview";
 
-import { labelOf, momentOf, targetOf } from "./audit-history";
+import { describe, labelOf, momentOf, targetOf } from "./audit-history";
 import { AssistantText } from "./AssistantText";
 import { initialOf } from "./initial";
 
@@ -599,8 +599,13 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
                     <time className="history-entry__moment" dateTime={evenement.occurredAt}>
                       {momentOf(evenement.occurredAt)}
                     </time>
-                    {targetOf(evenement) ? (
-                      <span className="history-entry__target">{targetOf(evenement)}</span>
+                    {/* La phrase d'abord : une ligne d'historique sert a retrouver ce
+                        qui s'est passe, elle doit se lire d'un trait. Les fragments
+                        ne reviennent que lorsqu'elle manque. */}
+                    {describe(evenement) ? (
+                      <span className="history-entry__description">{describe(evenement)}</span>
+                    ) : targetOf(evenement) ? (
+                      <span className="history-entry__description">{targetOf(evenement)}</span>
                     ) : null}
                     {evenement.externalIds.length > 0 ? (
                       <span className="history-entry__ids">

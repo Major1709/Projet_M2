@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from app.audit.domain import AuditEvent
+from app.audit.domain import AuditChange, AuditEvent
 
 
 class AuditSink(Protocol):
@@ -25,4 +25,4 @@ class AuditTrail(Protocol):
         tenant_id: str,
         event_types: tuple[str, ...],
         limit: int,
-    ) -> tuple[AuditEvent, ...]: ...
+    ) -> tuple[AuditChange, ...]: ...

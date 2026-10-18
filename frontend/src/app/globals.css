@@ -855,6 +855,15 @@ a.message-source:hover {
   white-space: nowrap;
 }
 
+/* La phrase occupe toute la largeur sous le libelle et la date : c'est elle qu'on
+ * lit, les deux autres ne sont que des reperes. */
+.history-entry__description {
+  grid-column: 1 / -1;
+  color: #5f5959;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
 .history-entry__target {
   color: var(--nexia-muted);
   font-size: 12px;

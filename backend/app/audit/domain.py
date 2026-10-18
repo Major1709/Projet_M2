@@ -60,3 +60,24 @@ class AuditEvent(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
+
+class AuditChange(BaseModel):
+    """Un evenement, et ce qu'il touchait -- pour qu'un ecran puisse le raconter.
+
+    L'evenement seul ne dit que sa nature : "MUTATION_EXECUTED". Ce qui manque pour
+    le lire est la ressource concernee, et elle vit dans la proposition, pas dans la
+    piste. Elle est rapportee ici au moment de la lecture plutot que recopiee dans
+    les details au moment de l'ecriture : les evenements deja enregistres
+    redeviennent lisibles, et la piste ne duplique pas une verite qui a son
+    proprietaire ailleurs.
+
+    Les deux champs restent facultatifs. Un evenement qui ne porte pas de proposition
+    -- ou dont la proposition a ete purgee -- doit s'afficher quand meme, sous son
+    seul libelle.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    event: AuditEvent
+    resource_title: str | None = None
+    resource_type: str | None = None

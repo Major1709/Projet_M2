@@ -73,6 +73,9 @@ export type NexiaAuditEvent = {
   toolName?: string;
   actionClass?: string;
   externalIds: string[];
+  /** Ce que l'action touchait, joint depuis la proposition cote serveur. */
+  resourceTitle?: string;
+  resourceType?: string;
 };
 
 export type NexiaActionTarget = {
@@ -720,6 +723,12 @@ export async function fetchAuditEvents(limit = 50): Promise<NexiaAuditEvent[]> {
         : {}),
       ...(firstString(row.action_class, row.actionClass)
         ? { actionClass: firstString(row.action_class, row.actionClass)! }
+        : {}),
+      ...(firstString(row.resource_title, row.resourceTitle)
+        ? { resourceTitle: firstString(row.resource_title, row.resourceTitle)! }
+        : {}),
+      ...(firstString(row.resource_type, row.resourceType)
+        ? { resourceType: firstString(row.resource_type, row.resourceType)! }
         : {}),
       externalIds: Array.isArray(row.external_ids)
         ? row.external_ids.filter((x): x is string => typeof x === "string")
