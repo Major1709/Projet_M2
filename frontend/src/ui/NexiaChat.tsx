@@ -19,6 +19,7 @@ import {
 import { MutationApprovalPreview } from "@/ui/MutationApprovalPreview";
 
 import { labelOf, momentOf, targetOf } from "./audit-history";
+import { AssistantText } from "./AssistantText";
 import { initialOf } from "./initial";
 
 type ChatMessage =
@@ -397,7 +398,17 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
                       : ""
                   }`}
                 >
-                  <p className={`message-bubble message-bubble--${message.role}`}>{message.text}</p>
+                  {/* La reponse de NEXIA arrive en markdown : rendue brute, un mot
+                      en gras s'affichait entoure de deux asterisques. Le message de
+                      la personne, lui, reste tel qu'elle l'a tape -- interpreter ses
+                      asterisques reviendrait a reecrire ses mots. */}
+                  {message.role === "assistant" ? (
+                    <div className={`message-bubble message-bubble--${message.role}`}>
+                      <AssistantText text={message.text} />
+                    </div>
+                  ) : (
+                    <p className={`message-bubble message-bubble--${message.role}`}>{message.text}</p>
+                  )}
                   {message.role === "assistant" && message.sources.length > 0 ? (
                     <div className="message-sources" aria-label="Sources de la réponse">
                       <p>Sources</p>

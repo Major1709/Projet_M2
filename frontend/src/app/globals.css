@@ -415,6 +415,70 @@ button:disabled {
   box-shadow: 0 3px 14px rgb(44 55 91 / 4%);
 }
 
+/* La mise en forme des reponses de NEXIA.
+ *
+ * Le modele repond en markdown ; la bulle l'affichait brut, donc un mot en gras
+ * arrivait entoure de deux asterisques. Les marges sont resserrees : une bulle de
+ * conversation n'est pas un document, et les espacements d'article y creuseraient
+ * des trous entre deux phrases. */
+.rich-text > :first-child {
+  margin-top: 0;
+}
+
+.rich-text > :last-child {
+  margin-bottom: 0;
+}
+
+.rich-text__paragraph {
+  margin: 0 0 10px;
+}
+
+.rich-text__heading {
+  margin: 16px 0 6px;
+  color: var(--nexia-ink);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.rich-text__heading--1 { font-size: 16px; }
+.rich-text__heading--2 { font-size: 15px; }
+.rich-text__heading--3 { font-size: 14px; }
+
+.rich-text__list {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.rich-text__list li {
+  margin-bottom: 4px;
+}
+
+.rich-text code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: #f2f0ee;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.rich-text a {
+  color: #2f5fa8;
+  text-decoration: underline;
+}
+
+.rich-text__rule {
+  margin: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--nexia-border);
+}
+
+/* Un tableau dans une reponse se deroule plutot que de deborder : la bulle garde sa
+ * largeur, et sept colonnes restent atteignables. */
+.rich-text__table-scroll {
+  margin: 0 0 10px;
+  overflow-x: auto;
+}
+
 .message-bubble--loading {
   display: flex;
   width: 78px;

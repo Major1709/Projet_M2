@@ -428,3 +428,56 @@ describe("L'historique des changements", () => {
     expect(screen.queryByText(/pas encore disponible/)).not.toBeInTheDocument();
   });
 });
+
+describe("La mise en forme des reponses", () => {
+  /**
+   * Le modele repond en markdown -- c'est ce que font tous les modeles. La bulle
+   * affichait ce texte brut, donc un mot en gras arrivait entoure de deux
+   * asterisques et un titre precede de trois dieses.
+   */
+
+  async function repondant(texte: string) {
+    const user = userEvent.setup();
+    const gateway = createGateway({
+      askQuestion: vi.fn().mockResolvedValue({ answer: texte, sources: [] }),
+    });
+    render(<NexiaChat gateway={gateway} />);
+    await user.type(screen.getByRole("textbox", { name: "Votre message" }), "Le point sur KAN");
+    await user.click(screen.getByRole("button", { name: "Envoyer le message" }));
+    await waitFor(() => expect(document.querySelector(".rich-text")).not.toBeNull());
+  }
+
+  it("rend le gras au lieu d'afficher les asterisques", async () => {
+    await repondant("Le projet **KAN** avance.");
+
+    expect(screen.getByText("KAN").tagName).toBe("STRONG");
+    expect(screen.queryByText(/\*\*/)).not.toBeInTheDocument();
+  });
+
+  it("rend les titres et les listes", async () => {
+    await repondant(["### Etat", "* KAN-39", "* KAN-40"].join("\n"));
+
+    expect(await screen.findByRole("heading", { name: "Etat" })).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("laisse le message de la personne tel qu'elle l'a tape", async () => {
+    // Interpreter ses asterisques reviendrait a reecrire ses mots.
+    const user = userEvent.setup();
+    render(<NexiaChat gateway={createGateway()} />);
+
+    await user.type(screen.getByRole("textbox", { name: "Votre message" }), "garde mes **etoiles**");
+    await user.click(screen.getByRole("button", { name: "Envoyer le message" }));
+
+    expect(await screen.findByText("garde mes **etoiles**")).toBeInTheDocument();
+  });
+
+  it("n'execute pas une balise ecrite par le modele", async () => {
+    // Le texte vient d'un modele de langage. React echappe ce qu'il affiche, et ce
+    // test fixe cette propriete plutot que de la supposer.
+    await repondant("Attention <img src=x onerror=alert(1)> ici.");
+
+    expect(document.querySelector(".rich-text img")).toBeNull();
+    expect(screen.getByText(/<img src=x onerror=alert\(1\)>/)).toBeInTheDocument();
+  });
+});
