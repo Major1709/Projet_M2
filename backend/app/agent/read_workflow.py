@@ -325,6 +325,44 @@ PAGE_ALWAYS = (
 # le cout du cas le plus lourd.
 BACKLOG_COMPLETION_TOKENS = 8_192
 
+# Les etapes qu'un cahier des charges demande, quand la question en est un.
+#
+# Meme raisonnement que le budget de jetons juste au-dessus, et meme defaut : quatre
+# etapes conviennent a une reponse de chat et laissent un cahier des charges au bord
+# du precipice. Il faut trouver la maquette, lire son processus, parfois croiser une
+# seconde source, puis rediger le tableau et proposer la page -- et la coupure tombe
+# pendant les lectures, donc l'utilisateur ne recoit rien du tout, pas meme un
+# tableau incomplet qu'il aurait pu corriger.
+#
+# Six et non huit : chaque etape renvoie la transcription entiere, donc le cout croit
+# avec le carre du nombre d'etapes, et une charge Figma est volumineuse. Six est un
+# jugement et non une mesure ; le schema accepte jusqu'a huit si l'appelant les
+# demande.
+#
+# Releve uniquement pour ce type de question. Une question ordinaire garde quatre
+# etapes, parce qu'elle n'a rien a faire de plus.
+BACKLOG_MAX_STEPS = 6
+
+# Les etapes rendues a une question large, quand on vient de lui en demander plus.
+#
+# Mesure sur "Fais-moi le point sur le projet KAN" : quatre etapes, quatre lectures,
+# et plus une seule pour rediger -- la personne recevait "je n'ai pas pu terminer"
+# apres que les deux sources aient ete lues. La meme question repond en cinq etapes.
+#
+# La cause n'est pas la largeur de la question : c'est que le rappel de croisement
+# POUSSE le modele a lire une seconde source, donc a depenser une etape de plus, sans
+# que le budget en tienne compte. Les questions pour lesquelles le croisement a ete
+# construit etaient ainsi les plus exposees a manquer de place.
+#
+# Rendu au moment ou le rappel part, et pas avant : c'est ce rappel qui cree la
+# depense. Une question large que le modele traite d'une seule source ne coute rien de
+# plus et ne recoit rien de plus.
+CROSS_SOURCE_EXTRA_STEPS = 2
+
+# Le plafond que le schema promet deja (``max_steps`` est borne a 8). Les rallonges
+# internes s'y arretent : depasser rendrait la limite annoncee fausse.
+ABSOLUTE_MAX_STEPS = 8
+
 # Le nombre d'etapes, glisse dans le rappel de forme quand on sait le compter.
 #
 # Mesure : sans ce chiffre, le modele rendait deux a huit lignes pour un processus
@@ -1008,8 +1046,10 @@ class AgentReadWorkflow:
         # source and spent its budget there.
         attempted_reads = 0
         last_text = ""
-        # Le rappel de forme n'est injecte qu'une fois par question.
+        # Le rappel de forme n'est injecte qu'une fois par question -- une seule fois
+        # de plus si le processus, lu apres coup, apporte enfin le nombre de lignes.
         backlog_format_recalled = False
+        backlog_rows_recalled = False
         # Les systemes reellement lus, et le rappel de croisement, une seule fois.
         systems_read: set[MCPReadSourceSystem] = set()
         cross_source_recalled = False
@@ -1018,13 +1058,25 @@ class AgentReadWorkflow:
         # titre generique, et mieux encore qu'un titre invente.
         process_file_key: str | None = None
 
-        for step in range(1, question.max_steps + 1):
+        # Le budget reellement accorde. Jamais inferieur a ce que l'appelant demande :
+        # un appelant qui en demande huit les garde.
+        etapes = (
+            max(question.max_steps, BACKLOG_MAX_STEPS)
+            if cahier_des_charges
+            else question.max_steps
+        )
+
+        # Une boucle a borne mobile : le budget peut grandir quand le systeme
+        # lui-meme demande une lecture de plus. Un range l'aurait fige a la creation.
+        step = 0
+        while step < etapes:
+            step += 1
             response = await self._provider.generate(
                 request=LLMRequest(
                     messages=tuple(messages),
                     tools=self._static_catalogue + _frame_catalogue_tool(self._frames),
                     allowed_tool_names=self._allowed_tool_names,
-                    max_steps=question.max_steps,
+                    max_steps=etapes,
                     max_completion_tokens=(
                         max(question.max_completion_tokens, BACKLOG_COMPLETION_TOKENS)
                         if cahier_des_charges
@@ -1162,56 +1214,95 @@ class AgentReadWorkflow:
                             }
                         )
                         cross_source_recalled = True
+                        # On vient de demander une lecture de plus : on en rend les
+                        # moyens. Sans cela le rappel depense une etape et en
+                        # provoque une autre, sur un budget inchange.
+                        etapes = min(
+                            etapes + CROSS_SOURCE_EXTRA_STEPS, ABSOLUTE_MAX_STEPS
+                        )
                 # Le rappel de forme suit immediatement le processus lu, une seule
                 # fois. Le repeter a chaque lecture ferait grossir le fil sans rien
                 # ajouter : c'est sa POSITION -- juste avant la redaction -- qui le
                 # fait suivre, pas le nombre de fois qu'il est dit.
-                if (
-                    record is not None
-                    and call.tool_name == FIGMA_PROCESS_TOOL
-                    and cahier_des_charges
-                ):
-                    cle = call.arguments.get("fileKey")
-                    if isinstance(cle, str) and cle:
-                        process_file_key = cle
-                if (
-                    record is not None
-                    and call.tool_name == FIGMA_PROCESS_TOOL
-                    and not backlog_format_recalled
-                    and cahier_des_charges
-                ):
-                    compte = _step_count(observation)
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": BACKLOG_FORMAT_TURN.format(
-                                lignes_attendues=(
-                                    EXPECTED_ROWS.format(count=compte) if compte else ""
+                if record is not None and cahier_des_charges:
+                    processus = call.tool_name == FIGMA_PROCESS_TOOL
+                    if processus:
+                        cle = call.arguments.get("fileKey")
+                        if isinstance(cle, str) and cle:
+                            process_file_key = cle
+                    # Le nombre de lignes attendu ne se compte que sur un processus.
+                    compte = _step_count(observation) if processus else None
+                    # Le rappel suivait la lecture du processus, et elle seule. Une
+                    # question qui trouvait sa matiere ailleurs -- une page Confluence
+                    # existante, par exemple -- ne le recevait donc jamais, et le
+                    # modele repondait en prose libre : ni tableau a sept colonnes, ni
+                    # page proposee. Constate a l'ecran sur "genere le cahier de charge
+                    # du process access virement par empreinte".
+                    #
+                    # La forme demandee ne depend pas de la source. Le rappel suit donc
+                    # la matiere, d'ou qu'elle vienne.
+                    #
+                    # Redit une seule fois de plus, quand le processus arrive apres coup
+                    # et apporte enfin le compte : le premier rappel ne pouvait pas le
+                    # porter, et c'est lui qui empeche un bloc par etape.
+                    if not backlog_format_recalled or (
+                        compte and not backlog_rows_recalled
+                    ):
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": BACKLOG_FORMAT_TURN.format(
+                                    lignes_attendues=(
+                                        EXPECTED_ROWS.format(count=compte)
+                                        if compte
+                                        else ""
+                                    ),
+                                    page_finale=(
+                                        PAGE_ALWAYS.format(space=self._default_space)
+                                        if self._default_space
+                                        else PAGE_ON_DEMAND
+                                    ),
                                 ),
-                                page_finale=(
-                                    PAGE_ALWAYS.format(space=self._default_space)
-                                    if self._default_space
-                                    else PAGE_ON_DEMAND
-                                ),
-                            ),
-                        }
-                    )
-                    backlog_format_recalled = True
+                            }
+                        )
+                        backlog_format_recalled = True
+                        if compte:
+                            backlog_rows_recalled = True
 
         logger.info(
             "The orchestration loop reached its step limit",
             extra={
                 "correlation_id": question.correlation_id,
-                "max_steps": question.max_steps,
+                "max_steps": etapes,
                 "read_count": len(records),
             },
         )
+        # Le tableau rendu au dernier tour ne doit pas mourir avec la boucle.
+        #
+        # Le rattrapage existait deja pour le modele qui repond sans proposer la page.
+        # Il manquait ici, et le cas est le meme vu du lecteur : le cahier des charges
+        # a ete redige, il est dans le dernier texte, et la seule chose qui manque est
+        # l'appel a l'outil. Le jeter pour cause de budget epuise ferait tout
+        # recommencer -- y compris les lectures qui viennent de l'epuiser.
+        rattrapage = self._page_for(
+            text=last_text,
+            wanted=cahier_des_charges,
+            file_key=process_file_key,
+        )
+        if rattrapage is not None:
+            return await self._propose(
+                call=rattrapage,
+                question=question,
+                context=context,
+                step=etapes,
+                records=records,
+            )
         return AgentAnswer(
             # Never empty: an interruption the caller cannot see is indistinguishable
             # from an assistant that had nothing to say.
             text=last_text or STEP_LIMIT_MESSAGE,
             stop_reason=AgentStopReason.STEP_LIMIT_REACHED,
-            steps_used=question.max_steps,
+            steps_used=etapes,
             sources=sources_from(tuple(records)),
         )
 
@@ -1858,6 +1949,8 @@ __all__ = [
     "DEFAULT_PAGE_TURN",
     "BACKLOG_FORMAT_TURN",
     "BACKLOG_MARKERS",
+    "BACKLOG_MAX_STEPS",
+    "CROSS_SOURCE_EXTRA_STEPS",
     "DEFAULT_MAX_READS_PER_QUESTION",
     "DEFAULT_MAX_STEPS",
     "EMPTY_ANSWER_MESSAGE",

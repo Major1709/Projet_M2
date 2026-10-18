@@ -2,6 +2,7 @@ from typing import Annotated, Final
 
 from fastapi import APIRouter, Cookie, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, ConfigDict
 
 from app.auth.errors import SignInDisabled, SignInError
 from app.auth.workflow import AtlassianSignIn
@@ -130,3 +131,50 @@ def sign_out(
     if session_token and store is not None:
         store.revoke(session_token_hash(session_token))
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+
+
+class SignedInAccount(BaseModel):
+    """Ce qu'une interface peut dire de la personne connectee.
+
+    Volontairement minimal : le nom d'affichage, et rien d'autre. L'identifiant de
+    compte n'y figure pas -- l'ecran n'en a pas besoin, et un identifiant rendu a un
+    script est un identifiant qui finit dans un journal de navigateur.
+
+    ``display_name`` peut etre nul : session ouverte avant que ce champ existe, ou
+    fournisseur qui ne l'a pas donne. L'interface retombe alors sur une icone
+    neutre, ce qui vaut mieux qu'une initiale inventee.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    display_name: str | None = None
+
+
+@router.get(
+    "/me",
+    response_model=SignedInAccount,
+    responses=responses_for((), (status.HTTP_401_UNAUTHORIZED, "IDENTITY_REQUIRED")),
+)
+def signed_in_account(
+    request: Request,
+    session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
+) -> SignedInAccount:
+    """Qui est connecte, pour que l'ecran puisse la nommer.
+
+    Sans session valable, 401 : la meme reponse qu'une absence de cookie et qu'une
+    session expiree. Distinguer les deux dirait a un appelant qu'un jeton qu'il ne
+    possede peut-etre pas a bien existe.
+    """
+
+    store = getattr(request.app.state.container, "sessions", None)
+    session = (
+        store.get_by_token_hash(session_token_hash(session_token))
+        if session_token and store is not None
+        else None
+    )
+    if session is None or not session.is_active():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "IDENTITY_REQUIRED", "message": "Sign in first"},
+        )
+    return SignedInAccount(display_name=session.display_name)

@@ -48,8 +48,19 @@ def anyio_backend() -> str:
 class Recorder:
     """A transport standing in for Atlassian, remembering what it was sent."""
 
-    def __init__(self, *, token_status: int = 200, resources: object | None = None):
+    def __init__(
+        self,
+        *,
+        token_status: int = 200,
+        resources: object | None = None,
+        me: dict[str, object] | None = None,
+    ):
         self.token_status = token_status
+        # Ce que /me rend. Par defaut la forme reelle, nom compris : un double plus
+        # pauvre que la realite aurait laisse passer un nom jamais lu.
+        self.me: dict[str, object] = (
+            {"account_id": ACCOUNT, "name": "Fanny Andrianaly"} if me is None else me
+        )
         self.resources = (
             [{"id": CLOUD_ID, "url": SITE_URL}] if resources is None else resources
         )
@@ -77,7 +88,7 @@ class Recorder:
             if url == ATLASSIAN_ACCESSIBLE_RESOURCES:
                 return httpx2.Response(200, json=self.resources)
             if url == ATLASSIAN_ME_ENDPOINT:
-                return httpx2.Response(200, json={"account_id": ACCOUNT})
+                return httpx2.Response(200, json=self.me)
             return httpx2.Response(404)
 
         return httpx2.MockTransport(handle)
@@ -632,3 +643,77 @@ async def test_two_genuinely_different_sites_are_still_refused() -> None:
 
     with pytest.raises(AmbiguousSiteGrant):
         await sign_in.complete(code="code-1", state=state)
+
+
+# --- Le nom d'affichage, pour que l'ecran puisse nommer la personne ----------------
+#
+# L'avatar affichait un "U" en dur. Le nom existait chez le fournisseur -- /me le rend
+# a cote de l'identifiant de compte -- et il etait jete a la lecture.
+#
+# Il reste facultatif partout : l'identite tient a l'identifiant de compte. Un nom
+# absent doit priver l'ecran d'une initiale, jamais empecher de se connecter.
+
+
+@pytest.mark.anyio
+async def test_the_display_name_is_kept_with_the_session() -> None:
+    recorder = Recorder()
+    sessions = InMemorySessionStore()
+    sign_in = sign_in_for(recorder, sessions=sessions)
+    _, state = redeem(sign_in)
+
+    token = await sign_in.complete(code="code-1", state=state)
+
+    session = sessions.get_by_token_hash(session_token_hash(token))
+    assert session is not None
+    assert session.display_name == "Fanny Andrianaly"
+
+
+@pytest.mark.anyio
+async def test_a_provider_without_a_name_still_signs_in() -> None:
+    recorder = Recorder(me={"account_id": ACCOUNT})
+    sessions = InMemorySessionStore()
+    sign_in = sign_in_for(recorder, sessions=sessions)
+    _, state = redeem(sign_in)
+
+    token = await sign_in.complete(code="code-1", state=state)
+
+    session = sessions.get_by_token_hash(session_token_hash(token))
+    assert session is not None
+    assert session.display_name is None
+    # L'identite, elle, est intacte.
+    assert session.user_id == ACCOUNT
+
+
+@pytest.mark.anyio
+async def test_a_blank_name_counts_as_no_name() -> None:
+    """Un nom fait d'espaces donnerait une initiale vide -- une pastille muette que
+    personne ne saurait interpreter."""
+
+    recorder = Recorder(me={"account_id": ACCOUNT, "name": "   "})
+    sessions = InMemorySessionStore()
+    sign_in = sign_in_for(recorder, sessions=sessions)
+    _, state = redeem(sign_in)
+
+    token = await sign_in.complete(code="code-1", state=state)
+
+    session = sessions.get_by_token_hash(session_token_hash(token))
+    assert session is not None
+    assert session.display_name is None
+
+
+@pytest.mark.anyio
+async def test_an_absurdly_long_name_is_truncated_rather_than_refused() -> None:
+    """Il vient du fournisseur et n'est qu'un libelle d'affichage. Echouer une
+    connexion pour un nom trop long serait absurde."""
+
+    recorder = Recorder(me={"account_id": ACCOUNT, "name": "N" * 500})
+    sessions = InMemorySessionStore()
+    sign_in = sign_in_for(recorder, sessions=sessions)
+    _, state = redeem(sign_in)
+
+    token = await sign_in.complete(code="code-1", state=state)
+
+    session = sessions.get_by_token_hash(session_token_hash(token))
+    assert session is not None
+    assert session.display_name is not None
+    assert len(session.display_name) == 200

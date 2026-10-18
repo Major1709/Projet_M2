@@ -12,10 +12,14 @@ import {
 import {
   NexiaApiError,
   type NexiaAnswer,
+  type NexiaAuditEvent,
   type NexiaGateway,
   nexiaApi,
 } from "@/adapters/nexia-api";
 import { MutationApprovalPreview } from "@/ui/MutationApprovalPreview";
+
+import { labelOf, momentOf, targetOf } from "./audit-history";
+import { initialOf } from "./initial";
 
 type ChatMessage =
   | { id: string; role: "user"; text: string }
@@ -100,6 +104,14 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
   const [profileOpen, setProfileOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Le nom de la personne connectee. `null` tant qu'on ne le sait pas, et aussi
+  // quand il n'y en a pas : dans les deux cas l'avatar reste neutre.
+  const [signedInName, setSignedInName] = useState<string | null>(null);
+  // L'historique, charge a l'ouverture du dialogue et pas avant : personne ne paie
+  // une requete pour une fenetre qu'il n'ouvrira peut-etre jamais.
+  const [historyEvents, setHistoryEvents] = useState<NexiaAuditEvent[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   const profileButtonRef = useRef<HTMLButtonElement>(null);
   const profileMenuRef = useRef<HTMLDivElement>(null);
@@ -107,6 +119,53 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const dialogCloseRef = useRef<HTMLButtonElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Demande une fois, au montage. Le nom ne change pas pendant une session, et le
+  // redemander a chaque rendu ferait un appel reseau par frappe au clavier.
+  useEffect(() => {
+    let abandonne = false;
+    gateway
+      .fetchSignedInName()
+      .then((nom) => {
+        if (!abandonne) setSignedInName(nom);
+      })
+      // Sans nom, l'avatar reste neutre. Une pastille d'avatar ne vaut pas une
+      // banniere d'erreur, et la conversation dira bien assez tot qu'il faut se
+      // reconnecter.
+      .catch(() => undefined);
+    return () => {
+      abandonne = true;
+    };
+  }, [gateway]);
+
+  /**
+   * Ouvrir l'historique, et le charger.
+   *
+   * Dans le gestionnaire et non dans un effet : ouvrir est un evenement, pas une
+   * synchronisation avec un systeme exterieur. Recharge a chaque ouverture -- entre
+   * deux, la personne a pu approuver une ecriture, et une liste figee la lui
+   * cacherait.
+   */
+  async function openHistory() {
+    setProfileOpen(false);
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      setHistoryEvents(await gateway.fetchAuditEvents());
+    } catch (caught) {
+      // Dit, et non avale. Une liste vide en cas de panne se lirait "rien ne s'est
+      // passe" -- un mensonge sur une piste d'audit.
+      setHistoryEvents(null);
+      setHistoryError(
+        caught instanceof NexiaApiError
+          ? caught.message
+          : "L’historique n’a pas pu être chargé.",
+      );
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
 
   const hasConversation = messages.length > 0;
   const normalizedQuestion = question.trim();
@@ -280,20 +339,19 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
             aria-controls="profile-menu"
             onClick={() => setProfileOpen((open) => !open)}
           >
-            <span aria-hidden="true">U</span>
+            <span aria-hidden="true">{initialOf(signedInName)}</span>
           </button>
 
           {profileOpen ? (
             <div ref={profileMenuRef} id="profile-menu" className="profile__menu" role="menu">
-              <p className="profile__identity" role="presentation">Profil utilisateur</p>
+              <p className="profile__identity" role="presentation">
+                {signedInName ?? "Profil utilisateur"}
+              </p>
               <button
                 ref={historyMenuItemRef}
                 type="button"
                 role="menuitem"
-                onClick={() => {
-                  setProfileOpen(false);
-                  setHistoryOpen(true);
-                }}
+                onClick={openHistory}
               >
                 Historique des changements
               </button>
@@ -330,7 +388,7 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
                 className={`message-row message-row--${message.role}`}
               >
                 <div className={`message-avatar message-avatar--${message.role}`} aria-hidden="true">
-                  {message.role === "user" ? "U" : <NexiaOrb />}
+                  {message.role === "user" ? initialOf(signedInName) : <NexiaOrb />}
                 </div>
                 <div
                   className={`message-content ${
@@ -518,7 +576,34 @@ export function NexiaChat({ gateway = nexiaApi }: NexiaChatProps) {
               ×
             </button>
             <h2 id="history-title">Historique des changements</h2>
-            <p className="history-dialog__empty">L’historique n’est pas encore disponible.</p>
+            {historyLoading ? (
+              <p className="history-dialog__empty">Chargement de l’historique…</p>
+            ) : historyError ? (
+              <p className="history-dialog__error" role="alert">{historyError}</p>
+            ) : historyEvents && historyEvents.length > 0 ? (
+              <ul className="history-list">
+                {historyEvents.map((evenement) => (
+                  <li key={evenement.id} className="history-entry">
+                    <span className="history-entry__label">{labelOf(evenement.eventType)}</span>
+                    <time className="history-entry__moment" dateTime={evenement.occurredAt}>
+                      {momentOf(evenement.occurredAt)}
+                    </time>
+                    {targetOf(evenement) ? (
+                      <span className="history-entry__target">{targetOf(evenement)}</span>
+                    ) : null}
+                    {evenement.externalIds.length > 0 ? (
+                      <span className="history-entry__ids">
+                        {evenement.externalIds.join(", ")}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              /* Rien ne s'est encore passe. C'est un etat normal, et le dire
+                 autrement ferait chercher une panne la ou il n'y en a pas. */
+              <p className="history-dialog__empty">Aucun changement enregistré pour l’instant.</p>
+            )}
           </section>
         </div>
       ) : null}

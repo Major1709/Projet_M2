@@ -37,6 +37,7 @@ def signed_in(
     *,
     tenant_id: str = "tenant-a",
     user_id: str = "owner",
+    display_name: str | None = None,
     lifetime: timedelta = timedelta(hours=12),
 ) -> str:
     token = new_session_token()
@@ -45,6 +46,7 @@ def signed_in(
             token_hash=session_token_hash(token),
             tenant_id=tenant_id,
             user_id=user_id,
+            display_name=display_name,
             expires_at=utc_now() + lifetime,
         )
     )
@@ -191,3 +193,66 @@ def test_an_unimplemented_mode_still_fails_the_request() -> None:
 
     assert response.status_code == 500
     assert response.json()["detail"]["code"] == "IDENTITY_MODE_UNSUPPORTED"
+
+
+# --- Qui est connecte, pour que l'ecran puisse la nommer ---------------------------
+
+ME = "/api/auth/atlassian/me"
+
+
+def test_the_signed_in_name_is_served_to_the_interface() -> None:
+    app, container = app_for(SESSION_MODE)
+    token = signed_in(container, display_name="Fanny Andrianaly")
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE_NAME, token)
+
+    response = client.get(ME)
+
+    assert response.status_code == 200
+    assert response.json() == {"display_name": "Fanny Andrianaly"}
+
+
+def test_a_session_without_a_name_says_so_rather_than_inventing_one() -> None:
+    """Une session ouverte avant que ce champ existe. Rendre l'identifiant de compte
+    a sa place afficherait une initiale qui n'est celle de personne."""
+
+    app, container = app_for(SESSION_MODE)
+    token = signed_in(container)
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE_NAME, token)
+
+    response = client.get(ME)
+
+    assert response.status_code == 200
+    assert response.json() == {"display_name": None}
+
+
+def test_the_account_identifier_never_leaves_the_server() -> None:
+    """L'ecran n'en a pas besoin, et un identifiant rendu a un script est un
+    identifiant qui finit dans un journal de navigateur."""
+
+    app, container = app_for(SESSION_MODE)
+    token = signed_in(container, user_id="5f8a:abc-account", display_name="Fanny")
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE_NAME, token)
+
+    corps = client.get(ME).text
+
+    assert "5f8a" not in corps
+
+
+def test_no_session_no_name() -> None:
+    app, _ = app_for(SESSION_MODE)
+
+    response = TestClient(app).get(ME)
+
+    assert response.status_code == 401
+
+
+def test_an_expired_session_is_refused_like_an_absent_one() -> None:
+    app, container = app_for(SESSION_MODE)
+    token = signed_in(container, display_name="Fanny", lifetime=timedelta(hours=-1))
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE_NAME, token)
+
+    assert client.get(ME).status_code == 401

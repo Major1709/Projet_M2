@@ -14,8 +14,11 @@ from app.approvals.adapters.memory import InMemoryApprovalUnitOfWork
 from app.approvals.adapters.postgres import PostgresApprovalUnitOfWorkFactory
 from app.approvals.adapters.tool_pin import NoMutationToolsPin, RegistryMutationToolPin
 from app.approvals.workflow import ApprovalWorkflow
-from app.audit.adapters.postgres import PostgresAppendOnlyAuditWriter
-from app.audit.ports import AuditSink
+from app.audit.adapters.postgres import (
+    PostgresAppendOnlyAuditWriter,
+    PostgresAuditTrail,
+)
+from app.audit.ports import AuditSink, AuditTrail
 from app.auth.adapters.memory import (
     InMemoryDelegatedGrantSink,
     InMemoryPendingAuthorizationStore,
@@ -76,6 +79,9 @@ class ApplicationContainer:
 
     approvals: ApprovalWorkflow
     audit: AuditSink | None
+    # La piste relue, separee de l'ecriture : le sink est passe a tout ce qui trace,
+    # et aucun de ces appelants n'a besoin de parcourir la piste des autres.
+    audit_trail: AuditTrail | None
     conversations: ConversationWorkflow
     mcp_reads: MCPReadWorkflow
     readiness_probe: Callable[[], bool]
@@ -120,6 +126,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
         return ApplicationContainer(
             approvals=approvals,
             audit=approval_uow_factory.audit,
+            audit_trail=approval_uow_factory.audit,
             conversations=ConversationWorkflow(conversation_repository, message_repository),
             mcp_reads=mcp_reads,
             agent=_build_agent(
@@ -152,6 +159,7 @@ def build_container(settings: Settings) -> ApplicationContainer:
     return ApplicationContainer(
         approvals=approvals,
         audit=audit_writer,
+        audit_trail=PostgresAuditTrail(session_factory),
         conversations=ConversationWorkflow(conversation_repository, message_repository),
         mcp_reads=mcp_reads,
         agent=_build_agent(settings, audit_writer, mcp_reads, semantic_index, approvals),

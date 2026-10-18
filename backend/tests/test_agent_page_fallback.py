@@ -233,3 +233,73 @@ def test_the_model_calling_the_tool_itself_still_wins() -> None:
 
     assert answer.approval is not None
     assert answer.approval.payload["title"] == "Ecrit par le modele"
+
+
+# --- Le budget d'etapes, et ce qui survit quand il s'epuise -------------------------
+#
+# Signale par l'utilisateur, texte a l'appui : "Je n'ai pas pu terminer : le nombre
+# d'etapes autorisees pour cette question a ete atteint avant que je puisse repondre."
+#
+# Quatre etapes conviennent a une reponse de chat. Un cahier des charges doit trouver
+# la maquette, lire son processus, parfois croiser une seconde source, puis rediger le
+# tableau et proposer la page. La coupure tombait pendant les lectures : l'utilisateur
+# ne recevait rien, pas meme un tableau incomplet qu'il aurait pu corriger.
+
+
+def quatre_lectures():
+    """Quatre tours de lecture, soit tout l'ancien budget, avant la redaction."""
+
+    return (
+        reading_process(call_id="c1"),
+        reading_process(file_key="j21uCB2ha6BHMYk8WJ1ovp", call_id="c2"),
+        reading_process(file_key="m95YuCOAJ9xSxmzn5whVkX", call_id="c3"),
+        reading_process(file_key="UVQmgXGaZC5vrtaQRU5nvo", call_id="c4"),
+    )
+
+
+def test_a_specification_is_given_more_steps_than_a_chat_answer() -> None:
+    provider = ScriptedProvider(*quatre_lectures(), answered(TABLEAU))
+    agent = agent_with_space(provider, "DL")
+
+    answer = ask(agent, question=DEMANDE)
+
+    # La cinquieme etape a eu lieu, et elle a porte le tableau.
+    assert len(provider.requests) == 5
+    assert answer.approval is not None
+    assert answer.approval.payload["body"] == TABLEAU
+
+
+def test_an_ordinary_question_keeps_its_four_steps() -> None:
+    """Le relevement ne vaut que pour ce type de question. Chaque etape renvoie la
+    transcription entiere, donc elargir pour tout le monde couterait a tout le monde."""
+
+    provider = ScriptedProvider(*quatre_lectures(), answered("Voici."))
+    agent = agent_with_space(provider, "DL")
+
+    answer = ask(agent, question="Resume-moi ce processus.")
+
+    assert answer.stop_reason is AgentStopReason.STEP_LIMIT_REACHED
+    assert len(provider.requests) == 4
+
+
+def test_the_table_of_the_last_turn_survives_the_step_limit() -> None:
+    """Le tableau redige au dernier tour ne doit pas mourir avec la boucle.
+
+    Le modele a tout fait sauf appeler l'outil. Jeter le tableau pour cause de budget
+    epuise ferait tout recommencer -- y compris les lectures qui viennent de l'epuiser.
+    """
+
+    dernier_tour = reading_process(call_id="c6").model_copy(update={"text": TABLEAU})
+    provider = ScriptedProvider(
+        *quatre_lectures(),
+        reading_process(file_key="j21uCB2ha6BHMYk8WJ1ovp", call_id="c5"),
+        dernier_tour,
+    )
+    agent = agent_with_space(provider, "DL")
+
+    answer = ask(agent, question=DEMANDE)
+
+    assert len(provider.requests) == 6
+    assert answer.stop_reason is AgentStopReason.APPROVAL_REQUIRED
+    assert answer.approval is not None
+    assert answer.approval.payload["body"] == TABLEAU

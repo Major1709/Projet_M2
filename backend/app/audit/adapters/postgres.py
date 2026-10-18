@@ -1,4 +1,4 @@
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.audit.domain import AuditEvent
@@ -35,3 +35,31 @@ class PostgresAppendOnlyAuditWriter:
     def append(self, event: AuditEvent) -> None:
         with self._session_factory.begin() as session:
             PostgresAuditSink(session).append(event)
+
+
+class PostgresAuditTrail:
+    """Relit la piste, bornee au tenant de la session.
+
+    Sa propre classe plutot qu'une methode de plus sur l'ecrivain : le sink est
+    passe au chemin de lecture, a l'atelier d'approbation et au fournisseur de
+    modele, et aucun d'eux n'a besoin de parcourir la piste. Separer, c'est refuser
+    a chacun un pouvoir qu'il n'utilise pas.
+    """
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._session_factory = session_factory
+
+    def recent(
+        self,
+        *,
+        tenant_id: str,
+        event_types: tuple[str, ...],
+        limit: int,
+    ) -> tuple[AuditEvent, ...]:
+        statement = select(audit_events).where(audit_events.c.tenant_id == tenant_id)
+        if event_types:
+            statement = statement.where(audit_events.c.event_type.in_(event_types))
+        statement = statement.order_by(audit_events.c.occurred_at.desc()).limit(limit)
+        with self._session_factory() as session:
+            lignes = session.execute(statement).mappings().all()
+        return tuple(AuditEvent.model_validate(dict(ligne)) for ligne in lignes)

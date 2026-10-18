@@ -535,3 +535,93 @@ def test_both_endings_refuse_a_body_that_only_announces_the_table() -> None:
     for fin in (PAGE_ALWAYS, PAGE_ON_DEMAND):
         assert "fait approuver une page vide" in fin
         assert "markdown" in fin
+
+
+# --- Le rappel suit la matiere, et non sa source -----------------------------------
+#
+# Constate a l'ecran sur "genere le cahier de charge du process access virement par
+# empreinte" : le modele a trouve une page Confluence existante, l'a resumee en prose
+# libre, et s'est arrete la. Ni tableau a sept colonnes, ni page proposee.
+#
+# Le rappel de forme ne suivait que la lecture d'un processus Figma. Une question qui
+# trouvait sa matiere ailleurs ne le recevait donc jamais -- et le rattrapage ne
+# pouvait rien rattraper, puisqu'il ne propose une page que sur un vrai tableau.
+
+
+def confluence_reads(text: str = '{"title": "Cahier des charges - ACCESA"}'):
+    workflow, _, _ = workflow_for(
+        SourceSystem.CONFLUENCE,
+        "getConfluencePage",
+        result=RemoteToolResult(
+            content=(RemoteContentBlock(kind="text", text=text),),
+            structured_content=None,
+        ),
+    )
+    return workflow
+
+
+def reading_page(page_id: str = "12345", **changes: Any):
+    return proposing("getConfluencePage", {"pageId": page_id}, **changes)
+
+
+def rappels_de_forme(provider: ScriptedProvider) -> list[str]:
+    return [
+        str(m["content"])
+        for m in provider.requests[-1].messages
+        if m["role"] == "system" and "Bloc fonctionnel" in str(m["content"])
+    ]
+
+
+def test_the_format_is_recalled_after_confluence_material_too() -> None:
+    provider = ScriptedProvider(reading_page(), answered("| ... |"))
+    agent = agent_for(provider, confluence_reads())
+
+    ask(agent, question=DEMANDE)
+
+    assert len(rappels_de_forme(provider)) == 1
+
+
+def test_no_format_is_recalled_for_a_question_that_asked_for_none() -> None:
+    """Le rappel suit la demande, jamais la seule presence d'une lecture."""
+
+    provider = ScriptedProvider(reading_page(), answered("Voici la page."))
+    agent = agent_for(provider, confluence_reads())
+
+    ask(agent, question="Resume-moi cette page.")
+
+    assert rappels_de_forme(provider) == []
+
+
+class ReadsBySourceTool:
+    """Un chemin de lecture qui sert deux outils, faute de pouvoir en servir deux
+    avec le double d'origine -- une question peut legitimement toucher deux sources."""
+
+    def __init__(self, default: Any, **by_tool: Any) -> None:
+        self.default = default
+        self.by_tool = by_tool
+
+    async def execute_call(self, *, call: Any, context: Any) -> Any:
+        cible = self.by_tool.get(call.tool_name, self.default)
+        return await cible.execute_call(call=call, context=context)
+
+
+def test_the_expected_row_count_still_arrives_when_the_process_is_read_later() -> None:
+    """Le premier rappel ne pouvait pas porter le compte : aucune etape n'avait
+    encore ete lue. Il est redit une fois, quand le processus l'apporte enfin --
+    c'est ce nombre qui empeche un bloc par etape."""
+
+    provider = ScriptedProvider(
+        reading_page(),
+        reading_process(call_id="call_2"),
+        answered("| ... |"),
+    )
+    agent = agent_for(
+        provider,
+        ReadsBySourceTool(process_reads(), getConfluencePage=confluence_reads()),
+    )
+
+    ask(agent, question=DEMANDE)
+
+    rappels = rappels_de_forme(provider)
+    assert len(rappels) == 2
+    assert "3" in rappels[-1]

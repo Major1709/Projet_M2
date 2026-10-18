@@ -89,13 +89,13 @@ class AtlassianSignIn:
             access_token,
             expected_cloud_id=self._expected_cloud_id,
         )
-        account_id = await self._client.account_id(access_token)
+        account = await self._client.account(access_token)
 
         expires_in = document.get("expires_in")
         self._grants.store(
             DelegatedCredentials(
                 tenant_id=site.cloud_id,
-                user_id=account_id,
+                user_id=account.account_id,
                 access_token=access_token,
                 refresh_token=str(document["refresh_token"]),
                 # An absent lifetime counts as expired: the next call renews rather
@@ -111,7 +111,8 @@ class AtlassianSignIn:
             Session(
                 token_hash=session_token_hash(token),
                 tenant_id=site.cloud_id,
-                user_id=account_id,
+                user_id=account.account_id,
+                display_name=account.display_name,
                 expires_at=utc_now() + self._session_lifetime,
             )
         )
