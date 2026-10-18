@@ -76,6 +76,12 @@ export type NexiaAuditEvent = {
   /** Ce que l'action touchait, joint depuis la proposition cote serveur. */
   resourceTitle?: string;
   resourceType?: string;
+  /** Qui a agi. Absent quand la personne ne s'est jamais connectee depuis que les
+   *  noms sont conserves -- l'action s'affiche alors sans attribution. */
+  actorName?: string;
+  /** Tranche par le serveur, qui compare des identifiants : deux personnes peuvent
+   *  porter le meme nom. */
+  byYou: boolean;
 };
 
 export type NexiaActionTarget = {
@@ -724,6 +730,10 @@ export async function fetchAuditEvents(limit = 50): Promise<NexiaAuditEvent[]> {
       ...(firstString(row.action_class, row.actionClass)
         ? { actionClass: firstString(row.action_class, row.actionClass)! }
         : {}),
+      ...(firstString(row.actor_name, row.actorName)
+        ? { actorName: firstString(row.actor_name, row.actorName)! }
+        : {}),
+      byYou: row.by_you === true || row.byYou === true,
       ...(firstString(row.resource_title, row.resourceTitle)
         ? { resourceTitle: firstString(row.resource_title, row.resourceTitle)! }
         : {}),

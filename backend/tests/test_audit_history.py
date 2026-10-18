@@ -225,3 +225,72 @@ def test_an_empty_history_is_an_empty_list_and_not_an_error() -> None:
 
     assert reponse.status_code == 200
     assert reponse.json() == {"events": []}
+
+
+# --- Qui a agi ---------------------------------------------------------------------
+#
+# L'historique disait ce qui s'etait passe, jamais par qui. Sur un outil qui ecrit
+# dans Jira et Confluence AU NOM de quelqu'un, c'est la question qu'on se pose en
+# second, juste apres "qu'est-ce qui a ete ecrit".
+#
+# La piste n'enregistre que l'identifiant de compte, opaque et sans interet a
+# l'ecran. Le nom est resolu a la lecture depuis les sessions, ou la connexion l'a
+# depose -- ce qui le rend disponible pour tout l'historique deja enregistre.
+
+
+def test_the_history_says_who_acted() -> None:
+    app, container = app_for()
+    token = signed_in(container)
+    wrote(container)
+
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE_NAME, token)
+    evenement = client.get(EVENTS).json()["events"][0]
+
+    # Le puits en memoire ne connait pas les sessions : le nom est absent, et
+    # l'action s'affiche sans attribution plutot qu'avec une attribution inventee.
+    assert evenement["actor_name"] is None
+    # En revanche, "c'est vous" se tranche par comparaison d'identifiants.
+    assert evenement["by_you"] is True
+
+
+def test_an_action_by_someone_else_is_not_attributed_to_you() -> None:
+    """La confusion serait grave : approuver une ecriture engage une personne."""
+
+    app, container = app_for()
+    token = signed_in(container)
+    event = AuditEvent(
+        event_type=AuditEventType.ACTION_APPROVED,
+        tenant_id=TENANT,
+        actor_user_id="quelqu-un-d-autre",
+        correlation_id="corr-1",
+        details={},
+    )
+    container.audit.append(event)
+
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE_NAME, token)
+
+    assert client.get(EVENTS).json()["events"][0]["by_you"] is False
+
+
+def test_the_account_identifier_is_still_not_served() -> None:
+    """Le nom entre a l'ecran, l'identifiant non. Les deux decisions sont
+    independantes, et la seconde ne doit pas tomber avec la premiere."""
+
+    app, container = app_for()
+    token = signed_in(container)
+    container.audit.append(
+        AuditEvent(
+            event_type=AuditEventType.ACTION_APPROVED,
+            tenant_id=TENANT,
+            actor_user_id="712020:abc-compte-secret",
+            correlation_id="corr-1",
+            details={},
+        )
+    )
+
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE_NAME, token)
+
+    assert "abc-compte-secret" not in client.get(EVENTS).text

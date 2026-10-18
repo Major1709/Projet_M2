@@ -368,6 +368,7 @@ describe("L'historique des changements", () => {
     sourceSystem: "jira",
     actionClass: "CREATE",
     externalIds: ["KAN-42"],
+    byYou: true,
   };
 
   async function ouvrirHistorique(gateway: ReturnType<typeof createGateway>) {

@@ -81,3 +81,14 @@ class AuditChange(BaseModel):
     event: AuditEvent
     resource_title: str | None = None
     resource_type: str | None = None
+    # Le nom de la personne qui a agi, quand il est connu.
+    #
+    # La piste n'enregistre que son identifiant de compte, qui est opaque et n'a
+    # rien a faire a l'ecran. Le nom est resolu a la lecture depuis les sessions,
+    # ou la connexion l'a depose -- ce qui le rend disponible pour tout l'historique
+    # deja enregistre, et pas seulement pour la suite.
+    #
+    # Facultatif : une personne qui ne s'est jamais connectee depuis que les noms
+    # sont conservees n'en a pas. L'action s'affiche alors sans attribution, ce qui
+    # est la verite -- l'inventer serait attribuer un acte a quelqu'un.
+    actor_name: str | None = None

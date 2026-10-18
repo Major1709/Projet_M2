@@ -10,6 +10,7 @@ function evenement(changes: Partial<NexiaAuditEvent> = {}): NexiaAuditEvent {
     eventType: "MUTATION_EXECUTED",
     occurredAt: "2026-09-27T14:30:00Z",
     externalIds: [],
+    byYou: true,
     ...changes,
   };
 }
@@ -135,5 +136,55 @@ describe("describe", () => {
         }),
       ),
     ).toBe("L'écriture de « CDCF K20 » a échoué");
+  });
+});
+
+describe("l'auteur de la decision", () => {
+  /**
+   * Sur un outil qui ecrit dans Jira et Confluence AU NOM de quelqu'un, savoir qui a
+   * approuve est la question qui vient juste apres "qu'est-ce qui a ete ecrit".
+   */
+
+  const APPROBATION = {
+    eventType: "ACTION_APPROVED",
+    resourceTitle: "CDCF K20",
+    resourceType: "page",
+    sourceSystem: "confluence",
+    actionClass: "CREATE",
+  };
+
+  it("dit « Vous » pour la personne qui regarde", () => {
+    expect(decrire(evenement({ ...APPROBATION, byYou: true }))).toBe(
+      "Vous avez approuvé « CDCF K20 »",
+    );
+  });
+
+  it("nomme quelqu'un d'autre", () => {
+    expect(
+      decrire(evenement({ ...APPROBATION, byYou: false, actorName: "Fanny Andrianaly" })),
+    ).toBe("Fanny Andrianaly a approuvé « CDCF K20 »");
+  });
+
+  it("raconte sans sujet quand l'auteur est inconnu", () => {
+    // Attribuer une ecriture a quelqu'un est precisement ce qu'un historique ne doit
+    // pas faire a la legere.
+    expect(decrire(evenement({ ...APPROBATION, byYou: false }))).toBe(
+      "Approuvé : « CDCF K20 »",
+    );
+  });
+
+  it("accorde le verbe a l'auteur", () => {
+    const refus = { ...APPROBATION, eventType: "ACTION_REJECTED" };
+
+    expect(decrire(evenement({ ...refus, byYou: true }))).toContain("Vous avez refusé");
+    expect(decrire(evenement({ ...refus, byYou: false, actorName: "Paul" }))).toContain(
+      "Paul a refusé",
+    );
+  });
+
+  it("garde la precision d'une correction", () => {
+    expect(
+      decrire(evenement({ ...APPROBATION, eventType: "ACTION_REVISED", byYou: true })),
+    ).toBe("Vous avez corrigé « CDCF K20 » avant écriture");
   });
 });

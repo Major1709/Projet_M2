@@ -60,6 +60,14 @@ class AuditEventView(BaseModel):
     # ne dit que la nature de l'evenement -- "ecrite" -- et jamais ce qui l'a ete.
     resource_title: str | None = None
     resource_type: str | None = None
+    # Qui a agi. Le nom, jamais l'identifiant de compte : l'ecran n'a pas besoin du
+    # second, et un identifiant rendu a un script finit dans un journal de
+    # navigateur.
+    actor_name: str | None = None
+    # L'action est-elle celle de la personne qui regarde ? Calcule ici, par
+    # comparaison des identifiants, pour que l'interface n'ait pas a rapprocher deux
+    # noms -- deux personnes peuvent porter le meme.
+    by_you: bool = False
 
 
 class AuditPage(BaseModel):
@@ -73,7 +81,7 @@ def _text(details: dict[str, Any], key: str) -> str | None:
     return str(value) if isinstance(value, str | int) and str(value) else None
 
 
-def _view(change: AuditChange) -> AuditEventView:
+def _view(change: AuditChange, viewer_user_id: str = "") -> AuditEventView:
     event = change.event
     details = event.model_dump(mode="json").get("details") or {}
     if not isinstance(details, dict):
@@ -94,6 +102,8 @@ def _view(change: AuditChange) -> AuditEventView:
         ),
         resource_title=change.resource_title,
         resource_type=change.resource_type,
+        actor_name=change.actor_name,
+        by_you=bool(viewer_user_id) and event.actor_user_id == viewer_user_id,
     )
 
 
@@ -130,4 +140,6 @@ def recent_changes(
         event_types=CHANGE_EVENTS,
         limit=limit,
     )
-    return AuditPage(events=tuple(_view(change) for change in evenements))
+    return AuditPage(
+        events=tuple(_view(change, context.user_id) for change in evenements)
+    )

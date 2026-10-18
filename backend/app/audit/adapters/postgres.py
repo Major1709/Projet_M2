@@ -2,7 +2,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.audit.domain import AuditChange, AuditEvent
-from app.persistence.schema import action_proposals, audit_events
+from app.persistence.schema import action_proposals, audit_events, sessions
 
 
 class PostgresAuditSink:
@@ -89,6 +89,7 @@ class PostgresAuditTrail:
         statement = statement.order_by(audit_events.c.occurred_at.desc()).limit(limit)
         with self._session_factory() as session:
             lignes = session.execute(statement).mappings().all()
+        noms = self._actor_names(tenant_id, {ligne["actor_user_id"] for ligne in lignes})
         return tuple(
             AuditChange(
                 event=AuditEvent.model_validate(
@@ -100,6 +101,34 @@ class PostgresAuditTrail:
                 ),
                 resource_title=ligne["resource_title"],
                 resource_type=ligne["resource_type"],
+                actor_name=noms.get(ligne["actor_user_id"]),
             )
             for ligne in lignes
         )
+
+    def _actor_names(self, tenant_id: str, user_ids: set[str]) -> dict[str, str]:
+        """Les noms des personnes qui ont agi, lus dans leurs sessions.
+
+        Une requete a part plutot qu'une jointure de plus : une personne a plusieurs
+        sessions, et joindre en multiplierait les lignes d'historique. La plus
+        recente qui porte un nom l'emporte -- une session ouverte avant que le nom
+        soit conserve n'en a pas, et ne doit pas masquer celle qui en a un.
+        """
+
+        if not user_ids:
+            return {}
+        statement = (
+            select(sessions.c.user_id, sessions.c.display_name)
+            .where(
+                sessions.c.tenant_id == tenant_id,
+                sessions.c.user_id.in_(user_ids),
+                sessions.c.display_name.is_not(None),
+            )
+            .order_by(sessions.c.created_at.desc())
+        )
+        with self._session_factory() as session:
+            lignes = session.execute(statement).all()
+        noms: dict[str, str] = {}
+        for user_id, display_name in lignes:
+            noms.setdefault(user_id, display_name)
+        return noms

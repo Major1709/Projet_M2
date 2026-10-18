@@ -89,6 +89,44 @@ const ACTIONS: Record<string, string> = {
  * Chaîne vide quand il n'y a rien d'utile à dire — un événement sans ressource ni
  * système se lit alors sous son seul libellé, ce qui vaut mieux qu'une phrase creuse.
  */
+/**
+ * Qui a agi, en tete de phrase.
+ *
+ * « Vous » quand c'est la personne qui regarde — tranché par le serveur, qui compare
+ * des identifiants et non des noms : deux personnes peuvent porter le même.
+ *
+ * Chaîne vide quand le nom est inconnu. L'action se raconte alors sans sujet plutôt
+ * qu'avec un sujet inventé : attribuer une écriture à quelqu'un est précisément ce
+ * qu'un historique ne doit pas faire à la légère.
+ */
+function auteurOf(event: NexiaAuditEvent): string {
+  if (event.byYou) return "Vous";
+  return event.actorName ?? "";
+}
+
+/**
+ * Une décision humaine : « Vous avez approuvé X », « Fanny a refusé X ».
+ *
+ * Sans auteur connu, la forme devient impersonnelle — « Approuvé : X ». Elle dit
+ * toujours ce qui s'est passé, et s'abstient de dire par qui.
+ */
+function decide(
+  event: NexiaAuditEvent,
+  participe: string,
+  nomme: string,
+  quoi: string,
+): string {
+  const objet = nomme || quoi;
+  const suffixe = event.eventType === "ACTION_REVISED" ? " avant écriture" : "";
+  const auteur = auteurOf(event);
+  if (!auteur) {
+    const majuscule = participe.charAt(0).toUpperCase() + participe.slice(1);
+    return `${majuscule} : ${objet}${suffixe}`;
+  }
+  const verbe = auteur === "Vous" ? "avez" : "a";
+  return `${auteur} ${verbe} ${participe} ${objet}${suffixe}`;
+}
+
 export function describe(event: NexiaAuditEvent): string {
   const objet = event.resourceType ? OBJETS[event.resourceType] ?? "un élément" : "";
   const systeme = event.sourceSystem ? SYSTEMS[event.sourceSystem] ?? event.sourceSystem : "";
@@ -103,11 +141,11 @@ export function describe(event: NexiaAuditEvent): string {
     case "ACTION_PROPOSED":
       return nomme ? `Proposition de ${quoi} : ${nomme}` : `Proposition de ${quoi}`;
     case "ACTION_APPROVED":
-      return nomme ? `Vous avez approuvé ${nomme}` : `Vous avez approuvé : ${quoi}`;
+      return decide(event, "approuvé", nomme, quoi);
     case "ACTION_REJECTED":
-      return nomme ? `Vous avez refusé ${nomme}` : `Vous avez refusé : ${quoi}`;
+      return decide(event, "refusé", nomme, quoi);
     case "ACTION_REVISED":
-      return nomme ? `Vous avez corrigé ${nomme} avant écriture` : `Corrigé avant écriture : ${quoi}`;
+      return decide(event, "corrigé", nomme, quoi);
     case "MUTATION_DISPATCHED":
       return nomme ? `Envoi de ${nomme} vers ${systeme || "la source"}` : `Envoi vers ${systeme}`;
     case "MUTATION_EXECUTED":
