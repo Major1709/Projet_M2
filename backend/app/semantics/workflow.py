@@ -93,16 +93,37 @@ class SemanticIndex:
         )
         return embarques, ignores
 
-    def search(self, tenant_id: str, question: str, *, limit: int = 5) -> list[SimilarDocument]:
-        """Documents closest in meaning to a question.
+    def search(
+        self,
+        tenant_id: str,
+        question: str,
+        *,
+        limit: int = 5,
+        max_distance: float | None = None,
+    ) -> list[SimilarDocument]:
+        """Documents closest in meaning to a question, et assez proches pour compter.
 
         The question is embedded as a query, not as a passage: E5 is trained with
         an asymmetric prefix, and using the wrong side still returns a ranking --
         a measurably worse one, with nothing to signal it.
+
+        ``max_distance`` ecarte ce qui est le plus proche sans etre proche. Sans
+        plancher, la recherche rendait toujours le nombre demande : "recette de
+        cuisine au chocolat" posee a un corpus de tickets bancaires rendait trois
+        tickets. Aucune reponse n'en etait fausse -- une piste n'est pas une source,
+        et rien ne se cite sans avoir ete lu -- mais le fil payait ces lignes a
+        chaque tour, et elles poussaient vers des lectures inutiles.
+
+        Aucun plancher par defaut ici : la valeur mesuree vit dans la configuration,
+        parce qu'elle depend du corpus et du modele. Un defaut code en dur serait
+        juste pour ce projet et faux pour le suivant.
         """
 
         vecteur = self._provider.embed([question], kind="query")[0]
-        return self._store.nearest(tenant_id, vecteur, limit=limit)
+        trouves = self._store.nearest(tenant_id, vecteur, limit=limit)
+        if max_distance is None:
+            return trouves
+        return [document for document in trouves if document.distance <= max_distance]
 
     def similar_to(
         self,

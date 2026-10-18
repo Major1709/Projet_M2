@@ -385,3 +385,54 @@ describe("erreurs publiques", () => {
     });
   });
 });
+
+describe("Le nom des sources", () => {
+  /**
+   * L'ecran citait "searchJiraIssuesUsingJql" et "getConfluencePage". Le serveur
+   * rend desormais le titre de ce qui a ete lu ; les recherches, qui ne designent
+   * rien, gardent un libelle lisible.
+   */
+
+  function answerWith(source: Record<string, unknown>) {
+    return {
+      text: "Voici.",
+      sources: [{ source_system: "confluence", tool_name: "getConfluencePage", ...source }],
+    };
+  }
+
+  it("prefere le titre rendu par le serveur", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(answerWith({
+        title: "CDCF K20",
+        url: "https://exemple.test/wiki/pages/8060929",
+      })),
+    );
+
+    const answer = await askQuestion({
+      question: "Le point sur K20",
+      correlationId: "c-1",
+      conversationId: "conv-1",
+    });
+
+    expect(answer.sources[0].title).toBe("CDCF K20");
+    expect(answer.sources[0].url).toBe("https://exemple.test/wiki/pages/8060929");
+  });
+
+  it("traduit le nom de l'outil quand la lecture ne designe rien", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        text: "Voici.",
+        sources: [{ source_system: "jira", tool_name: "searchJiraIssuesUsingJql" }],
+      }),
+    );
+
+    const answer = await askQuestion({
+      question: "Le point sur KAN",
+      correlationId: "c-1",
+      conversationId: "conv-1",
+    });
+
+    expect(answer.sources[0].title).toBe("Recherche Jira");
+    expect(answer.sources[0].url).toBeUndefined();
+  });
+});

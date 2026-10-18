@@ -571,7 +571,17 @@ _CONFLUENCE_CONTRACTS = (
             },
             ("cloudId", "pageId"),
         ),
-        resource_reference_path="/wiki/pages/{pageId}",
+        # "/wiki/pages/{pageId}" n'est pas une route de Confluence Cloud : le lien
+        # cite menait a une page introuvable, constate en cliquant. L'adresse
+        # canonique est "/wiki/spaces/{cle}/pages/{id}/{titre}", qui exige une cle
+        # d'espace dont cette lecture ne dispose pas -- et que seule la reponse du
+        # fournisseur porterait, ce qui ferait d'une citation une cible choisie par
+        # lui.
+        #
+        # viewpage.action est le permalien historique : il se construit a partir du
+        # seul identifiant, donc d'un argument public obligatoire, et Confluence le
+        # redirige vers l'adresse canonique.
+        resource_reference_path="/wiki/pages/viewpage.action?pageId={pageId}",
     ),
     ToolContract(
         server_id="atlassian-rovo",

@@ -26,7 +26,7 @@ from uuid import UUID
 import anyio.to_thread
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.agent.citations import AgentSource, ReadRecord, sources_from
+from app.agent.citations import AgentSource, ReadRecord, sources_from, title_of
 from app.agent.domain import LLMProvider, LLMRequest, ProposedToolCall
 from app.agent.errors import AgentAuditUnavailable
 from app.agent.markup import reduce_markup
@@ -930,6 +930,9 @@ class AgentReadWorkflow:
         max_reads_per_question: int = DEFAULT_MAX_READS_PER_QUESTION,
         semantic_index: SemanticIndex | None = None,
         retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
+        # Au-dela de cette distance, une piste n'en est pas une. ``None`` rend le
+        # comportement d'avant la mesure : tout ce qui remonte est offert.
+        retrieval_max_distance: float | None = None,
     ) -> None:
         self._provider = provider
         self._reads = reads
@@ -938,6 +941,7 @@ class AgentReadWorkflow:
         # answer, and degrading to "reads without leads" is the right degradation.
         self._semantic_index = semantic_index
         self._retrieval_limit = max(1, retrieval_limit)
+        self._retrieval_max_distance = retrieval_max_distance
         # A deployment knob, never a request field: a ceiling the caller chooses is
         # a ceiling the caller raises. Clamped rather than validated, so a
         # misconfigured deployment reads less than it asked for instead of failing
@@ -1764,7 +1768,11 @@ class AgentReadWorkflow:
             # that holds the provenance the envelope must be labelled with -- and
             # an envelope without one is refused, so the label cannot be forgotten.
             wrap_untrusted(observation, origin=self._origin(result.provenance)),
-            ReadRecord(provenance=result.provenance, truncated=truncated),
+            ReadRecord(
+                provenance=result.provenance,
+                truncated=truncated,
+                title=title_of(result),
+            ),
             1,
         )
 
@@ -1792,6 +1800,7 @@ class AgentReadWorkflow:
                     context.tenant_id,
                     question.question,
                     limit=self._retrieval_limit,
+                    max_distance=self._retrieval_max_distance,
                 )
             )
         except Exception:

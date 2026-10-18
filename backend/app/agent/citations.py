@@ -12,11 +12,13 @@ to a caller. What a reader needs is where it came from, when, and whether it was
 whole.
 """
 
+import json
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from app.mcp.domain import MCPReadProvenance, MCPReadSourceSystem
+from app.mcp.domain import MCPReadProvenance, MCPReadResult, MCPReadSourceSystem
 
 
 class AgentSource(BaseModel):
@@ -27,6 +29,16 @@ class AgentSource(BaseModel):
     # ``None`` for a read that enumerates rather than designates -- a project list,
     # a search. Inventing a link for one would cite a page nobody read.
     url: str | None = None
+    # Le nom que la personne reconnaitrait : "CDCF K20", "KAN-39 - Suivi de projet".
+    #
+    # L'ecran citait le nom de l'outil -- "getConfluencePage" -- qui dit comment la
+    # lecture a ete faite et jamais ce qui a ete lu. Un lecteur ne peut pas verifier
+    # une source qu'il ne sait pas nommer.
+    #
+    # Absent quand la lecture ne designe rien, une recherche par exemple : lui donner
+    # le titre de son premier resultat laisserait croire qu'une seule page a ete
+    # consultee.
+    title: str | None = None
     retrieved_at: datetime
     # True when our observation ceiling cut the content before the model saw it, so
     # a reader knows the answer was formed from a fragment.
@@ -47,6 +59,81 @@ class ReadRecord(BaseModel):
 
     provenance: MCPReadProvenance
     truncated: bool = False
+    title: str | None = None
+
+
+# Un titre long n'aide personne dans une liste de sources, et un resume de ticket
+# peut faire une phrase entiere.
+MAX_TITLE_LENGTH = 120
+
+
+def _payload_of(result: MCPReadResult) -> dict[str, Any] | None:
+    """La charge rendue par la lecture, quelle que soit la facon dont elle arrive.
+
+    Les serveurs Atlassian rendent du JSON dans un bloc de texte ; l'adaptateur Figma
+    rend une charge structuree. Les deux chemins sont lus ici plutot qu'a deux
+    endroits qui finiraient par diverger.
+    """
+
+    if isinstance(result.structured_content, dict):
+        return result.structured_content
+    for block in result.content:
+        texte = getattr(block, "text", None)
+        if not isinstance(texte, str):
+            continue
+        try:
+            charge = json.loads(texte)
+        except (ValueError, RecursionError):
+            # Une lecture qui ne rend pas du JSON n'est pas une anomalie : elle n'a
+            # simplement pas de titre a offrir.
+            continue
+        if isinstance(charge, dict):
+            return charge
+    return None
+
+
+def _trimmed(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    texte = " ".join(value.split())
+    if not texte:
+        return None
+    return texte[:MAX_TITLE_LENGTH]
+
+
+def title_of(result: MCPReadResult) -> str | None:
+    """Le nom sous lequel la personne reconnaitrait ce qui a ete lu.
+
+    Tire de la charge et non devine : un titre invente ferait cliquer vers une page
+    dont le nom ne correspond pas. Rien n'est rendu quand la charge ne le porte pas.
+
+    Seules les lectures qui designent une ressource en recoivent un -- celles-la
+    seules portent un ``resource_reference``. Une recherche nommee d'apres son
+    premier resultat laisserait croire qu'une seule page a ete consultee.
+    """
+
+    if result.provenance.resource_reference is None:
+        return None
+    charge = _payload_of(result)
+    if charge is None:
+        return None
+
+    systeme = result.provenance.source_system
+    if systeme is MCPReadSourceSystem.CONFLUENCE:
+        return _trimmed(charge.get("title"))
+    if systeme is MCPReadSourceSystem.JIRA:
+        cle = _trimmed(charge.get("key"))
+        champs = charge.get("fields")
+        resume = _trimmed(champs.get("summary")) if isinstance(champs, dict) else None
+        if cle and resume:
+            return _trimmed(f"{cle} - {resume}")
+        return cle or resume
+    if systeme is MCPReadSourceSystem.FIGMA:
+        fichier = charge.get("file")
+        if isinstance(fichier, dict):
+            return _trimmed(fichier.get("name"))
+        return _trimmed(charge.get("name"))
+    return None
 
 
 def _identity(provenance: MCPReadProvenance) -> tuple[str, ...]:
@@ -84,8 +171,16 @@ def sources_from(records: tuple[ReadRecord, ...]) -> tuple[AgentSource, ...]:
                 url=record.provenance.resource_reference,
                 retrieved_at=record.provenance.retrieved_at,
                 truncated=record.truncated,
+                title=record.title,
             )
             continue
+        changes: dict[str, Any] = {}
         if record.truncated and not existing.truncated:
-            seen[key] = existing.model_copy(update={"truncated": True})
+            changes["truncated"] = True
+        # Un titre peut etre ajoute, jamais remplace : la premiere lecture reste celle
+        # qui nomme la source, et une seconde ne doit pas la renommer sous le lecteur.
+        if existing.title is None and record.title is not None:
+            changes["title"] = record.title
+        if changes:
+            seen[key] = existing.model_copy(update=changes)
     return tuple(seen.values())
