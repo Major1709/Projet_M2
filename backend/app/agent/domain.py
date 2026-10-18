@@ -57,6 +57,14 @@ class LLMResponse(BaseModel):
     tool_calls: tuple[ProposedToolCall, ...] = ()
     model_name: str
     model_version: str | None = None
+    # Vrai quand le modele a propose plus d'appels que le plafond n'en accepte et
+    # que les derniers ont ete laisses de cote.
+    #
+    # Rendu plutot que leve : perdre la question entiere parce qu'un modele s'est
+    # montre trop gourmand d'un tour est une panne la ou une limite suffisait. Le
+    # drapeau existe pour que la boucle le DISE au modele -- des appels silencieusement
+    # disparus le laisseraient attendre des resultats qui ne viendront jamais.
+    tool_calls_truncated: bool = False
 
 
 class LLMProvider(Protocol):

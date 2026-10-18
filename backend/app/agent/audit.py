@@ -94,6 +94,15 @@ class AuditedLLMProvider:
                 context=context,
                 details={
                     "error_code": error.code,
+                    # Laquelle de nos limites a mordu. Trois plafonds tres
+                    # differents rendaient le meme code, et diagnostiquer une panne
+                    # demandait de raisonner par elimination -- ce qui a coute une
+                    # soiree le 18/10/2026.
+                    **(
+                        {"bound": error.bound}
+                        if isinstance(error, LLMResponseTooLarge)
+                        else {}
+                    ),
                     "duration_ms": self._elapsed_ms(started_at),
                 },
             )

@@ -135,6 +135,18 @@ STEP_LIMIT_MESSAGE = (
 # Handed back when the model names a tool the registry does not know. The name is
 # never echoed: it comes from the provider, and repeating it into the transcript
 # would let a compromised one place text of its choosing in our own words.
+# Rendu au modele quand il a propose plus d'appels que le plafond n'en accepte.
+#
+# Les derniers sont laisses de cote plutot que de faire echouer la question : une
+# demande excessive n'est pas une reponse corrompue. Mais elle doit etre DITE --
+# des appels disparus en silence laisseraient le modele attendre des resultats qui
+# ne viendront jamais, et croire que ce qu'il a demande a ete fait.
+TOOL_CALL_LIMIT_NOTICE = (
+    "Tu as propose plus de lectures que je n'en accepte en un seul tour. Seules les "
+    "premieres ont ete faites ; les autres ont ete ignorees. Demande les suivantes "
+    "au tour suivant si tu en as encore besoin."
+)
+
 UNKNOWN_TOOL_NOTICE = (
     "Lecture refusee : cet outil n'existe pas. Choisis un outil de la liste qui "
     "t'a ete fournie, ou reponds avec ce que tu as deja lu."
@@ -1134,6 +1146,8 @@ class AgentReadWorkflow:
             # passed the adapter's checks, and nothing the provider sent that we
             # never looked at.
             messages.append(self._assistant_turn(response.text, response.tool_calls))
+            if response.tool_calls_truncated:
+                messages.append({"role": "system", "content": TOOL_CALL_LIMIT_NOTICE})
 
             # Une ecriture arrete la boucle, immediatement et avant toute lecture de
             # ce tour. Continuer laisserait le modele enchainer plusieurs ecritures
@@ -1970,6 +1984,7 @@ __all__ = [
     "READ_LIMIT_NOTICE",
     "REPEATED_READ_NOTICE",
     "STEP_LIMIT_MESSAGE",
+    "TOOL_CALL_LIMIT_NOTICE",
     "SYSTEM_PROMPT",
     "UNKNOWN_TOOL_NOTICE",
     "AgentAnswer",

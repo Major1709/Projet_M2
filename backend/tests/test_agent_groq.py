@@ -688,7 +688,6 @@ async def test_an_unterminated_reasoning_block_takes_everything_after_it(tmp_pat
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("too_many_calls", None),
         ("name_too_long", None),
         ("arguments_too_long", None),
     ],
@@ -700,15 +699,7 @@ async def test_each_declared_tool_bound_is_enforced(
     value: None,
     anyio_backend: str,
 ) -> None:
-    call = {
-        "id": "call_1",
-        "type": "function",
-        "function": {"name": "getJiraIssue", "arguments": "{}"},
-    }
-    if field == "too_many_calls":
-        calls = [call] * (MAX_TOOL_CALLS + 1)
-        expected: type[Exception] = LLMResponseTooLarge
-    elif field == "name_too_long":
+    if field == "name_too_long":
         long_name = "g" * (MAX_TOOL_NAME_CHARACTERS + 1)
         calls = [
             {
@@ -717,7 +708,7 @@ async def test_each_declared_tool_bound_is_enforced(
                 "function": {"name": long_name, "arguments": "{}"},
             }
         ]
-        expected = LLMInvalidResponse
+        expected: type[Exception] = LLMInvalidResponse
     else:
         long_arguments = '{"k":"' + "v" * MAX_TOOL_ARGUMENTS_CHARACTERS + '"}'
         calls = [
@@ -796,3 +787,44 @@ async def test_the_served_model_is_reported_apart_from_the_requested_one(
     # A silent substitution stays visible rather than being assumed away.
     assert response.model_version == "qwen/qwen3.6-27b-substituted"
     assert response.text == "Deux tickets sont ouverts."
+
+@pytest.mark.anyio
+async def test_too_many_calls_are_trimmed_instead_of_losing_the_question(
+    tmp_path: Path,
+) -> None:
+    """Un modele qui propose douze lectures d'un coup fait une demande excessive, pas
+    une reponse corrompue. Refuser coutait la question entiere ; n'en garder que le
+    plafond coute un tour de plus."""
+
+    call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "getJiraIssue", "arguments": "{}"},
+    }
+    provider = provider_for(
+        tmp_path,
+        json_handler(completion(text="", tool_calls=[call] * (MAX_TOOL_CALLS + 4))),
+    )
+
+    response = await provider.generate(request=REQUEST, context=CONTEXT)
+
+    assert len(response.tool_calls) == MAX_TOOL_CALLS
+    # Le drapeau existe pour que la boucle le DISE : des appels silencieusement
+    # disparus laisseraient le modele attendre des resultats qui ne viendront pas.
+    assert response.tool_calls_truncated is True
+
+
+@pytest.mark.anyio
+async def test_a_response_within_the_bound_is_not_marked_as_trimmed(
+    tmp_path: Path,
+) -> None:
+    call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "getJiraIssue", "arguments": "{}"},
+    }
+    provider = provider_for(tmp_path, json_handler(completion(text="", tool_calls=[call])))
+
+    response = await provider.generate(request=REQUEST, context=CONTEXT)
+
+    assert response.tool_calls_truncated is False

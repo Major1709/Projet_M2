@@ -121,7 +121,7 @@ def _text_of(message: dict[str, Any]) -> str:
     if not isinstance(content, str):
         raise LLMInvalidResponse()
     if len(content) > MAX_TEXT_CHARACTERS:
-        raise LLMResponseTooLarge()
+        raise LLMResponseTooLarge("text")
     return _without_reasoning(content)
 
 
@@ -149,8 +149,12 @@ def _tool_calls_of(
     message: dict[str, Any],
     allowed_tool_names: tuple[str, ...],
     provider_label: str = "",
-) -> tuple[ProposedToolCall, ...]:
+) -> tuple[tuple[ProposedToolCall, ...], bool]:
     """Rebuild the model's tool calls, treating every field as untrusted input.
+
+    Rend aussi si des appels ont ete laisses de cote, pour que la boucle puisse le
+    dire au modele plutot que de le laisser attendre des resultats qui ne viendront
+    pas.
 
     ``allowed_tool_names`` is a signal here, not a gate: a name that was never
     offered is noted and passed on, because the registry further down is the
@@ -161,11 +165,14 @@ def _tool_calls_of(
 
     raw_calls = message.get("tool_calls")
     if raw_calls is None:
-        return ()
+        return ((), False)
     if not isinstance(raw_calls, list):
         raise LLMInvalidResponse()
-    if len(raw_calls) > MAX_TOOL_CALLS:
-        raise LLMResponseTooLarge()
+    # Tronque plutot que refuse. Un modele qui propose douze lectures d'un coup fait
+    # une demande excessive, pas une reponse corrompue : n'en garder que le plafond
+    # coute un tour de plus, la refuser coutait la question entiere.
+    tronque = len(raw_calls) > MAX_TOOL_CALLS
+    raw_calls = raw_calls[:MAX_TOOL_CALLS]
 
     calls: list[ProposedToolCall] = []
     for raw_call in raw_calls:
@@ -218,13 +225,13 @@ def _tool_calls_of(
             if not isinstance(continuation, dict):
                 raise LLMInvalidResponse()
             if len(json.dumps(continuation)) > MAX_TOOL_CONTINUATION_CHARACTERS:
-                raise LLMResponseTooLarge()
+                raise LLMResponseTooLarge("tool_continuation")
 
         raw_arguments = function.get("arguments", "{}")
         if not isinstance(raw_arguments, str):
             raise LLMInvalidResponse()
         if len(raw_arguments) > MAX_TOOL_ARGUMENTS_CHARACTERS:
-            raise LLMResponseTooLarge()
+            raise LLMResponseTooLarge("tool_arguments")
         try:
             arguments = json.loads(raw_arguments or "{}")
         except (ValueError, RecursionError) as error:
@@ -249,7 +256,7 @@ def _tool_calls_of(
                 provider_continuation=continuation,
             )
         )
-    return tuple(calls)
+    return (tuple(calls), tronque)
 
 
 class OpenAICompatibleLLMProvider:
@@ -430,7 +437,7 @@ class OpenAICompatibleLLMProvider:
             # The shared guards speak the MCP taxonomy because that is where they were
             # extracted from. Translating at this boundary keeps one implementation of
             # the byte ceiling while letting the orchestration layer see one taxonomy.
-            raise LLMResponseTooLarge() from error
+            raise LLMResponseTooLarge("wire_bytes") from error
         except MCPInvalidResponse as error:
             raise LLMInvalidResponse() from error
         except httpx2.DecodingError as error:
@@ -506,12 +513,14 @@ class OpenAICompatibleLLMProvider:
             # whole answer, because a truncated tool call or a half-written citation
             # is worse than an explicit failure. On a reasoning model this is most
             # often the thinking having consumed the budget before the answer began.
-            raise LLMResponseTooLarge()
+            raise LLMResponseTooLarge("completion_budget")
 
         served_model = document.get("model")
+        appels, tronque = _tool_calls_of(message, allowed_tool_names, self.PROVIDER_LABEL)
         return LLMResponse(
             text=_text_of(message),
-            tool_calls=_tool_calls_of(message, allowed_tool_names, self.PROVIDER_LABEL),
+            tool_calls=appels,
+            tool_calls_truncated=tronque,
             model_name=self._model,
             # What the provider says it served, kept apart from what we asked for so a
             # silent substitution is visible rather than assumed away.

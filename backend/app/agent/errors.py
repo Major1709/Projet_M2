@@ -92,5 +92,17 @@ class LLMInvalidResponse(LLMError):
 
 
 class LLMResponseTooLarge(LLMError):
+    """Une de NOS limites a refuse la reponse, et laquelle.
+
+    Le code seul ne le disait pas : trois plafonds tres differents -- le texte, le
+    nombre d'appels d'outils, la taille de leurs arguments -- rendaient le meme, et
+    diagnostiquer une panne demandait de raisonner par elimination. ``bound`` ne
+    sort jamais vers l'appelant ; il part dans la piste d'audit, ou on le cherche.
+    """
+
     code = "LLM_RESPONSE_TOO_LARGE"
     safe_message = "The language model response exceeds the allowed size"
+
+    def __init__(self, bound: str = "unspecified") -> None:
+        super().__init__()
+        self.bound = bound
