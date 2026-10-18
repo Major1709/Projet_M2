@@ -392,6 +392,8 @@ def _build_agent(
         # everything it caused share one trail.
         audit_sink=audit_sink,
         semantic_index=semantic_index,
+        retrieval_limit=settings.retrieval_limit,
+        retrieval_max_distance=settings.retrieval_max_distance,
     )
 
 

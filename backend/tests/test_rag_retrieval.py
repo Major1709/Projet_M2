@@ -54,12 +54,18 @@ class StubIndex:
         self._trouves = trouves or []
         self._explode = explode
         self.demandes: list[tuple[str, str, int]] = []
+        # Le plancher reellement transmis, pour verifier qu'il ne se perd pas en
+        # route : un seuil configure mais jamais passe ne filtrerait rien.
+        self.planchers: list[float | None] = []
 
-    def search(self, tenant_id, question, *, limit):
+    def search(self, tenant_id, question, *, limit, max_distance=None):
         self.demandes.append((tenant_id, question, limit))
+        self.planchers.append(max_distance)
         if self._explode:
             raise RuntimeError("the model would not load")
-        return self._trouves
+        if max_distance is None:
+            return self._trouves
+        return [d for d in self._trouves if d.distance <= max_distance]
 
 
 def piste(external_id: str, distance: float = 0.12) -> SimilarDocument:
@@ -79,12 +85,18 @@ class RefusingReads:
         raise AssertionError("no read was expected in this test")
 
 
-def workflow_for(index=None, audit=None, provider=None) -> AgentReadWorkflow:
+def workflow_for(
+    index=None,
+    audit=None,
+    provider=None,
+    max_distance: float | None = None,
+) -> AgentReadWorkflow:
     return AgentReadWorkflow(
         provider=provider or RecordingProvider(),
         reads=RefusingReads(),
         audit_sink=audit or CollectingAudit(),
         semantic_index=index,
+        retrieval_max_distance=max_distance,
     )
 
 
@@ -240,3 +252,74 @@ async def test_the_lead_count_is_the_deployment_s_choice_not_the_question_s() ->
 
     _, _, limit = index.demandes[0]
     assert limit == 3
+
+
+# --- Le plancher de pertinence ------------------------------------------------------
+#
+# L'index rendait toujours le nombre demande, quelle que soit la distance : "recette
+# de cuisine au chocolat", posee au corpus de tickets bancaires, rendait trois
+# tickets. Aucune reponse n'en devenait fausse -- une piste n'est pas une source, et
+# rien ne se cite sans avoir ete lu -- mais le fil payait ces lignes a chaque tour, et
+# elles poussaient vers des lectures inutiles.
+#
+# Le seuil est mesure et non choisi. Sur les 14 requetes de reference et cinq
+# questions etrangeres au corpus, le 18/10/2026 : documents attendus entre 0,118 et
+# 0,182, premier resultat hors sujet entre 0,204 et 0,245. 0,19 tombe dans l'ecart.
+
+
+async def test_a_lead_too_far_is_not_offered() -> None:
+    provider = RecordingProvider()
+    index = StubIndex([piste("KAN-2", 0.12), piste("KAN-99", 0.24)])
+
+    await workflow_for(index=index, provider=provider, max_distance=0.19).answer(
+        question=question(), context=context()
+    )
+
+    injecte = next(
+        m for m in provider.transcripts[0] if m["content"].startswith(RETRIEVAL_HEADER)
+    )
+    assert "KAN-2" in injecte["content"]
+    assert "KAN-99" not in injecte["content"]
+
+
+async def test_a_question_with_no_close_document_gets_no_shortlist_at_all() -> None:
+    """Et pas un en-tete sans pistes dessous : il occuperait le fil pour ne rien dire."""
+
+    provider = RecordingProvider()
+    index = StubIndex([piste("KAN-99", 0.24)])
+
+    await workflow_for(index=index, provider=provider, max_distance=0.19).answer(
+        question=question(), context=context()
+    )
+
+    assert not any(
+        m["content"].startswith(RETRIEVAL_HEADER) for m in provider.transcripts[0]
+    )
+
+
+async def test_the_floor_reaches_the_index_instead_of_being_kept_here() -> None:
+    """Un seuil configure mais jamais transmis ne filtrerait rien."""
+
+    index = StubIndex([piste("KAN-2")])
+
+    await workflow_for(index=index, max_distance=0.19).answer(
+        question=question(), context=context()
+    )
+
+    assert index.planchers == [0.19]
+
+
+async def test_without_a_floor_everything_is_offered_as_before() -> None:
+    """Un deploiement qui n'a pas mesure son corpus garde le comportement d'avant."""
+
+    provider = RecordingProvider()
+    index = StubIndex([piste("KAN-2", 0.12), piste("KAN-99", 0.9)])
+
+    await workflow_for(index=index, provider=provider).answer(
+        question=question(), context=context()
+    )
+
+    injecte = next(
+        m for m in provider.transcripts[0] if m["content"].startswith(RETRIEVAL_HEADER)
+    )
+    assert "KAN-2" in injecte["content"] and "KAN-99" in injecte["content"]

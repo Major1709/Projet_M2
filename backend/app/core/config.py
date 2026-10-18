@@ -123,6 +123,22 @@ class Settings(BaseSettings):
     # How many leads a question is offered. Prepended to every step's transcript,
     # so each extra one is paid for again at every turn.
     retrieval_limit: int = Field(default=5, ge=1, le=20)
+    # Au-dela de cette distance cosinus, une piste n'en est pas une.
+    #
+    # L'index rendait toujours le nombre demande, quelle que soit la distance : une
+    # question hors sujet recevait des pistes hors sujet. Mesure sur les 14 requetes
+    # de reference et cinq questions etrangeres au corpus, le 18/10/2026 :
+    #
+    #   documents attendus   : 0,118 a 0,182
+    #   premier hors-sujet   : 0,204 a 0,245
+    #
+    # L'ecart est franc, et 0,19 tombe dedans : il garde les 20 documents attendus
+    # sur 20 et ecarte les 5 questions etrangeres sur 5. Plus haut, 0,21 laisse
+    # deja passer du bruit ; plus bas, 0,18 perd deux documents justes.
+    #
+    # Reglable parce qu'il depend du corpus et du modele : un autre projet, ou un
+    # autre modele d'embeddings, deplacerait ces deux populations.
+    retrieval_max_distance: float = Field(default=0.19, gt=0.0, le=2.0)
     # The JQL the reindex route walks. A setting rather than a request field: a
     # caller who chooses the query chooses what enters the tenant's index.
     reindex_jql: str = Field(default="ORDER BY created DESC", min_length=1, max_length=4_000)

@@ -930,6 +930,9 @@ class AgentReadWorkflow:
         max_reads_per_question: int = DEFAULT_MAX_READS_PER_QUESTION,
         semantic_index: SemanticIndex | None = None,
         retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
+        # Au-dela de cette distance, une piste n'en est pas une. ``None`` rend le
+        # comportement d'avant la mesure : tout ce qui remonte est offert.
+        retrieval_max_distance: float | None = None,
     ) -> None:
         self._provider = provider
         self._reads = reads
@@ -938,6 +941,7 @@ class AgentReadWorkflow:
         # answer, and degrading to "reads without leads" is the right degradation.
         self._semantic_index = semantic_index
         self._retrieval_limit = max(1, retrieval_limit)
+        self._retrieval_max_distance = retrieval_max_distance
         # A deployment knob, never a request field: a ceiling the caller chooses is
         # a ceiling the caller raises. Clamped rather than validated, so a
         # misconfigured deployment reads less than it asked for instead of failing
@@ -1796,6 +1800,7 @@ class AgentReadWorkflow:
                     context.tenant_id,
                     question.question,
                     limit=self._retrieval_limit,
+                    max_distance=self._retrieval_max_distance,
                 )
             )
         except Exception:
